@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Twitch Streak Saver",
+  "version": "0.2.0",
+  "description": "Manage Twitch tabs, mute app-opened players, and report stream availability to Twitch Streak Saver.",
+  "permissions": ["nativeMessaging", "storage", "tabs"],
+  "host_permissions": ["https://www.twitch.tv/*", "https://player.twitch.tv/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.twitch.tv/*", "https://player.twitch.tv/*"],
+      "js": ["twitch_tabs.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

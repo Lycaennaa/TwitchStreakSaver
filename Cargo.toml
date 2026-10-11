@@ -1,0 +1,30 @@
+[package]
+name = "twitch-streak-saver"
+version = "0.1.0"
+edition = "2021"
+description = "A cross-platform Twitch watch queue desktop app"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+url = "2"
+webbrowser = "1"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+
+directories = "6"
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+winreg = "0.55"
+
+[dev-dependencies]
+ron = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
