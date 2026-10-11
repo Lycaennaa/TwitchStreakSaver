@@ -1,3 +1,4 @@
+use chrono::Local;
 use eframe::egui;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,39 +123,46 @@ fn active_external_stream_count(
         })
 }
 
-#[derive(Clone)]
-struct StreakNotice {
-    channel_name: String,
-    points_earned: u64,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivityLogEntry {
+    time: String,
+    streamer: String,
+    event: String,
 }
 
-#[derive(Clone)]
-enum PointsNotice {
-    TurnCompleted {
-        channel_name: String,
-    },
-    Earned {
-        channel_name: String,
-        points: u64,
-        reason_code: String,
-        balance: u64,
-    },
-    Spent {
-        channel_name: String,
-        balance: u64,
-    },
-    ClaimAvailable {
-        channel_name: String,
-    },
-}
+const MAX_ACTIVITY_LOG_ENTRIES: usize = 200;
 
-const MAX_QUEUED_ALERTS: usize = 8;
-
-fn enqueue_points_notice(notices: &mut VecDeque<PointsNotice>, notice: PointsNotice) {
-    if notices.len() >= MAX_QUEUED_ALERTS {
-        notices.pop_front();
+fn push_activity_log(log: &mut VecDeque<ActivityLogEntry>, entry: ActivityLogEntry) {
+    if log.len() >= MAX_ACTIVITY_LOG_ENTRIES {
+        log.pop_back();
     }
-    notices.push_back(notice);
+    log.push_front(entry);
+}
+
+fn record_activity(log: &mut VecDeque<ActivityLogEntry>, streamer: String, event: String) {
+    push_activity_log(
+        log,
+        ActivityLogEntry {
+            time: Local::now().format("%H:%M:%S").to_string(),
+            streamer,
+            event,
+        },
+    );
+}
+
+fn record_claim_available_once(
+    available_claim_channels: &mut HashSet<String>,
+    log: &mut VecDeque<ActivityLogEntry>,
+    channel_id: String,
+    streamer: String,
+) {
+    if available_claim_channels.insert(channel_id) {
+        record_activity(
+            log,
+            streamer,
+            "Bonus available to claim manually on Twitch.".to_owned(),
+        );
+    }
 }
 
 fn followed_channel_search_indices(channels: &[FollowedChannel], query: &str) -> Vec<usize> {
@@ -249,10 +257,9 @@ struct Dashboard {
     pubsub_error: Option<String>,
     streak_completed: HashMap<String, u64>,
     notified_streak_channels: HashSet<String>,
-    streak_notices: VecDeque<StreakNotice>,
+    activity_log: VecDeque<ActivityLogEntry>,
     channel_points_balances: HashMap<String, u64>,
     available_claim_channels: HashSet<String>,
-    points_notices: VecDeque<PointsNotice>,
     queue_planner: QueuePlanner,
     points_rotation: PointsRotation,
     manual_open_channels: HashSet<String>,
@@ -304,10 +311,9 @@ impl Dashboard {
             pubsub_error: None,
             streak_completed: HashMap::new(),
             notified_streak_channels: HashSet::new(),
-            streak_notices: VecDeque::new(),
+            activity_log: VecDeque::new(),
             channel_points_balances: HashMap::new(),
             available_claim_channels: HashSet::new(),
-            points_notices: VecDeque::new(),
             queue_planner: QueuePlanner::default(),
             points_rotation: PointsRotation::default(),
             manual_open_channels: HashSet::new(),

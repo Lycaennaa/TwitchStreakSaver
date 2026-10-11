@@ -144,13 +144,11 @@ impl Dashboard {
                                 .record_streak_completed(channel_id.clone());
                         }
                         if self.notified_streak_channels.insert(channel_id) {
-                            if self.streak_notices.len() >= MAX_QUEUED_ALERTS {
-                                self.streak_notices.pop_front();
-                            }
-                            self.streak_notices.push_back(StreakNotice {
+                            record_activity(
+                                &mut self.activity_log,
                                 channel_name,
-                                points_earned,
-                            });
+                                format!("Watch Streak completed; reward: {points_earned} points."),
+                            );
                         }
                     }
                 }
@@ -177,14 +175,11 @@ impl Dashboard {
                         self.available_claim_channels.remove(&channel_id);
                     }
                     if balance_changed && reason_code != "WATCH_STREAK" {
-                        enqueue_points_notice(
-                            &mut self.points_notices,
-                            PointsNotice::Earned {
-                                channel_name,
-                                points: points_earned,
-                                reason_code,
-                                balance,
-                            },
+                        record_activity(&mut self.activity_log,
+                            channel_name,
+                            format!(
+                                "Earned {points_earned} points ({reason_code}); new balance: {balance}."
+                            ),
                         );
                     }
                 }
@@ -202,12 +197,10 @@ impl Dashboard {
                         continue;
                     };
                     if self.channel_points_balances.insert(channel_id, balance) != Some(balance) {
-                        enqueue_points_notice(
-                            &mut self.points_notices,
-                            PointsNotice::Spent {
-                                channel_name,
-                                balance,
-                            },
+                        record_activity(
+                            &mut self.activity_log,
+                            channel_name,
+                            format!("Points spent; new balance: {balance}."),
                         );
                     }
                 }
@@ -223,12 +216,12 @@ impl Dashboard {
                     else {
                         continue;
                     };
-                    if self.available_claim_channels.insert(channel_id) {
-                        enqueue_points_notice(
-                            &mut self.points_notices,
-                            PointsNotice::ClaimAvailable { channel_name },
-                        );
-                    }
+                    record_claim_available_once(
+                        &mut self.available_claim_channels,
+                        &mut self.activity_log,
+                        channel_id,
+                        channel_name,
+                    );
                 }
                 TwitchUpdate::Warning {
                     generation,

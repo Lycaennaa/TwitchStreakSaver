@@ -72,104 +72,62 @@ impl eframe::App for Dashboard {
         });
 
         egui::CentralPanel::default().show(context, |ui| {
-            ui.add_space(8.0);
-            ui.heading("Your watch list");
-            ui.label("Choose Streaks, Channel Points, or both for each followed channel.");
-            ui.add_space(12.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(8.0);
+                ui.heading("Your watch list");
+                ui.label("Choose Streaks, Channel Points, or both for each followed channel.");
+                ui.add_space(12.0);
 
-            ui.columns(2, |columns| {
-                self.channel_list(&mut columns[0]);
-                self.watch_settings(&mut columns[1]);
-            });
+                ui.columns(2, |columns| {
+                    self.channel_list(&mut columns[0]);
+                    self.watch_settings(&mut columns[1]);
+                });
 
-            ui.add_space(8.0);
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Selected live Streaks run first. Selected live Points streams open automatically after the Streak queue; a turn needs 16 eligible minutes with playing video, ready chat UI, and an available app slot.",
-                    )
-                    .weak(),
-                );
+                ui.add_space(8.0);
+                self.activity_log_panel(ui);
+                if let Some(error) = &self.connection_error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, format!("Twitch: {error}"));
+                }
             });
-            if let Some(error) = &self.connection_error {
-                ui.colored_label(egui::Color32::LIGHT_RED, format!("Twitch: {error}"));
-            }
         });
-        if let Some(notice) = self.streak_notices.front().cloned() {
-            let mut is_open = true;
-            let mut dismiss = false;
-            egui::Window::new("Watch Streak detected")
-                .id(egui::Id::new("watch_streak_event_dialog"))
-                .order(egui::Order::Foreground)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut is_open)
-                .show(context, |ui| {
-                    ui.heading("Streak reward detected");
-                    ui.label(format!("{} completed a Watch Streak.", notice.channel_name));
-                    ui.label(format!("Reward: {} points", notice.points_earned));
-                    ui.add_space(6.0);
-                    dismiss = ui.button("Dismiss").clicked();
-                });
-            if dismiss || !is_open {
-                self.streak_notices.pop_front();
-            }
-        } else if let Some(notice) = self.points_notices.front().cloned() {
-            let (title, message) = match notice {
-                PointsNotice::TurnCompleted { channel_name } => (
-                    "Points rotation complete",
-                    format!(
-                        "{channel_name} completed an eligible 16-minute Points turn. The Points queue has advanced."
-                    ),
-                ),
-                PointsNotice::Earned {
-                    channel_name,
-                    points,
-                    reason_code,
-                    balance,
-                } => (
-                    "Channel Points earned",
-                    format!(
-                        "{channel_name} earned {points} points ({reason_code}). New balance: {balance}."
-                    ),
-                ),
-                PointsNotice::Spent {
-                    channel_name,
-                    balance,
-                } => (
-                    "Channel Points spent",
-                    format!("{channel_name} points balance is now {balance}."),
-                ),
-                PointsNotice::ClaimAvailable { channel_name } => (
-                    "Channel Points bonus available",
-                    format!("A bonus is ready to claim on {channel_name}. Claim it manually on Twitch."),
-                ),
-            };
-            let mut is_open = true;
-            let mut dismiss = false;
-            egui::Window::new(title)
-                .id(egui::Id::new("points_event_dialog"))
-                .order(egui::Order::Foreground)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut is_open)
-                .show(context, |ui| {
-                    ui.heading(title);
-                    ui.label(message);
-                    ui.add_space(6.0);
-                    dismiss = ui.button("Dismiss").clicked();
-                });
-            if dismiss || !is_open {
-                self.points_notices.pop_front();
-            }
-        }
     }
 }
 
 impl Dashboard {
+    fn activity_log_panel(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Activity log");
+            ui.label(
+                egui::RichText::new("Local time · newest first")
+                    .small()
+                    .weak(),
+            );
+        });
+        if self.activity_log.is_empty() {
+            ui.label("Point and Streak events will appear here.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .max_height(76.0)
+            .show(ui, |ui| {
+                egui::Grid::new("activity_log_entries")
+                    .num_columns(3)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Time");
+                        ui.strong("Streamer");
+                        ui.strong("Event");
+                        ui.end_row();
+                        for entry in &self.activity_log {
+                            ui.label(egui::RichText::new(&entry.time).monospace());
+                            ui.label(&entry.streamer);
+                            ui.label(&entry.event);
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
     fn watch_settings(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.strong("Watch strategy");

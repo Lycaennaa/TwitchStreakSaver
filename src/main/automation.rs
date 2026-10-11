@@ -102,9 +102,11 @@ impl Dashboard {
                                 .find(|channel| channel.id == channel_id)
                                 .map(|channel| channel.display_name.clone())
                             {
-                                enqueue_points_notice(
-                                    &mut self.points_notices,
-                                    PointsNotice::TurnCompleted { channel_name },
+                                record_activity(
+                                    &mut self.activity_log,
+                                    channel_name,
+                                    "Points turn completed; queue advanced after 16 eligible minutes."
+                                        .to_owned(),
                                 );
                             }
                         }
