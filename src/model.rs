@@ -71,15 +71,6 @@ pub enum TwitchTabLayout {
     RegularWebsite,
 }
 
-impl TwitchTabLayout {
-    pub const fn as_protocol_value(self) -> &'static str {
-        match self {
-            Self::SeparatePlayerChat => "separate_player_chat",
-            Self::RegularWebsite => "regular_website",
-        }
-    }
-}
-
 impl Default for TwitchTabLayout {
     fn default() -> Self {
         Self::SeparatePlayerChat
@@ -168,18 +159,6 @@ mod tests {
         assert!(preferences.auto_start_on_launch);
         assert_eq!(preferences.tab_layout, TwitchTabLayout::SeparatePlayerChat);
         assert!(!preferences.wake_browser_on_open);
-    }
-
-    #[test]
-    fn tab_layout_matches_extension_protocol_values() {
-        assert_eq!(
-            TwitchTabLayout::SeparatePlayerChat.as_protocol_value(),
-            "separate_player_chat",
-        );
-        assert_eq!(
-            TwitchTabLayout::RegularWebsite.as_protocol_value(),
-            "regular_website",
-        );
     }
 
     #[test]

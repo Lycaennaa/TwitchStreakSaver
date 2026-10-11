@@ -114,18 +114,12 @@ pub fn parse_pubsub_frame(
         .message
         .ok_or(PubSubParseError::MissingField("data.message"))?;
     let message: PointsMessage = serde_json::from_str(&message_json)?;
-    if !["points-earned", "points-spent", "claim-available"]
-        .contains(&message.message_type.as_str())
-    {
-        return Ok(None);
-    }
-
-    let data = message
-        .data
-        .ok_or(PubSubParseError::MissingField("message.data"))?;
     let observed_event =
         match message.message_type.as_str() {
             "points-earned" => {
+                let data = message
+                    .data
+                    .ok_or(PubSubParseError::MissingField("message.data"))?;
                 let point_gain = data
                     .point_gain
                     .ok_or(PubSubParseError::MissingField("message.data.point_gain"))?;
@@ -150,6 +144,9 @@ pub fn parse_pubsub_frame(
                 }
             }
             "points-spent" => {
+                let data = message
+                    .data
+                    .ok_or(PubSubParseError::MissingField("message.data"))?;
                 let balance = data
                     .balance
                     .ok_or(PubSubParseError::MissingField("message.data.balance"))?;
@@ -163,6 +160,9 @@ pub fn parse_pubsub_frame(
                 }
             }
             "claim-available" => {
+                let data = message
+                    .data
+                    .ok_or(PubSubParseError::MissingField("message.data"))?;
                 let claim = data
                     .claim
                     .ok_or(PubSubParseError::MissingField("message.data.claim"))?;
@@ -279,6 +279,15 @@ mod tests {
         let message = serde_json::json!({"type": "prediction-event", "data": {}}).to_string();
         assert_eq!(
             parse_pubsub_frame(&frame("community-points-user-v1.123", &message)).unwrap(),
+            None
+        );
+        let unknown_without_data = serde_json::json!({"type": "prediction-event"}).to_string();
+        assert_eq!(
+            parse_pubsub_frame(&frame(
+                "community-points-user-v1.123",
+                &unknown_without_data
+            ))
+            .unwrap(),
             None
         );
         assert_eq!(parse_pubsub_frame(r#"{"type":"PONG"}"#).unwrap(), None);

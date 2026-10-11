@@ -1,9 +1,7 @@
 use std::io;
 use std::net::{Shutdown, TcpStream};
 use std::thread;
-use twitch_streak_saver::browser_bridge::{read_message, write_message};
-
-const BRIDGE_ADDRESS: &str = "127.0.0.1:43127";
+use twitch_streak_saver::browser_bridge::{read_message, write_message, BRIDGE_ADDRESS};
 
 fn main() {
     if let Err(error) = run() {
@@ -23,7 +21,7 @@ fn run() -> io::Result<()> {
         let mut input = stdin.lock();
         let mut app_writer = native_to_app_thread;
         loop {
-            match read_message(&mut input) {
+            match read_message::<serde_json::Value>(&mut input) {
                 Ok(Some(message)) => {
                     if let Err(error) = write_message(&mut app_writer, &message) {
                         eprintln!("Could not forward Chrome message: {error}");
@@ -43,7 +41,7 @@ fn run() -> io::Result<()> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
     let result = loop {
-        match read_message(&mut app_reader)? {
+        match read_message::<serde_json::Value>(&mut app_reader)? {
             Some(message) => write_message(&mut output, &message)?,
             None => break Ok(()),
         }

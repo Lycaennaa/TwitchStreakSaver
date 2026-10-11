@@ -1,9 +1,10 @@
 use crate::model::{ChannelSelection, SchedulingMode};
 use std::time::Duration;
+const MAX_APP_STREAMS: usize = SchedulingMode::OpenAll.app_stream_limit();
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QueueCandidate {
-    pub channel_id: String,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueCandidate<'a> {
+    pub channel_id: &'a str,
     pub is_live: bool,
     pub selection: ChannelSelection,
     pub streak_completed_for_live: bool,
@@ -20,9 +21,6 @@ pub enum QueueStage {
 pub struct QueuePlan {
     pub stage: QueueStage,
     pub channel_ids: Vec<String>,
-    pub waiting_count: usize,
-    pub app_capacity: usize,
-    pub over_capacity: bool,
 }
 
 #[derive(Default)]
@@ -40,50 +38,55 @@ impl QueuePlanner {
         self.last_points_turn_finished = Some(channel_id.into());
     }
 
-    pub fn plan(
+    pub fn plan<'a>(
         &self,
-        channels: &[QueueCandidate],
+        candidates: impl Iterator<Item = QueueCandidate<'a>>,
         mode: SchedulingMode,
         manual_active_streams: usize,
     ) -> QueuePlan {
-        let app_capacity = match mode {
-            SchedulingMode::Earn => 2usize.saturating_sub(manual_active_streams),
-            SchedulingMode::OpenAll => mode
-                .app_stream_limit()
-                .saturating_sub(manual_active_streams),
-        };
+        let app_capacity = mode
+            .app_stream_limit()
+            .saturating_sub(manual_active_streams);
+        let mut streak_candidates = CandidateRotation::default();
+        let mut points_candidates = CandidateRotation::default();
+        let mut has_streak_candidates = false;
+        let mut has_points_candidates = false;
 
-        let streak_candidates = channels
-            .iter()
-            .filter(|channel| {
-                channel.is_live && channel.selection.streak && !channel.streak_completed_for_live
-            })
-            .collect::<Vec<_>>();
-        if !streak_candidates.is_empty() {
-            let candidates = rotate_after(streak_candidates, self.last_streak_completed.as_deref());
-            return build_plan(
-                QueueStage::Streak,
-                candidates,
-                app_capacity,
-                manual_active_streams,
-            );
+        for candidate in candidates {
+            if is_eligible(QueueStage::Streak, &candidate) {
+                has_streak_candidates = true;
+                streak_candidates.observe(
+                    candidate.channel_id,
+                    self.last_streak_completed.as_deref(),
+                    app_capacity,
+                );
+            }
+            if is_eligible(QueueStage::Points, &candidate) {
+                has_points_candidates = true;
+                points_candidates.observe(
+                    candidate.channel_id,
+                    self.last_points_turn_finished.as_deref(),
+                    app_capacity,
+                );
+            }
         }
 
-        let points_candidates = channels
-            .iter()
-            .filter(|channel| channel.is_live && channel.selection.points)
-            .collect::<Vec<_>>();
-        let candidates = rotate_after(points_candidates, self.last_points_turn_finished.as_deref());
-        build_plan(
-            if candidates.is_empty() {
-                QueueStage::Idle
-            } else {
-                QueueStage::Points
-            },
-            candidates,
-            app_capacity,
-            manual_active_streams,
-        )
+        if has_streak_candidates {
+            QueuePlan {
+                stage: QueueStage::Streak,
+                channel_ids: streak_candidates.into_channel_ids(app_capacity),
+            }
+        } else if has_points_candidates {
+            QueuePlan {
+                stage: QueueStage::Points,
+                channel_ids: points_candidates.into_channel_ids(app_capacity),
+            }
+        } else {
+            QueuePlan {
+                stage: QueueStage::Idle,
+                channel_ids: Vec::new(),
+            }
+        }
     }
 }
 pub const POINTS_TURN_DURATION: Duration = Duration::from_secs(16 * 60);
@@ -242,324 +245,65 @@ impl PointsRotation {
     }
 }
 
-fn rotate_after<'a>(
-    mut candidates: Vec<&'a QueueCandidate>,
-    last_channel_id: Option<&str>,
-) -> Vec<&'a QueueCandidate> {
-    if let Some(index) = last_channel_id.and_then(|last| {
-        candidates
-            .iter()
-            .position(|candidate| candidate.channel_id == last)
-    }) {
-        let rotation = (index + 1) % candidates.len();
-        candidates.rotate_left(rotation);
-    }
-    candidates
+fn is_eligible(stage: QueueStage, candidate: &QueueCandidate<'_>) -> bool {
+    candidate.is_live
+        && match stage {
+            QueueStage::Streak => {
+                candidate.selection.streak && !candidate.streak_completed_for_live
+            }
+            QueueStage::Points => candidate.selection.points,
+            QueueStage::Idle => false,
+        }
 }
 
-fn build_plan(
-    stage: QueueStage,
-    candidates: Vec<&QueueCandidate>,
-    app_capacity: usize,
-    manual_active_streams: usize,
-) -> QueuePlan {
-    let channel_ids = candidates
-        .iter()
-        .take(app_capacity)
-        .map(|candidate| candidate.channel_id.clone())
-        .collect::<Vec<_>>();
-    let waiting_count = candidates.len().saturating_sub(channel_ids.len());
+#[derive(Default)]
+struct CandidateRotation<'a> {
+    before_anchor: [Option<&'a str>; MAX_APP_STREAMS],
+    before_count: usize,
+    after_anchor: [Option<&'a str>; MAX_APP_STREAMS],
+    after_count: usize,
+    anchor_found: bool,
+}
 
-    QueuePlan {
-        stage,
-        over_capacity: manual_active_streams.saturating_add(channel_ids.len()) > 2,
-        channel_ids,
-        waiting_count,
-        app_capacity,
+impl<'a> CandidateRotation<'a> {
+    fn observe(&mut self, channel_id: &'a str, anchor: Option<&str>, capacity: usize) {
+        if self.anchor_found {
+            if self.after_count < capacity {
+                self.after_anchor[self.after_count] = Some(channel_id);
+                self.after_count += 1;
+            }
+            return;
+        }
+        if self.before_count < capacity {
+            self.before_anchor[self.before_count] = Some(channel_id);
+            self.before_count += 1;
+        }
+        self.anchor_found = Some(channel_id) == anchor;
+    }
+
+    fn into_channel_ids(self, capacity: usize) -> Vec<String> {
+        let Self {
+            before_anchor,
+            before_count,
+            after_anchor,
+            after_count,
+            anchor_found,
+        } = self;
+        let mut channel_ids = Vec::with_capacity(capacity);
+        for channel_id in after_anchor.into_iter().take(after_count).flatten() {
+            channel_ids.push(channel_id.to_owned());
+        }
+        let before_count = if anchor_found {
+            before_count.min(capacity.saturating_sub(after_count))
+        } else {
+            before_count
+        };
+        for channel_id in before_anchor.into_iter().take(before_count).flatten() {
+            channel_ids.push(channel_id.to_owned());
+        }
+        channel_ids
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        PointsEligibility, PointsRotation, PointsRotationError, PointsSession, PointsTurnTimer,
-        QueueCandidate, QueuePlanner, QueueStage, MAX_TRACKED_POINTS_SESSIONS,
-        POINTS_TURN_DURATION,
-    };
-    use crate::model::{ChannelSelection, SchedulingMode};
-    use std::time::Duration;
-
-    fn candidate(
-        channel_id: &str,
-        is_live: bool,
-        streak: bool,
-        points: bool,
-        streak_completed_for_live: bool,
-    ) -> QueueCandidate {
-        QueueCandidate {
-            channel_id: channel_id.to_owned(),
-            is_live,
-            selection: ChannelSelection { streak, points },
-            streak_completed_for_live,
-        }
-    }
-
-    #[test]
-    fn earn_mode_prioritizes_streaks_and_respects_manual_capacity() {
-        let channels = [
-            candidate("streak-a", true, true, false, false),
-            candidate("points-a", true, false, true, false),
-            candidate("streak-b", true, true, false, false),
-        ];
-        let planner = QueuePlanner::default();
-        let plan = planner.plan(&channels, SchedulingMode::Earn, 1);
-        assert_eq!(plan.stage, QueueStage::Streak);
-        assert_eq!(plan.channel_ids, ["streak-a"]);
-        assert_eq!(plan.waiting_count, 1);
-        assert_eq!(plan.app_capacity, 1);
-        assert!(!plan.over_capacity);
-    }
-
-    #[test]
-    fn completed_streak_channels_enter_points_queue_after_streak_phase() {
-        let channels = [
-            candidate("both-a", true, true, true, true),
-            candidate("both-b", true, true, true, true),
-            candidate("points-only", true, false, true, false),
-        ];
-        let mut planner = QueuePlanner::default();
-        planner.record_streak_completed("both-b");
-        let plan = planner.plan(&channels, SchedulingMode::Earn, 0);
-
-        assert_eq!(plan.stage, QueueStage::Points);
-        assert_eq!(plan.channel_ids, ["both-a", "both-b"]);
-        assert_eq!(plan.waiting_count, 1);
-    }
-
-    #[test]
-    fn points_turn_advances_round_robin_from_the_completed_channel() {
-        let channels = [
-            candidate("a", true, false, true, false),
-            candidate("b", true, false, true, false),
-            candidate("c", true, false, true, false),
-        ];
-        let mut planner = QueuePlanner::default();
-
-        let first = planner.plan(&channels, SchedulingMode::Earn, 0);
-        assert_eq!(first.channel_ids, ["a", "b"]);
-
-        planner.record_points_turn_finished("a");
-        let next = planner.plan(&channels, SchedulingMode::Earn, 0);
-        assert_eq!(next.channel_ids, ["b", "c"]);
-    }
-
-    #[test]
-    fn open_all_respects_capacity_and_reports_over_capacity() {
-        let channels = [
-            candidate("a", true, false, true, false),
-            candidate("b", true, false, true, false),
-            candidate("c", true, false, true, false),
-            candidate("d", true, false, true, false),
-            candidate("e", true, false, true, false),
-        ];
-        let plan = QueuePlanner::default().plan(&channels, SchedulingMode::OpenAll, 0);
-
-        assert_eq!(plan.stage, QueueStage::Points);
-        assert_eq!(plan.channel_ids, ["a", "b", "c", "d"]);
-        assert_eq!(plan.waiting_count, 1);
-        assert!(plan.over_capacity);
-    }
-
-    #[test]
-    fn open_all_reserves_capacity_for_manually_open_streams() {
-        let channels = [
-            candidate("a", true, false, true, false),
-            candidate("b", true, false, true, false),
-            candidate("c", true, false, true, false),
-            candidate("d", true, false, true, false),
-        ];
-        let plan = QueuePlanner::default().plan(&channels, SchedulingMode::OpenAll, 1);
-        assert_eq!(plan.app_capacity, 3);
-        assert_eq!(plan.channel_ids, ["a", "b", "c"]);
-    }
-    #[test]
-    fn offline_channels_do_not_enter_the_queue() {
-        let channels = [candidate("offline", false, true, true, false)];
-        let plan = QueuePlanner::default().plan(&channels, SchedulingMode::Earn, 0);
-
-        assert_eq!(plan.stage, QueueStage::Idle);
-        assert!(plan.channel_ids.is_empty());
-    }
-    #[test]
-    fn points_turn_requires_playing_video_chat_and_capacity() {
-        let mut timer = PointsTurnTimer::default();
-        let without_capacity = PointsEligibility {
-            player_playing: true,
-            chat_ready: true,
-            capacity_available: false,
-        };
-
-        assert!(!timer.observe(without_capacity, Duration::ZERO));
-        assert!(!timer.observe(without_capacity, Duration::from_secs(1200)));
-        assert_eq!(
-            timer.elapsed_eligible(Duration::from_secs(1200)),
-            Duration::ZERO
-        );
-
-        let eligible = PointsEligibility {
-            capacity_available: true,
-            ..without_capacity
-        };
-        assert!(!timer.observe(eligible, Duration::from_secs(1200)));
-        assert!(timer.observe(eligible, Duration::from_secs(1200) + POINTS_TURN_DURATION));
-        assert!(!timer.observe(eligible, Duration::from_secs(4000)));
-    }
-
-    #[test]
-    fn points_turn_pauses_when_a_prerequisite_fails_and_resumes() {
-        let eligible = PointsEligibility {
-            player_playing: true,
-            chat_ready: true,
-            capacity_available: true,
-        };
-        let disconnected = PointsEligibility {
-            chat_ready: false,
-            ..eligible
-        };
-        let mut timer = PointsTurnTimer::default();
-
-        assert!(!timer.observe(eligible, Duration::ZERO));
-        assert!(!timer.observe(disconnected, Duration::from_secs(5 * 60)));
-        assert_eq!(
-            timer.elapsed_eligible(Duration::from_secs(5 * 60)),
-            Duration::from_secs(5 * 60)
-        );
-        assert!(!timer.observe(eligible, Duration::from_secs(60 * 60)));
-        assert!(timer.observe(
-            eligible,
-            Duration::from_secs(60 * 60) + POINTS_TURN_DURATION - Duration::from_secs(5 * 60)
-        ));
-    }
-    #[test]
-    fn pausing_rotation_preserves_progress_without_counting_paused_time() {
-        let eligible = PointsEligibility {
-            player_playing: true,
-            chat_ready: true,
-            capacity_available: true,
-        };
-        let session = PointsSession {
-            channel_id: "a".to_owned(),
-            eligibility: eligible,
-        };
-        let mut rotation = PointsRotation::default();
-
-        assert!(rotation
-            .observe_active_sessions(std::slice::from_ref(&session), Duration::ZERO)
-            .unwrap()
-            .is_empty());
-        rotation.pause_active_sessions(Duration::from_secs(5 * 60));
-        assert_eq!(
-            rotation.elapsed_eligible("a", Duration::from_secs(60 * 60)),
-            Some(Duration::from_secs(5 * 60))
-        );
-        assert!(rotation
-            .observe_active_sessions(&[session], Duration::from_secs(60 * 60))
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            rotation.observe_active_sessions(
-                &[PointsSession {
-                    channel_id: "a".to_owned(),
-                    eligibility: eligible,
-                }],
-                Duration::from_secs(71 * 60),
-            ),
-            Ok(vec!["a".to_owned()])
-        );
-    }
-
-    #[test]
-    fn completed_points_turn_can_start_another_rotation() {
-        let session = PointsSession {
-            channel_id: "a".to_owned(),
-            eligibility: PointsEligibility {
-                player_playing: true,
-                chat_ready: true,
-                capacity_available: true,
-            },
-        };
-        let mut rotation = PointsRotation::default();
-
-        assert!(rotation
-            .observe_active_sessions(std::slice::from_ref(&session), Duration::ZERO)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            rotation.observe_active_sessions(&[session.clone()], POINTS_TURN_DURATION),
-            Ok(vec!["a".to_owned()])
-        );
-        rotation.reset_completed_turn("a");
-        assert!(rotation
-            .observe_active_sessions(&[session.clone()], POINTS_TURN_DURATION)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            rotation.observe_active_sessions(&[session], POINTS_TURN_DURATION * 2,),
-            Ok(vec!["a".to_owned()])
-        );
-    }
-
-    #[test]
-    fn points_rotation_forgets_closed_sessions_and_bounds_tracking() {
-        let eligible = PointsEligibility {
-            player_playing: true,
-            chat_ready: true,
-            capacity_available: true,
-        };
-        let mut rotation = PointsRotation::default();
-        let first_session = [PointsSession {
-            channel_id: "a".to_owned(),
-            eligibility: eligible,
-        }];
-
-        assert!(rotation
-            .observe_active_sessions(&first_session, Duration::ZERO)
-            .unwrap()
-            .is_empty());
-        rotation
-            .observe_active_sessions(&[], Duration::from_secs(5 * 60))
-            .unwrap();
-        assert_eq!(
-            rotation.elapsed_eligible("a", Duration::from_secs(5 * 60)),
-            None
-        );
-
-        let too_many = (0..=MAX_TRACKED_POINTS_SESSIONS)
-            .map(|index| PointsSession {
-                channel_id: index.to_string(),
-                eligibility: eligible,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            rotation.observe_active_sessions(&too_many, Duration::from_secs(10 * 60)),
-            Err(PointsRotationError::TooManySessions {
-                limit: MAX_TRACKED_POINTS_SESSIONS,
-                actual: MAX_TRACKED_POINTS_SESSIONS + 1,
-            })
-        );
-    }
-
-    #[test]
-    fn points_rotation_rejects_duplicate_active_channel_ids() {
-        let session = PointsSession {
-            channel_id: "duplicate".to_owned(),
-            eligibility: PointsEligibility::default(),
-        };
-        let sessions = [session.clone(), session];
-
-        assert_eq!(
-            PointsRotation::default().observe_active_sessions(&sessions, Duration::ZERO),
-            Err(PointsRotationError::DuplicateChannel)
-        );
-    }
-}
+mod tests;

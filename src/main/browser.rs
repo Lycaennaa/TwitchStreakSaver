@@ -1,0 +1,327 @@
+use super::*;
+#[derive(Clone, Copy)]
+enum BrowserTabUpdate {
+    Opened,
+    Status {
+        player: Option<PlayerState>,
+        chat: Option<ChatState>,
+    },
+}
+
+impl Dashboard {
+    pub(super) fn poll_browser_bridge(&mut self) {
+        let mut events = Vec::new();
+        if let Some(bridge) = &self.browser_bridge {
+            while let Ok(event) = bridge.try_recv() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            match event {
+                BridgeEvent::Connected => {
+                    self.browser_connected = true;
+                    self.external_stream_counts.clear();
+                    self.external_unmatched_streams = 0;
+                    self.external_inventory_received = false;
+                    self.auto_open_channels.clear();
+                    self.auto_open_retry_after.clear();
+                    self.browser_error = None;
+                    self.browser_notice = None;
+                    self.send_bridge_command(BrowserCommand::BridgeReady);
+                    self.sync_extension_channels();
+                }
+                BridgeEvent::Disconnected => {
+                    self.browser_connected = false;
+                    self.external_stream_counts.clear();
+                    self.external_unmatched_streams = 0;
+                    self.external_inventory_received = false;
+                    self.browser_states.clear();
+                    self.browser_notice = Some("Browser extension disconnected.".to_owned());
+                    self.points_rotation
+                        .pause_active_sessions(self.started_at.elapsed());
+                }
+                BridgeEvent::Message(BrowserMessage::Known(message)) => {
+                    self.handle_browser_message(message);
+                }
+                BridgeEvent::Message(BrowserMessage::Unknown(_)) => {}
+                BridgeEvent::Failed(message) => self.browser_error = Some(message),
+            }
+        }
+    }
+
+    fn handle_browser_message(&mut self, message: KnownBrowserMessage) {
+        match message {
+            KnownBrowserMessage::ExternalStreams {
+                channel_counts,
+                unmatched_count,
+            } => {
+                let known_channel_ids = self
+                    .channels
+                    .iter()
+                    .map(|channel| channel.id.as_str())
+                    .collect::<HashSet<_>>();
+                self.external_stream_counts = channel_counts
+                    .into_iter()
+                    .filter(|(channel_id, count)| {
+                        *count > 0 && known_channel_ids.contains(channel_id.as_str())
+                    })
+                    .collect();
+                self.external_unmatched_streams = unmatched_count;
+                self.external_inventory_received = true;
+            }
+            KnownBrowserMessage::Ready => {
+                self.sync_extension_channels();
+                self.apply_tab_layout_to_managed_tabs();
+            }
+            KnownBrowserMessage::TabOpened {
+                channel_id,
+                tab_id,
+                surface,
+            } => self.handle_browser_tab(channel_id, tab_id, surface, BrowserTabUpdate::Opened),
+            KnownBrowserMessage::ChannelStatus {
+                channel_id,
+                tab_id,
+                surface,
+                player_state,
+                chat_state,
+            } => self.handle_browser_tab(
+                channel_id,
+                tab_id,
+                surface,
+                BrowserTabUpdate::Status {
+                    player: player_state,
+                    chat: chat_state,
+                },
+            ),
+            KnownBrowserMessage::TabClosed {
+                channel_id,
+                tab_id,
+                surface,
+            } => {
+                if channel_id.is_empty() || tab_id <= 0 {
+                    return;
+                }
+                let remove_state = if let Some(state) = self.browser_states.get_mut(&channel_id) {
+                    match surface {
+                        BrowserSurface::Player if state.player_tab_id == Some(tab_id) => {
+                            state.player_tab_id = None;
+                            state.player_state = None;
+                            state.player_last_seen = None;
+                        }
+                        BrowserSurface::Chat if state.chat_tab_id == Some(tab_id) => {
+                            state.chat_tab_id = None;
+                            state.chat_state = None;
+                            state.chat_last_seen = None;
+                        }
+                        _ => return,
+                    }
+                    state.player_tab_id.is_none() && state.chat_tab_id.is_none()
+                } else {
+                    false
+                };
+                if remove_state {
+                    self.browser_states.remove(&channel_id);
+                    self.manual_open_channels.remove(&channel_id);
+                }
+                self.auto_open_channels.remove(&channel_id);
+                self.auto_open_retry_after.remove(&channel_id);
+            }
+            KnownBrowserMessage::Error {
+                channel_id,
+                message,
+            } => {
+                if let Some(channel_id) = channel_id {
+                    schedule_auto_open_retry(
+                        &self.auto_open_channels,
+                        &mut self.auto_open_retry_after,
+                        &channel_id,
+                        Instant::now(),
+                    );
+                }
+                if let Some(message) = message {
+                    self.browser_error = Some(message.chars().take(240).collect());
+                }
+            }
+        }
+    }
+
+    fn handle_browser_tab(
+        &mut self,
+        channel_id: String,
+        tab_id: i64,
+        surface: BrowserSurface,
+        update: BrowserTabUpdate,
+    ) {
+        if channel_id.is_empty()
+            || tab_id <= 0
+            || !self.channels.iter().any(|channel| channel.id == channel_id)
+        {
+            return;
+        }
+        if matches!(update, BrowserTabUpdate::Opened) {
+            self.auto_open_retry_after.remove(&channel_id);
+        }
+        let state = self.browser_states.entry(channel_id).or_default();
+        match surface {
+            BrowserSurface::Player => {
+                if state.player_tab_id != Some(tab_id) {
+                    state.player_state = None;
+                    state.player_last_seen = None;
+                }
+                state.player_tab_id = Some(tab_id);
+                if let BrowserTabUpdate::Status { player, chat } = update {
+                    if let Some(player_state) = player {
+                        state.player_state = Some(player_state);
+                        state.player_last_seen = Some(Instant::now());
+                    }
+                    if let Some(chat_state) = chat {
+                        state.chat_tab_id = Some(tab_id);
+                        state.chat_state = Some(chat_state);
+                        state.chat_last_seen = Some(Instant::now());
+                    }
+                }
+            }
+            BrowserSurface::Chat => {
+                if state.chat_tab_id != Some(tab_id) {
+                    state.chat_state = None;
+                    state.chat_last_seen = None;
+                }
+                state.chat_tab_id = Some(tab_id);
+                if let BrowserTabUpdate::Status { chat, .. } = update {
+                    if let Some(chat_state) = chat {
+                        state.chat_state = Some(chat_state);
+                        state.chat_last_seen = Some(Instant::now());
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn send_bridge_command(&mut self, command: BrowserCommand) {
+        if !self.browser_connected {
+            self.browser_error = Some("Browser extension is not connected.".to_owned());
+            return;
+        }
+        if let Some(bridge) = &self.browser_bridge {
+            if let Err(error) = bridge.send(command) {
+                self.browser_error = Some(error);
+            }
+        } else {
+            self.browser_error = Some("Browser bridge listener is unavailable.".to_owned());
+        }
+    }
+
+    pub(super) fn sync_extension_channels(&mut self) {
+        if !self.browser_connected {
+            return;
+        }
+        self.external_inventory_received = false;
+        let channels = self
+            .channels
+            .iter()
+            .filter(|channel| !channel.login.is_empty())
+            .map(BrowserChannel::from)
+            .collect();
+        self.send_bridge_command(BrowserCommand::SyncChannels { channels });
+    }
+
+    pub(super) fn open_selected_twitch_channels(&mut self, layout: TwitchTabLayout) {
+        if !self.browser_connected {
+            self.browser_error = Some("Browser extension is not connected.".to_owned());
+            return;
+        }
+        if !self.external_inventory_received {
+            self.browser_notice =
+                Some("Scanning existing Twitch tabs; try again shortly.".to_owned());
+            return;
+        }
+
+        let limit = self.mode.app_stream_limit();
+        let selected_count = self
+            .channels
+            .iter()
+            .filter(|channel| channel.selection.is_selected() && !channel.login.is_empty())
+            .count();
+        let mut app_open_channels = self.manual_open_channels.clone();
+        app_open_channels.extend(self.auto_open_channels.iter().cloned());
+        let app_open_streams = app_open_channels
+            .iter()
+            .filter(|channel_id| self.live_channel_ids.contains(*channel_id))
+            .count();
+        let external_streams = active_external_stream_count(
+            &self.external_stream_counts,
+            self.external_unmatched_streams,
+            &self.live_channel_ids,
+        );
+        let available_slots =
+            limit.saturating_sub(app_open_streams.saturating_add(external_streams));
+        let external_channel_ids = self
+            .external_stream_counts
+            .iter()
+            .filter(|(channel_id, count)| {
+                **count > 0 && self.live_channel_ids.contains(*channel_id)
+            })
+            .map(|(channel_id, _)| channel_id.clone())
+            .collect::<HashSet<_>>();
+        let mut additional_channels = 0;
+        let selected_indices = selected_channel_indices(&self.channels, self.channels.len())
+            .into_iter()
+            .filter(|index| {
+                let channel_id = &self.channels[*index].id;
+                if app_open_channels.contains(channel_id) {
+                    true
+                } else if external_channel_ids.contains(channel_id) {
+                    false
+                } else if additional_channels < available_slots {
+                    additional_channels += 1;
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+        if selected_indices.is_empty() {
+            self.browser_error = Some(if selected_count == 0 {
+                "Select followed Twitch channels to open.".to_owned()
+            } else {
+                "No stream slots are available after counting existing Twitch tabs.".to_owned()
+            });
+            return;
+        }
+
+        let channels: Vec<BrowserChannel> = selected_indices
+            .iter()
+            .map(|index| BrowserChannel::from(&self.channels[*index]))
+            .collect();
+        let opened_count = channels.len();
+        self.manual_open_channels.extend(
+            selected_indices
+                .iter()
+                .map(|index| self.channels[*index].id.clone()),
+        );
+        self.send_bridge_command(BrowserCommand::OpenSelected {
+            layout,
+            wake_browser: self.wake_browser_on_open,
+            channels,
+        });
+        let view = match layout {
+            TwitchTabLayout::SeparatePlayerChat => "separate player + chat tabs",
+            TwitchTabLayout::RegularWebsite => "regular Twitch pages",
+        };
+        self.browser_notice = Some(format!(
+            "Opening {view} for {} of {selected_count} selected channels. App-opened player audio is muted.",
+            opened_count,
+        ));
+    }
+    pub(super) fn apply_tab_layout_to_managed_tabs(&mut self) {
+        if !self.browser_connected {
+            return;
+        }
+        self.send_bridge_command(BrowserCommand::ApplyLayout {
+            layout: self.tab_layout,
+            wake_browser: self.wake_browser_on_open,
+        });
+        self.browser_notice =
+            Some("Applying the selected layout to app-managed Twitch tabs.".to_owned());
+    }
+}

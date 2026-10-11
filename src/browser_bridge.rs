@@ -1,6 +1,6 @@
+use crate::browser_protocol::{BrowserCommand, BrowserMessage};
 use directories::BaseDirs;
-use serde::Serialize;
-use serde_json::Value;
+use serde::{de::DeserializeOwned, Serialize};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -11,18 +11,18 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub const NATIVE_HOST_NAME: &str = "com.twitchstreaksaver.bridge";
-const BRIDGE_ADDRESS: &str = "127.0.0.1:43127";
+pub const BRIDGE_ADDRESS: &str = "127.0.0.1:43127";
 const MAX_MESSAGE_SIZE: usize = 1_048_576;
 
 pub enum BridgeEvent {
     Connected,
     Disconnected,
-    Message(Value),
+    Message(BrowserMessage),
     Failed(String),
 }
 
 pub struct BrowserBridge {
-    commands: Sender<Value>,
+    commands: Sender<BrowserCommand>,
     events: Receiver<BridgeEvent>,
     stop: Arc<AtomicBool>,
     server: Option<JoinHandle<()>>,
@@ -53,7 +53,7 @@ impl BrowserBridge {
         })
     }
 
-    pub fn send(&self, command: Value) -> Result<(), String> {
+    pub fn send(&self, command: BrowserCommand) -> Result<(), String> {
         self.commands
             .send(command)
             .map_err(|_| "Browser bridge is not running.".to_owned())
@@ -75,7 +75,7 @@ impl Drop for BrowserBridge {
 
 fn serve(
     listener: TcpListener,
-    commands: Receiver<Value>,
+    commands: Receiver<BrowserCommand>,
     events: Sender<BridgeEvent>,
     stop: Arc<AtomicBool>,
 ) {
@@ -97,7 +97,7 @@ fn serve(
 
 fn handle_connection(
     mut stream: TcpStream,
-    commands: &Receiver<Value>,
+    commands: &Receiver<BrowserCommand>,
     events: &Sender<BridgeEvent>,
     stop: &AtomicBool,
 ) {
@@ -124,7 +124,7 @@ fn handle_connection(
     let reader = thread::spawn(move || {
         let mut reader_stream = reader_stream;
         loop {
-            match read_message(&mut reader_stream) {
+            match read_message::<BrowserMessage>(&mut reader_stream) {
                 Ok(Some(message)) => {
                     if incoming_tx.send(message).is_err() {
                         break;
@@ -167,7 +167,7 @@ fn handle_connection(
     let _ = events.send(BridgeEvent::Disconnected);
 }
 
-pub fn read_message(reader: &mut impl Read) -> io::Result<Option<Value>> {
+pub fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<T>> {
     let mut length_bytes = [0u8; 4];
     match reader.read(&mut length_bytes[..1])? {
         0 => return Ok(None),
@@ -189,7 +189,7 @@ pub fn read_message(reader: &mut impl Read) -> io::Result<Option<Value>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-pub fn write_message(writer: &mut impl Write, message: &Value) -> io::Result<()> {
+pub fn write_message(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
     let payload = serde_json::to_vec(message)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if payload.len() > MAX_MESSAGE_SIZE {
@@ -364,7 +364,7 @@ mod tests {
         write_message(&mut bytes, &message).unwrap();
 
         assert_eq!(
-            read_message(&mut Cursor::new(bytes)).unwrap(),
+            read_message::<serde_json::Value>(&mut Cursor::new(bytes)).unwrap(),
             Some(message)
         );
     }
