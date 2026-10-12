@@ -2,6 +2,7 @@ const NATIVE_HOST = "com.twitchstreaksaver.bridge";
 importScripts("twitch_tabs.js");
 
 let nativePort = null;
+let syncedNativePort = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000;
 let managedTabs = new Map();
@@ -14,10 +15,10 @@ let nativeCommandQueue = Promise.resolve();
 const restorePromise = restoreManagedTabs();
 
 async function restoreManagedTabs() {
-  const stored = await chrome.storage.session.get("managedTabs");
+  const stored = await chrome.storage.local.get("managedTabs");
   managedTabs = new Map(stored.managedTabs || []);
   const tabs = await chrome.tabs.query({});
-  const openTabIds = new Set(tabs.map((tab) => tab.id));
+  const tabsById = new Map(tabs.map((tab) => [tab.id, tab]));
   for (const [channelId, record] of managedTabs) {
     if (record.tabId && !record.playerTabId) {
       record.playerTabId = record.tabId;
@@ -25,7 +26,17 @@ async function restoreManagedTabs() {
     }
     for (const surface of ["player", "chat"]) {
       const key = `${surface}TabId`;
-      if (!openTabIds.has(record[key])) record[key] = null;
+      const tab = tabsById.get(record[key]);
+      const routeLogins = [
+        record.login,
+        ...(Array.isArray(record.previousLogins) ? record.previousLogins : []),
+      ];
+      const currentPage = tab && routeLogins.some(
+        (login) => urlMatchesManagedSurface(tab.url, login, surface, record.layout),
+      );
+      const pendingPage = tab?.url === "about:blank"
+        && urlMatchesManagedSurface(record.pendingUrl, record.login, surface, record.layout);
+      if (!currentPage && !pendingPage) record[key] = null;
     }
     if (!record.playerTabId && !record.chatTabId) managedTabs.delete(channelId);
   }
@@ -33,7 +44,7 @@ async function restoreManagedTabs() {
 }
 
 async function saveManagedTabs() {
-  await chrome.storage.session.set({ managedTabs: Array.from(managedTabs.entries()) });
+  await chrome.storage.local.set({ managedTabs: Array.from(managedTabs.entries()) });
 }
 
 async function reportExternalStreams() {
@@ -65,30 +76,47 @@ function scheduleExternalStreamReport() {
 
 function connectNativeHost() {
   if (nativePort) return;
+  let port = null;
   try {
-    const port = chrome.runtime.connectNative(NATIVE_HOST);
+    port = chrome.runtime.connectNative(NATIVE_HOST);
     nativePort = port;
+    syncedNativePort = null;
     port.onMessage.addListener((message) => {
+      if (nativePort !== port) return;
       nativeCommandQueue = nativeCommandQueue
-        .then(() => handleNativeCommand(message))
+        .then(() => handleNativeCommand(message, port))
         .catch((error) => {
           console.warn("Could not handle Twitch Streak Saver command.", error);
         });
     });
     port.onDisconnect.addListener(() => {
-      nativePort = null;
-      for (const record of managedTabs.values()) {
-        for (const [, tabId] of managedSurfaceTabs(record)) {
-          setMonitoring(tabId, "stop_monitoring");
-        }
-      }
-      scheduleReconnect();
+      handleNativePortDisconnect(port, chrome.runtime.lastError);
     });
     port.postMessage({ type: "ready" });
   } catch (error) {
+    if (port) {
+      if (nativePort === port) handleNativePortDisconnect(port, error);
+      return;
+    }
     console.warn("Twitch Streak Saver native host is unavailable.", error);
     scheduleReconnect();
   }
+}
+
+function handleNativePortDisconnect(port, error) {
+  if (nativePort !== port) return;
+  nativePort = null;
+  syncedNativePort = null;
+  channelsByLogin = new Map();
+  for (const record of managedTabs.values()) {
+    for (const [, tabId] of managedSurfaceTabs(record)) {
+      setMonitoring(tabId, "stop_monitoring");
+    }
+  }
+  if (error) {
+    console.debug("Twitch Streak Saver native host disconnected.", error.message);
+  }
+  scheduleReconnect();
 }
 
 function scheduleReconnect() {
@@ -102,8 +130,13 @@ function scheduleReconnect() {
 }
 
 function sendNative(message) {
-  if (!nativePort) return;
-  nativePort.postMessage(message);
+  const port = nativePort;
+  if (!port) return;
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    handleNativePortDisconnect(port, error);
+  }
 }
 
 function setMonitoring(tabId, type) {
@@ -127,42 +160,41 @@ function detachManagedTab(channelId, record, surface, tabId) {
   sendNative({ type: "tab_closed", channel_id: channelId, tab_id: tabId, surface });
 }
 
-async function handleNativeCommand(message) {
+async function handleNativeCommand(message, sourcePort = nativePort) {
   await restorePromise;
+  if (nativePort !== sourcePort) return;
   switch (message?.type) {
     case "bridge_ready":
       reconnectDelay = 1000;
       break;
-    case "sync_channels":
+    case "sync_channels": {
+      const channels = (message.channels || []).filter((channel) => isValidChannel(channel));
       channelsByLogin = new Map(
-        (message.channels || [])
-          .filter((channel) => isValidChannel(channel))
-          .map((channel) => [channel.login.toLowerCase(), channel.id]),
+        channels.map((channel) => [channel.login.toLowerCase(), channel.id]),
       );
-      for (const record of managedTabs.values()) {
-        for (const [, tabId] of managedSurfaceTabs(record)) {
-          setMonitoring(tabId, "start_monitoring");
-        }
-      }
+      syncedNativePort = sourcePort;
+      const loginByChannelId = new Map(
+        channels.map((channel) => [channel.id, channel.login.toLowerCase()]),
+      );
+      await openChannels(
+        Array.from(managedTabs.keys()).flatMap((channelId) => {
+          const login = loginByChannelId.get(channelId);
+          return login ? [{ id: channelId, login }] : [];
+        }),
+        false,
+        sourcePort,
+      );
       scheduleExternalStreamReport();
+      break;
+    }
       break;
     case "open_selected":
       await openChannels(
         message.channels || [],
-        message.layout,
         message.wake_browser === true,
+        sourcePort,
       );
       break;
-    case "apply_layout": {
-      const requestedLayout = message.layout === "regular_website"
-        ? "regular_website"
-        : "separate_player_chat";
-      const channels = Array.from(managedTabs.entries())
-        .filter(([, record]) => record.layout !== requestedLayout)
-        .map(([id, record]) => ({ id, login: record.login }));
-      await openChannels(channels, requestedLayout, message.wake_browser === true);
-      break;
-    }
     case "close_all":
       await closeAllChannels();
       break;
@@ -180,13 +212,24 @@ function isValidChannel(channel) {
     && /^[a-z0-9_]{1,25}$/i.test(channel.login);
 }
 
-async function openChannels(channels, layout, wakeBrowser) {
-  const requestedLayout = layout === "regular_website" ? layout : "separate_player_chat";
+async function openChannels(channels, wakeBrowser, sourcePort) {
   for (const channel of channels) {
     if (!isValidChannel(channel)) continue;
     const login = channel.login.toLowerCase();
     let record = managedTabs.get(channel.id);
-    if (record && record.layout !== requestedLayout) {
+    if (
+      record?.layout === "regular_website"
+      && Number.isInteger(record.playerTabId)
+      && record.playerTabId === record.chatTabId
+    ) {
+      record.layout = "combined_window";
+      managedTabs.set(channel.id, record);
+      await saveManagedTabs();
+    }
+    if (
+      record
+      && (record.layout !== "combined_window" || record.chatTabId !== record.playerTabId)
+    ) {
       try {
         await closeChannels([channel.id]);
       } catch (error) {
@@ -202,35 +245,33 @@ async function openChannels(channels, layout, wakeBrowser) {
     }
     record = record || {
       login,
-      layout: requestedLayout,
+      layout: "combined_window",
       playerTabId: null,
       chatTabId: null,
     };
+    if (record.login !== login) {
+      const previousLogins = new Set(
+        Array.isArray(record.previousLogins) ? record.previousLogins : [],
+      );
+      previousLogins.add(record.login);
+      record.previousLogins = Array.from(previousLogins);
+    }
     record.login = login;
-    record.layout = requestedLayout;
+    record.layout = "combined_window";
     managedTabs.set(channel.id, record);
     try {
-      if (requestedLayout === "regular_website") {
-        const url = `https://www.twitch.tv/${encodeURIComponent(login)}`;
-        await openManagedTab(channel.id, record, "player", url, wakeBrowser);
-        record.chatTabId = record.playerTabId;
-        managedTabs.set(channel.id, record);
-        await saveManagedTabs();
-        sendNative({
-          type: "tab_opened",
-          channel_id: channel.id,
-          tab_id: record.chatTabId,
-          surface: "chat",
-        });
-      } else {
-        const urls = {
-          player: `https://player.twitch.tv/?channel=${encodeURIComponent(login)}&parent=twitch.tv`,
-          chat: `https://www.twitch.tv/popout/${encodeURIComponent(login)}/chat`,
-        };
-        for (const [surface, url] of Object.entries(urls)) {
-          await openManagedTab(channel.id, record, surface, url, wakeBrowser);
-        }
-      }
+      const url = `https://www.twitch.tv/${encodeURIComponent(login)}`;
+      await openManagedTab(channel.id, record, url, wakeBrowser, sourcePort);
+      delete record.previousLogins;
+      record.chatTabId = record.playerTabId;
+      managedTabs.set(channel.id, record);
+      await saveManagedTabs();
+      sendNative({
+        type: "tab_opened",
+        channel_id: channel.id,
+        tab_id: record.chatTabId,
+        surface: "chat",
+      });
     } catch (error) {
       sendNative({
         type: "error",
@@ -242,10 +283,37 @@ async function openChannels(channels, layout, wakeBrowser) {
   scheduleExternalStreamReport();
 }
 
-async function focusManagedTab(tabId) {
+async function ensureDedicatedTabWindow(tabId) {
   const tab = await chrome.tabs.get(tabId);
-  await chrome.windows.update(tab.windowId, { state: "normal", focused: true });
-  await chrome.tabs.update(tabId, { active: true });
+  const window = await chrome.windows.get(tab.windowId, { populate: true });
+  const windowTabs = window.tabs || await chrome.tabs.query({ windowId: tab.windowId });
+  if (windowTabs.length > 1) {
+    await chrome.windows.create({ tabId, focused: false, type: "normal" });
+  }
+}
+
+async function createManagedTab() {
+  const window = await chrome.windows.create({
+    url: "about:blank",
+    focused: false,
+    type: "normal",
+  });
+  if (!Number.isInteger(window?.id)) {
+    throw new Error("Could not create a dedicated Twitch window.");
+  }
+  const [tab] = await chrome.tabs.query({ windowId: window.id });
+  if (!Number.isInteger(tab?.id)) {
+    throw new Error("Could not create a Twitch tab in its window.");
+  }
+  return tab;
+}
+
+async function activateManagedTab(tabId, wakeBrowser, changes = {}) {
+  const tab = await chrome.tabs.get(tabId);
+  if (wakeBrowser) {
+    await chrome.windows.update(tab.windowId, { state: "normal", focused: true });
+  }
+  await chrome.tabs.update(tabId, { ...changes, active: true });
 }
 
 function waitForTabLoad(tabId) {
@@ -267,19 +335,22 @@ function waitForTabLoad(tabId) {
   return { promise, cancel: (loaded) => finish(loaded) };
 }
 
-async function loadManagedTab(tabId, url) {
+async function loadManagedTab(tabId, url, wakeBrowser, forceReload) {
   const tab = await chrome.tabs.get(tabId);
-  if (tab.url === url && tab.status === "complete") return;
+  if (!forceReload && !tab.discarded && tab.url === url && tab.status === "complete") {
+    await activateManagedTab(tabId, wakeBrowser);
+    return;
+  }
   const loading = waitForTabLoad(tabId);
   try {
-    if (tab.url === url && tab.status === "loading") {
-      const latest = await chrome.tabs.get(tabId);
-      if (latest.url === url && latest.status === "complete") {
-        loading.cancel(true);
-        return;
-      }
-    } else {
-      await chrome.tabs.update(tabId, { url });
+    const changes = {};
+    if (forceReload || tab.url !== url || (!tab.discarded && tab.status !== "loading")) {
+      changes.url = url;
+    }
+    await activateManagedTab(tabId, wakeBrowser, changes);
+    const latest = await chrome.tabs.get(tabId);
+    if (latest.url === url && latest.status === "complete" && !latest.discarded) {
+      loading.cancel(true);
     }
     if (!await loading.promise) {
       throw new Error("Twitch page did not finish loading within 30 seconds.");
@@ -290,34 +361,46 @@ async function loadManagedTab(tabId, url) {
   }
 }
 
-async function openManagedTab(channelId, record, surface, url, wakeBrowser) {
-  const key = `${surface}TabId`;
-  let tabId = record[key];
+async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
+  let tabId = record.playerTabId;
   if (tabId !== null && tabId !== undefined) {
     try {
       await chrome.tabs.get(tabId);
     } catch {
-      record[key] = null;
+      record.playerTabId = null;
+      record.chatTabId = null;
       tabId = null;
     }
   }
   if (tabId === null || tabId === undefined) {
-    const tab = await chrome.tabs.create({ url: "about:blank", active: false });
+    const tab = await createManagedTab();
     tabId = tab.id;
-    record[key] = tabId;
+    record.playerTabId = tabId;
+    record.chatTabId = tabId;
+    record.pendingUrl = url;
+    managedTabs.set(channelId, record);
+    await saveManagedTabs();
+  } else {
+    await ensureDedicatedTabWindow(tabId);
+  }
+  await chrome.tabs.update(tabId, { autoDiscardable: false, muted: true });
+  const tab = await chrome.tabs.get(tabId);
+  const contentVersion = chrome.runtime.getManifest().version;
+  const forceReload = record.contentVersion !== contentVersion;
+  if (tab.url !== url || tab.discarded || tab.status !== "complete" || forceReload) {
+    record.pendingUrl = url;
     managedTabs.set(channelId, record);
     await saveManagedTabs();
   }
-  if (surface === "player") {
-    await chrome.tabs.update(tabId, { muted: true });
-    if (wakeBrowser) await focusManagedTab(tabId);
-  }
-  await loadManagedTab(tabId, url);
+  await loadManagedTab(tabId, url, wakeBrowser, forceReload);
+  delete record.pendingUrl;
+  record.contentVersion = contentVersion;
   managedTabs.set(channelId, record);
   await saveManagedTabs();
-  setMonitoring(tabId, "start_monitoring");
-  sendNative({ type: "tab_opened", channel_id: channelId, tab_id: tabId, surface });
+  if (nativePort === sourcePort) setMonitoring(tabId, "start_monitoring");
+  sendNative({ type: "tab_opened", channel_id: channelId, tab_id: tabId, surface: "player" });
 }
+
 
 async function closeAllChannels() {
   await closeChannels(Array.from(managedTabs.keys()));
@@ -377,6 +460,7 @@ async function closeChannels(channelIds) {
 function forwardChannelState(message, sender) {
   const tabId = sender.tab?.id;
   const surface = message?.surface;
+  if (!nativePort || syncedNativePort !== nativePort) return;
   if (
     sender.frameId !== 0
     || tabId === undefined
@@ -385,11 +469,13 @@ function forwardChannelState(message, sender) {
   ) return;
   for (const [channelId, record] of managedTabs) {
     if (record[`${surface}TabId`] !== tabId) continue;
-    if (record.login !== message.login.toLowerCase()) {
+    const login = message.login.toLowerCase();
+    const previousLogins = Array.isArray(record.previousLogins) ? record.previousLogins : [];
+    if (record.login !== login && !previousLogins.includes(login)) {
       detachManagedTab(channelId, record, surface, tabId);
       return;
     }
-    if (channelsByLogin.get(record.login) !== channelId) return;
+    if (channelsByLogin.get(login) !== channelId) return;
     sendNative({
       type: "channel_status",
       channel_id: channelId,
@@ -398,7 +484,7 @@ function forwardChannelState(message, sender) {
       ...(surface === "player"
         ? { player_state: message.player_state }
         : { chat_state: message.chat_state }),
-      ...(surface === "player" && record.layout === "regular_website"
+      ...(surface === "player" && record.layout === "combined_window"
         ? { chat_state: message.chat_state }
         : {}),
     });
@@ -434,14 +520,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 function urlMatchesManagedSurface(value, login, surface, layout) {
   const route = TwitchTabUtils.channelRoute(value);
   if (route.login !== login) return false;
-  if (layout === "regular_website") {
+  if (layout === "combined_window" || layout === "regular_website") {
     return route.website && ["player", "chat"].includes(surface);
   }
   return !route.website && route.surface === surface;
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (nativePort && changeInfo.status === "complete") {
+  if (nativePort && syncedNativePort === nativePort && changeInfo.status === "complete") {
     for (const record of managedTabs.values()) {
       if (managedSurfaceTabs(record).some(([, managedTabId]) => managedTabId === tabId)) {
         setMonitoring(tabId, "start_monitoring");
@@ -457,7 +543,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       .map(([surface]) => surface);
     if (updatedSurfaces.length === 0) continue;
     for (const surface of updatedSurfaces) {
-      if (!urlMatchesManagedSurface(changeInfo.url, record.login, surface, record.layout)) {
+      const routeLogins = [
+        record.login,
+        ...(Array.isArray(record.previousLogins) ? record.previousLogins : []),
+      ];
+      if (!routeLogins.some(
+        (login) => urlMatchesManagedSurface(changeInfo.url, login, surface, record.layout),
+      )) {
         detachManagedTab(channelId, record, surface, tabId);
       }
     }

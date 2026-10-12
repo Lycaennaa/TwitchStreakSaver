@@ -71,7 +71,6 @@ impl Dashboard {
             }
             KnownBrowserMessage::Ready => {
                 self.sync_extension_channels();
-                self.apply_tab_layout_to_managed_tabs();
             }
             KnownBrowserMessage::TabOpened {
                 channel_id,
@@ -225,7 +224,7 @@ impl Dashboard {
         self.send_bridge_command(BrowserCommand::SyncChannels { channels });
     }
 
-    pub(super) fn open_selected_twitch_channels(&mut self, layout: TwitchTabLayout) {
+    pub(super) fn open_selected_twitch_channels(&mut self) {
         if !self.browser_connected {
             self.browser_error = Some("Browser extension is not connected.".to_owned());
             return;
@@ -293,35 +292,18 @@ impl Dashboard {
             .iter()
             .map(|index| BrowserChannel::from(&self.channels[*index]))
             .collect();
-        let opened_count = channels.len();
         self.manual_open_channels.extend(
             selected_indices
                 .iter()
                 .map(|index| self.channels[*index].id.clone()),
         );
         self.send_bridge_command(BrowserCommand::OpenSelected {
-            layout,
             wake_browser: self.wake_browser_on_open,
             channels,
         });
-        let view = match layout {
-            TwitchTabLayout::SeparatePlayerChat => "separate player + chat tabs",
-            TwitchTabLayout::RegularWebsite => "regular Twitch pages",
-        };
-        self.browser_notice = Some(format!(
-            "Opening {view} for {} of {selected_count} selected channels. App-opened player audio is muted.",
-            opened_count,
-        ));
-    }
-    pub(super) fn apply_tab_layout_to_managed_tabs(&mut self) {
-        if !self.browser_connected {
-            return;
-        }
-        self.send_bridge_command(BrowserCommand::ApplyLayout {
-            layout: self.tab_layout,
-            wake_browser: self.wake_browser_on_open,
-        });
-        self.browser_notice =
-            Some("Applying the selected layout to app-managed Twitch tabs.".to_owned());
+        self.browser_notice = Some(
+            "Each selected channel opens as one combined Twitch page in its own active window. Windows stay unfocused unless browser focus is enabled. App-opened player audio is muted."
+                .to_owned(),
+        );
     }
 }

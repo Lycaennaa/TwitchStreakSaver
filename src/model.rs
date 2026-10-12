@@ -64,25 +64,12 @@ pub fn merge_followed_channels(
         })
         .collect()
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TwitchTabLayout {
-    SeparatePlayerChat,
-    RegularWebsite,
-}
-
-impl Default for TwitchTabLayout {
-    fn default() -> Self {
-        Self::SeparatePlayerChat
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppPreferences {
     pub mode: SchedulingMode,
     pub auto_start_on_launch: bool,
-    pub tab_layout: TwitchTabLayout,
     pub wake_browser_on_open: bool,
     pub channels: Vec<FollowedChannel>,
 }
@@ -92,7 +79,6 @@ impl Default for AppPreferences {
         Self {
             mode: SchedulingMode::Earn,
             auto_start_on_launch: true,
-            tab_layout: TwitchTabLayout::SeparatePlayerChat,
             wake_browser_on_open: false,
             channels: vec![
                 FollowedChannel::new("sample-01", "Sample channel one"),
@@ -105,7 +91,7 @@ impl Default for AppPreferences {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppPreferences, ChannelSelection, SchedulingMode, TwitchTabLayout};
+    use super::{AppPreferences, ChannelSelection, SchedulingMode};
 
     #[test]
     fn followed_channel_refresh_keeps_selections_for_matching_ids() {
@@ -142,7 +128,6 @@ mod tests {
             points: true,
         };
         preferences.auto_start_on_launch = false;
-        preferences.tab_layout = TwitchTabLayout::RegularWebsite;
         preferences.wake_browser_on_open = true;
 
         let encoded = ron::to_string(&preferences).unwrap();
@@ -152,13 +137,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_preferences_default_auto_start_to_enabled() {
-        let preferences: AppPreferences =
-            ron::from_str("(mode: earn, channels: [], legacy_setting: false)").unwrap();
+    fn legacy_preferences_ignore_removed_tab_layout() {
+        let preferences: AppPreferences = ron::from_str(
+            "(mode: earn, tab_layout: separate_player_chat, channels: [], legacy_setting: false)",
+        )
+        .unwrap();
 
         assert!(preferences.auto_start_on_launch);
-        assert_eq!(preferences.tab_layout, TwitchTabLayout::SeparatePlayerChat);
         assert!(!preferences.wake_browser_on_open);
+        assert!(preferences.channels.is_empty());
     }
 
     #[test]

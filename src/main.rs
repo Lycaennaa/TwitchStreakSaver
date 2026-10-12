@@ -11,9 +11,7 @@ use twitch_streak_saver::browser_protocol::{
     BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, ChatState, KnownBrowserMessage,
     PlayerState,
 };
-use twitch_streak_saver::model::{
-    AppPreferences, FollowedChannel, SchedulingMode, TwitchTabLayout,
-};
+use twitch_streak_saver::model::{AppPreferences, FollowedChannel, SchedulingMode};
 use twitch_streak_saver::scheduler::{
     PointsEligibility, PointsRotation, PointsSession, QueueCandidate, QueuePlanner, QueueStage,
     POINTS_TURN_DURATION,
@@ -231,7 +229,6 @@ fn main() -> eframe::Result<()> {
 struct Dashboard {
     mode: SchedulingMode,
     auto_start_on_launch: bool,
-    tab_layout: TwitchTabLayout,
     wake_browser_on_open: bool,
     automation_enabled: bool,
     channels: Vec<FollowedChannel>,
@@ -285,7 +282,6 @@ impl Dashboard {
         Self {
             mode: preferences.mode,
             auto_start_on_launch: preferences.auto_start_on_launch,
-            tab_layout: preferences.tab_layout,
             wake_browser_on_open: preferences.wake_browser_on_open,
             automation_enabled: preferences.auto_start_on_launch,
             channels: preferences.channels,
@@ -326,7 +322,6 @@ impl Dashboard {
         AppPreferences {
             mode: self.mode,
             auto_start_on_launch: self.auto_start_on_launch,
-            tab_layout: self.tab_layout,
             wake_browser_on_open: self.wake_browser_on_open,
             channels: self.channels.clone(),
         }

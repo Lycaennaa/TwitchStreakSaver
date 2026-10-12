@@ -1,4 +1,4 @@
-use crate::model::{FollowedChannel, TwitchTabLayout};
+use crate::model::FollowedChannel;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -11,13 +11,8 @@ pub enum BrowserCommand {
         channels: Vec<BrowserChannel>,
     },
     OpenSelected {
-        layout: TwitchTabLayout,
         wake_browser: bool,
         channels: Vec<BrowserChannel>,
-    },
-    ApplyLayout {
-        layout: TwitchTabLayout,
-        wake_browser: bool,
     },
     CloseAll,
     CloseChannels {
@@ -180,7 +175,7 @@ mod tests {
         BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, ChatState,
         KnownBrowserMessage, PlayerState,
     };
-    use crate::model::{FollowedChannel, TwitchTabLayout};
+    use crate::model::FollowedChannel;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -189,7 +184,6 @@ mod tests {
         let mut channel = FollowedChannel::new("123", "Streamer");
         channel.login = "streamer".to_owned();
         let command = BrowserCommand::OpenSelected {
-            layout: TwitchTabLayout::RegularWebsite,
             wake_browser: true,
             channels: vec![BrowserChannel::from(&channel)],
         };
@@ -198,7 +192,6 @@ mod tests {
             serde_json::to_value(command).unwrap(),
             json!({
                 "type": "open_selected",
-                "layout": "regular_website",
                 "wake_browser": true,
                 "channels": [{"id": "123", "login": "streamer"}],
             }),

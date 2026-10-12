@@ -172,33 +172,19 @@ impl Dashboard {
         if install_native_host {
             self.install_chrome_native_host();
         }
-        let previous_layout = self.tab_layout;
         ui.group(|ui| {
             ui.strong("Twitch tab opening");
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Open streams as:");
-                ui.selectable_value(
-                    &mut self.tab_layout,
-                    TwitchTabLayout::SeparatePlayerChat,
-                    "Player + chat tabs",
-                );
-                ui.selectable_value(
-                    &mut self.tab_layout,
-                    TwitchTabLayout::RegularWebsite,
-                    "Regular Twitch tab",
-                );
-            });
+            ui.label(
+                "Each stream opens as a combined Twitch page in its own window. Its tab is selected without focusing the window.",
+            );
             ui.checkbox(
                 &mut self.wake_browser_on_open,
                 "Restore and focus browser when opening",
             );
             ui.label(
-                "Waking restores a minimized window, focuses each stream tab, and waits for it to load. It may interrupt other work.",
+                "Enabling this brings each stream window to the foreground as it opens and may interrupt other work. Twitch and the browser can still throttle or freeze background pages.",
             );
         });
-        if previous_layout != self.tab_layout {
-            self.apply_tab_layout_to_managed_tabs();
-        }
 
         ui.add_space(8.0);
         self.automation_settings(ui);

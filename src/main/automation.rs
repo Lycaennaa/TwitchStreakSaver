@@ -162,7 +162,6 @@ impl Dashboard {
         }
         if !open_channels.is_empty() {
             self.send_bridge_command(BrowserCommand::OpenSelected {
-                layout: self.tab_layout,
                 wake_browser: self.wake_browser_on_open,
                 channels: open_channels,
             });

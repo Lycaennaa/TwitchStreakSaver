@@ -194,7 +194,7 @@ impl Dashboard {
             });
         }
         if open_selected {
-            self.open_selected_twitch_channels(self.tab_layout);
+            self.open_selected_twitch_channels();
         }
     }
 }

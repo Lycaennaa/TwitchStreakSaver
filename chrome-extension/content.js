@@ -38,6 +38,13 @@
     return loading ? "loading" : "missing";
   }
 
+  function stopMonitoring() {
+    monitoring = false;
+    if (timer !== null) window.clearInterval(timer);
+    timer = null;
+    previousState = "";
+  }
+
   function report() {
     if (!monitoring) return;
     const route = channelRoute();
@@ -54,19 +61,21 @@
     if (encoded === previousState && now - lastSentAt < 5000) return;
     previousState = encoded;
     lastSentAt = now;
-    chrome.runtime.sendMessage(state).catch(() => {});
+    try {
+      chrome.runtime.sendMessage(state).catch(() => {});
+    } catch (error) {
+      if (!String(error).toLowerCase().includes("extension context invalidated")) throw error;
+      stopMonitoring();
+    }
   }
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === "start_monitoring" && !monitoring) {
       monitoring = true;
       report();
-      timer = window.setInterval(report, 2000);
+      if (monitoring) timer = window.setInterval(report, 2000);
     } else if (message?.type === "stop_monitoring" && monitoring) {
-      monitoring = false;
-      window.clearInterval(timer);
-      timer = null;
-      previousState = "";
+      stopMonitoring();
     }
   });
 })();
