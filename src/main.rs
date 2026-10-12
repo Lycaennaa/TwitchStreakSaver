@@ -13,8 +13,8 @@ use twitch_streak_saver::browser_protocol::{
 };
 use twitch_streak_saver::model::{AppPreferences, FollowedChannel, SchedulingMode};
 use twitch_streak_saver::scheduler::{
-    PointsEligibility, PointsRotation, PointsSession, QueueCandidate, QueuePlanner, QueueStage,
-    POINTS_TURN_DURATION,
+    QueueCandidate, QueuePlanner, QueueStage, StreamRotation, StreamSession, TurnEligibility,
+    STREAM_TURN_DURATION,
 };
 use twitch_streak_saver::twitch as twitch_api;
 use twitch_streak_saver::twitch::TwitchUpdate;
@@ -78,12 +78,12 @@ fn resume_due_auto_open_retries(
     }
 }
 
-fn points_session_for(
+fn stream_turn_session_for(
     channel_id: &str,
     state: Option<&BrowserChannelState>,
     now: Instant,
     capacity_available: bool,
-) -> PointsSession {
+) -> StreamSession {
     let (player_playing, chat_ready) = state.map_or((false, false), |state| {
         let player_fresh = state.player_last_seen.is_some_and(|last_seen| {
             now.saturating_duration_since(last_seen) <= BROWSER_STATE_STALE_AFTER
@@ -98,9 +98,9 @@ fn points_session_for(
             state.chat_tab_id.is_some() && chat_fresh && state.chat_state == Some(ChatState::Ready),
         )
     });
-    PointsSession {
+    StreamSession {
         channel_id: channel_id.to_owned(),
-        eligibility: PointsEligibility {
+        eligibility: TurnEligibility {
             player_playing,
             chat_ready,
             capacity_available,
@@ -258,7 +258,8 @@ struct Dashboard {
     channel_points_balances: HashMap<String, u64>,
     available_claim_channels: HashSet<String>,
     queue_planner: QueuePlanner,
-    points_rotation: PointsRotation,
+    points_rotation: StreamRotation,
+    streak_rotation: StreamRotation,
     manual_open_channels: HashSet<String>,
     auto_open_channels: HashSet<String>,
     auto_open_retry_after: HashMap<String, Instant>,
@@ -311,7 +312,8 @@ impl Dashboard {
             channel_points_balances: HashMap::new(),
             available_claim_channels: HashSet::new(),
             queue_planner: QueuePlanner::default(),
-            points_rotation: PointsRotation::default(),
+            points_rotation: StreamRotation::default(),
+            streak_rotation: StreamRotation::default(),
             manual_open_channels: HashSet::new(),
             auto_open_channels: HashSet::new(),
             auto_open_retry_after: HashMap::new(),

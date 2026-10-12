@@ -1,7 +1,7 @@
 use super::{
-    active_external_stream_count, followed_channel_search_indices, points_session_for,
-    push_activity_log, record_claim_available_once, resume_due_auto_open_retries,
-    schedule_auto_open_retry, ActivityLogEntry, BrowserChannelState, ChatState, FollowedChannel,
+    active_external_stream_count, followed_channel_search_indices, push_activity_log,
+    record_claim_available_once, resume_due_auto_open_retries, schedule_auto_open_retry,
+    stream_turn_session_for, ActivityLogEntry, BrowserChannelState, ChatState, FollowedChannel,
     PlayerState, AUTO_TAB_RETRY_DELAY, BROWSER_STATE_STALE_AFTER, MAX_ACTIVITY_LOG_ENTRIES,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -121,25 +121,25 @@ fn points_eligibility_uses_fresh_playing_video_ready_chat_and_capacity() {
         chat_last_seen: Some(now),
     };
 
-    assert!(points_session_for("a", Some(&state), now, true)
+    assert!(stream_turn_session_for("a", Some(&state), now, true)
         .eligibility
         .is_eligible());
 
     state.player_state = Some(PlayerState::Buffering);
-    assert!(!points_session_for("a", Some(&state), now, true)
+    assert!(!stream_turn_session_for("a", Some(&state), now, true)
         .eligibility
         .is_eligible());
     state.player_state = Some(PlayerState::Unknown);
-    assert!(!points_session_for("a", Some(&state), now, true)
+    assert!(!stream_turn_session_for("a", Some(&state), now, true)
         .eligibility
         .is_eligible());
     state.player_state = Some(PlayerState::Playing);
     state.chat_state = Some(ChatState::Loading);
-    assert!(!points_session_for("a", Some(&state), now, true)
+    assert!(!stream_turn_session_for("a", Some(&state), now, true)
         .eligibility
         .is_eligible());
     state.chat_state = Some(ChatState::Unknown);
-    assert!(!points_session_for("a", Some(&state), now, true)
+    assert!(!stream_turn_session_for("a", Some(&state), now, true)
         .eligibility
         .is_eligible());
     state.chat_state = Some(ChatState::Ready);
@@ -147,10 +147,10 @@ fn points_eligibility_uses_fresh_playing_video_ready_chat_and_capacity() {
         now.checked_sub(BROWSER_STATE_STALE_AFTER + Duration::from_secs(1))
             .unwrap(),
     );
-    assert!(!points_session_for("a", Some(&state), now, true)
+    assert!(!stream_turn_session_for("a", Some(&state), now, true)
         .eligibility
         .is_eligible());
-    assert!(!points_session_for("a", Some(&state), now, false)
+    assert!(!stream_turn_session_for("a", Some(&state), now, false)
         .eligibility
         .is_eligible());
 }

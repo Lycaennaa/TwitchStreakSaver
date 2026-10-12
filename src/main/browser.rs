@@ -39,6 +39,8 @@ impl Dashboard {
                     self.browser_notice = Some("Browser extension disconnected.".to_owned());
                     self.points_rotation
                         .pause_active_sessions(self.started_at.elapsed());
+                    self.streak_rotation
+                        .pause_active_sessions(self.started_at.elapsed());
                 }
                 BridgeEvent::Message(BrowserMessage::Known(message)) => {
                     self.handle_browser_message(message);

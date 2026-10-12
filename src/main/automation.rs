@@ -10,7 +10,9 @@ impl Dashboard {
         self.manual_open_channels.clear();
         self.auto_open_channels.clear();
         self.auto_open_retry_after.clear();
-        self.points_rotation = PointsRotation::default();
+        self.points_rotation = StreamRotation::default();
+        self.streak_rotation = StreamRotation::default();
+        self.queue_planner.clear_streak_turn_deferrals();
         self.send_bridge_command(BrowserCommand::CloseAll);
         self.browser_notice = Some("Automation stopped and app-managed tabs closed.".to_owned());
     }
@@ -25,6 +27,7 @@ impl Dashboard {
             )
         {
             self.points_rotation.pause_active_sessions(now);
+            self.streak_rotation.pause_active_sessions(now);
             return;
         }
         resume_due_auto_open_retries(
@@ -32,6 +35,9 @@ impl Dashboard {
             &mut self.auto_open_retry_after,
             Instant::now(),
         );
+        self.queue_planner.expire_streak_turn_deferrals(now);
+        self.queue_planner
+            .retain_live_channels(&self.live_channel_ids);
 
         let external_streams = active_external_stream_count(
             &self.external_stream_counts,
@@ -77,12 +83,13 @@ impl Dashboard {
 
         match plan.stage {
             QueueStage::Points if !plan.channel_ids.is_empty() => {
+                let _ = self.streak_rotation.observe_active_sessions(&[], now);
                 let browser_now = Instant::now();
                 let sessions = plan
                     .channel_ids
                     .iter()
                     .map(|channel_id| {
-                        points_session_for(
+                        stream_turn_session_for(
                             channel_id,
                             self.browser_states.get(channel_id),
                             browser_now,
@@ -124,10 +131,62 @@ impl Dashboard {
             }
             QueueStage::Points => {
                 self.points_rotation.pause_active_sessions(now);
+                let _ = self.streak_rotation.observe_active_sessions(&[], now);
             }
-            QueueStage::Streak => self.points_rotation.pause_active_sessions(now),
+            QueueStage::Streak if !plan.channel_ids.is_empty() => {
+                self.points_rotation.pause_active_sessions(now);
+                let browser_now = Instant::now();
+                let sessions = plan
+                    .channel_ids
+                    .iter()
+                    .map(|channel_id| {
+                        stream_turn_session_for(
+                            channel_id,
+                            self.browser_states.get(channel_id),
+                            browser_now,
+                            true,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                match self.streak_rotation.observe_active_sessions(&sessions, now) {
+                    Ok(completed) if !completed.is_empty() => {
+                        for channel_id in completed {
+                            self.queue_planner
+                                .record_streak_turn_timed_out(channel_id.clone(), now);
+                            self.streak_rotation.reset_completed_turn(&channel_id);
+                            if let Some(channel_name) = self
+                                .channels
+                                .iter()
+                                .find(|channel| channel.id == channel_id)
+                                .map(|channel| channel.display_name.clone())
+                            {
+                                record_activity(
+                                    &mut self.activity_log,
+                                    channel_name,
+                                    "Streak turn ended after 16 eligible minutes without a WATCH_STREAK event."
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                        plan =
+                            self.queue_planner
+                                .plan(candidates(), self.mode, manual_active_streams);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.browser_error = Some(format!("Streak rotation paused: {error:?}."));
+                        self.streak_rotation.pause_active_sessions(now);
+                        plan.channel_ids.clear();
+                    }
+                }
+            }
+            QueueStage::Streak => {
+                self.points_rotation.pause_active_sessions(now);
+                self.streak_rotation.pause_active_sessions(now);
+            }
             QueueStage::Idle => {
                 let _ = self.points_rotation.observe_active_sessions(&[], now);
+                let _ = self.streak_rotation.observe_active_sessions(&[], now);
             }
         }
 

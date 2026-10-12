@@ -121,7 +121,7 @@ impl Dashboard {
                                                         "Points turn: {}m {:02}s / {}m eligible",
                                                         elapsed.as_secs() / 60,
                                                         elapsed.as_secs() % 60,
-                                                        POINTS_TURN_DURATION.as_secs() / 60,
+                                                        STREAM_TURN_DURATION.as_secs() / 60,
                                                     ))
                                                     .small()
                                                     .weak(),

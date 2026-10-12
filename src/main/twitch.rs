@@ -39,7 +39,8 @@ impl Dashboard {
         self.streak_completed.clear();
         self.notified_streak_channels.clear();
         self.queue_planner = QueuePlanner::default();
-        self.points_rotation = PointsRotation::default();
+        self.points_rotation = StreamRotation::default();
+        self.streak_rotation = StreamRotation::default();
         let close_ids = self
             .auto_open_channels
             .difference(&self.manual_open_channels)
@@ -241,6 +242,8 @@ impl Dashboard {
                     self.streak_completed.clear();
                     self.notified_streak_channels.clear();
                     self.queue_planner = QueuePlanner::default();
+                    self.points_rotation = StreamRotation::default();
+                    self.streak_rotation = StreamRotation::default();
                     let close_ids = self
                         .auto_open_channels
                         .difference(&self.manual_open_channels)

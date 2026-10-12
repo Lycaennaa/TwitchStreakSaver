@@ -1,8 +1,9 @@
 use super::{
-    PointsEligibility, PointsRotation, PointsRotationError, PointsSession, PointsTurnTimer,
-    QueueCandidate, QueuePlanner, QueueStage, MAX_TRACKED_POINTS_SESSIONS, POINTS_TURN_DURATION,
+    QueueCandidate, QueuePlanner, QueueStage, StreamRotation, StreamRotationError, StreamSession,
+    StreamTurnTimer, TurnEligibility, MAX_TRACKED_STREAM_SESSIONS, STREAM_TURN_DURATION,
 };
 use crate::model::{ChannelSelection, SchedulingMode};
+use std::collections::HashSet;
 use std::time::Duration;
 
 fn candidate<'a>(
@@ -80,7 +81,133 @@ fn points_turn_advances_round_robin_from_the_completed_channel() {
     let next = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
     assert_eq!(next.channel_ids, ["b", "c"]);
 }
+#[test]
+fn timed_streak_turn_yields_to_points_without_a_streak_event() {
+    let channels = [
+        candidate("a", true, true, true, false),
+        candidate("b", true, true, true, false),
+        candidate("c", true, false, true, false),
+    ];
+    let mut planner = QueuePlanner::default();
+    let first = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(first.stage, QueueStage::Streak);
+    assert_eq!(first.channel_ids, ["a", "b"]);
 
+    let eligible = TurnEligibility {
+        player_playing: true,
+        chat_ready: true,
+        capacity_available: true,
+    };
+    let sessions = first
+        .channel_ids
+        .iter()
+        .map(|channel_id| StreamSession {
+            channel_id: channel_id.clone(),
+            eligibility: eligible,
+        })
+        .collect::<Vec<_>>();
+    let mut rotation = StreamRotation::default();
+    assert_eq!(
+        rotation.observe_active_sessions(&sessions, Duration::ZERO),
+        Ok(Vec::new())
+    );
+    let completed = rotation
+        .observe_active_sessions(&sessions, STREAM_TURN_DURATION)
+        .unwrap();
+    assert_eq!(completed, ["a", "b"]);
+
+    for channel_id in completed {
+        planner.record_streak_turn_timed_out(channel_id.clone(), STREAM_TURN_DURATION);
+        rotation.reset_completed_turn(&channel_id);
+    }
+    let points = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(points.stage, QueueStage::Points);
+    assert_eq!(points.channel_ids, ["c", "a"]);
+
+    planner.record_points_turn_finished("c");
+    let streak = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(streak.stage, QueueStage::Streak);
+    assert_eq!(streak.channel_ids, ["a", "b"]);
+}
+
+#[test]
+fn timed_out_streak_only_channels_continue_cycling_without_points() {
+    let channels = [
+        candidate("a", true, true, false, false),
+        candidate("b", true, true, false, false),
+        candidate("c", true, true, false, false),
+    ];
+    let mut planner = QueuePlanner::default();
+    let first = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(first.channel_ids, ["a", "b"]);
+    planner.record_streak_turn_timed_out("a", Duration::ZERO);
+    planner.record_streak_turn_timed_out("b", Duration::ZERO);
+
+    let remaining = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(remaining.stage, QueueStage::Streak);
+    assert_eq!(remaining.channel_ids, ["c"]);
+    planner.record_streak_turn_timed_out("c", Duration::ZERO);
+
+    let next = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(next.stage, QueueStage::Streak);
+    assert_eq!(next.channel_ids, ["a", "b"]);
+}
+
+#[test]
+fn timed_out_streak_only_streams_yield_to_points_only_candidate() {
+    let channels = [
+        candidate("a", true, true, false, false),
+        candidate("b", true, true, false, false),
+        candidate("c", true, false, true, false),
+    ];
+    let mut planner = QueuePlanner::default();
+    let first = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(first.stage, QueueStage::Streak);
+    assert_eq!(first.channel_ids, ["a", "b"]);
+
+    planner.record_streak_turn_timed_out("a", Duration::ZERO);
+    planner.record_streak_turn_timed_out("b", Duration::ZERO);
+    let next = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(next.stage, QueueStage::Points);
+    assert_eq!(next.channel_ids, ["c"]);
+}
+#[test]
+fn timed_out_streak_deferral_expires_after_the_channel_goes_offline() {
+    let mut planner = QueuePlanner::default();
+    planner.record_streak_turn_timed_out("a", Duration::ZERO);
+    planner.retain_live_channels(&HashSet::from(["b".to_owned(), "c".to_owned()]));
+
+    let channels = [
+        candidate("a", true, true, false, false),
+        candidate("b", false, true, false, false),
+        candidate("c", true, false, true, false),
+    ];
+    let plan = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(plan.stage, QueueStage::Streak);
+    assert_eq!(plan.channel_ids, ["a"]);
+}
+#[test]
+fn stalled_points_queue_cannot_defer_streak_priority_forever() {
+    let channels = [
+        candidate("streak", true, true, false, false),
+        candidate("points", true, false, true, false),
+    ];
+    let mut planner = QueuePlanner::default();
+    planner.record_streak_turn_timed_out("streak", Duration::ZERO);
+
+    let points = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(points.stage, QueueStage::Points);
+    assert_eq!(points.channel_ids, ["points"]);
+
+    planner.expire_streak_turn_deferrals(STREAM_TURN_DURATION - Duration::from_secs(1));
+    let still_points = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(still_points.stage, QueueStage::Points);
+
+    planner.expire_streak_turn_deferrals(STREAM_TURN_DURATION);
+    let streak = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    assert_eq!(streak.stage, QueueStage::Streak);
+    assert_eq!(streak.channel_ids, ["streak"]);
+}
 #[test]
 fn open_all_respects_capacity() {
     let channels = [
@@ -116,9 +243,9 @@ fn offline_channels_do_not_enter_the_queue() {
     assert!(plan.channel_ids.is_empty());
 }
 #[test]
-fn points_turn_requires_playing_video_chat_and_capacity() {
-    let mut timer = PointsTurnTimer::default();
-    let without_capacity = PointsEligibility {
+fn stream_turn_requires_playing_video_chat_and_capacity() {
+    let mut timer = StreamTurnTimer::default();
+    let without_capacity = TurnEligibility {
         player_playing: true,
         chat_ready: true,
         capacity_available: false,
@@ -131,27 +258,27 @@ fn points_turn_requires_playing_video_chat_and_capacity() {
         Duration::ZERO
     );
 
-    let eligible = PointsEligibility {
+    let eligible = TurnEligibility {
         capacity_available: true,
         ..without_capacity
     };
     assert!(!timer.observe(eligible, Duration::from_secs(1200)));
-    assert!(timer.observe(eligible, Duration::from_secs(1200) + POINTS_TURN_DURATION));
+    assert!(timer.observe(eligible, Duration::from_secs(1200) + STREAM_TURN_DURATION));
     assert!(!timer.observe(eligible, Duration::from_secs(4000)));
 }
 
 #[test]
-fn points_turn_pauses_when_a_prerequisite_fails_and_resumes() {
-    let eligible = PointsEligibility {
+fn stream_turn_pauses_when_a_prerequisite_fails_and_resumes() {
+    let eligible = TurnEligibility {
         player_playing: true,
         chat_ready: true,
         capacity_available: true,
     };
-    let disconnected = PointsEligibility {
+    let disconnected = TurnEligibility {
         chat_ready: false,
         ..eligible
     };
-    let mut timer = PointsTurnTimer::default();
+    let mut timer = StreamTurnTimer::default();
 
     assert!(!timer.observe(eligible, Duration::ZERO));
     assert!(!timer.observe(disconnected, Duration::from_secs(5 * 60)));
@@ -162,21 +289,21 @@ fn points_turn_pauses_when_a_prerequisite_fails_and_resumes() {
     assert!(!timer.observe(eligible, Duration::from_secs(60 * 60)));
     assert!(timer.observe(
         eligible,
-        Duration::from_secs(60 * 60) + POINTS_TURN_DURATION - Duration::from_secs(5 * 60)
+        Duration::from_secs(60 * 60) + STREAM_TURN_DURATION - Duration::from_secs(5 * 60)
     ));
 }
 #[test]
 fn pausing_rotation_preserves_progress_without_counting_paused_time() {
-    let eligible = PointsEligibility {
+    let eligible = TurnEligibility {
         player_playing: true,
         chat_ready: true,
         capacity_available: true,
     };
-    let session = PointsSession {
+    let session = StreamSession {
         channel_id: "a".to_owned(),
         eligibility: eligible,
     };
-    let mut rotation = PointsRotation::default();
+    let mut rotation = StreamRotation::default();
 
     assert!(rotation
         .observe_active_sessions(std::slice::from_ref(&session), Duration::ZERO)
@@ -193,7 +320,7 @@ fn pausing_rotation_preserves_progress_without_counting_paused_time() {
         .is_empty());
     assert_eq!(
         rotation.observe_active_sessions(
-            &[PointsSession {
+            &[StreamSession {
                 channel_id: "a".to_owned(),
                 eligibility: eligible,
             }],
@@ -204,45 +331,67 @@ fn pausing_rotation_preserves_progress_without_counting_paused_time() {
 }
 
 #[test]
-fn completed_points_turn_can_start_another_rotation() {
-    let session = PointsSession {
+fn pausing_at_turn_boundary_preserves_completion_for_resume() {
+    let session = StreamSession {
         channel_id: "a".to_owned(),
-        eligibility: PointsEligibility {
+        eligibility: TurnEligibility {
             player_playing: true,
             chat_ready: true,
             capacity_available: true,
         },
     };
-    let mut rotation = PointsRotation::default();
+    let mut rotation = StreamRotation::default();
+    assert!(rotation
+        .observe_active_sessions(std::slice::from_ref(&session), Duration::ZERO)
+        .unwrap()
+        .is_empty());
+
+    rotation.pause_active_sessions(STREAM_TURN_DURATION);
+    assert_eq!(
+        rotation.observe_active_sessions(&[session], STREAM_TURN_DURATION),
+        Ok(vec!["a".to_owned()])
+    );
+}
+#[test]
+fn completed_stream_turn_can_start_another_rotation() {
+    let session = StreamSession {
+        channel_id: "a".to_owned(),
+        eligibility: TurnEligibility {
+            player_playing: true,
+            chat_ready: true,
+            capacity_available: true,
+        },
+    };
+    let mut rotation = StreamRotation::default();
 
     assert!(rotation
         .observe_active_sessions(std::slice::from_ref(&session), Duration::ZERO)
         .unwrap()
         .is_empty());
     assert_eq!(
-        rotation.observe_active_sessions(&[session.clone()], POINTS_TURN_DURATION),
+        rotation.observe_active_sessions(&[session.clone()], STREAM_TURN_DURATION),
         Ok(vec!["a".to_owned()])
     );
     rotation.reset_completed_turn("a");
     assert!(rotation
-        .observe_active_sessions(&[session.clone()], POINTS_TURN_DURATION)
+        .observe_active_sessions(&[session.clone()], STREAM_TURN_DURATION)
         .unwrap()
         .is_empty());
     assert_eq!(
-        rotation.observe_active_sessions(&[session], POINTS_TURN_DURATION * 2,),
+        rotation.observe_active_sessions(&[session], STREAM_TURN_DURATION * 2,),
         Ok(vec!["a".to_owned()])
     );
 }
 
 #[test]
-fn points_rotation_forgets_closed_sessions_and_bounds_tracking() {
-    let eligible = PointsEligibility {
+fn stream_rotation_forgets_closed_sessions_and_bounds_tracking() {
+    let eligible = TurnEligibility {
         player_playing: true,
         chat_ready: true,
         capacity_available: true,
     };
-    let mut rotation = PointsRotation::default();
-    let first_session = [PointsSession {
+    let mut rotation = StreamRotation::default();
+    let first_session = [StreamSession {
         channel_id: "a".to_owned(),
         eligibility: eligible,
     }];
@@ -259,31 +408,31 @@ fn points_rotation_forgets_closed_sessions_and_bounds_tracking() {
         None
     );
 
-    let too_many = (0..=MAX_TRACKED_POINTS_SESSIONS)
-        .map(|index| PointsSession {
+    let too_many = (0..=MAX_TRACKED_STREAM_SESSIONS)
+        .map(|index| StreamSession {
             channel_id: index.to_string(),
             eligibility: eligible,
         })
         .collect::<Vec<_>>();
     assert_eq!(
         rotation.observe_active_sessions(&too_many, Duration::from_secs(10 * 60)),
-        Err(PointsRotationError::TooManySessions {
-            limit: MAX_TRACKED_POINTS_SESSIONS,
-            actual: MAX_TRACKED_POINTS_SESSIONS + 1,
+        Err(StreamRotationError::TooManySessions {
+            limit: MAX_TRACKED_STREAM_SESSIONS,
+            actual: MAX_TRACKED_STREAM_SESSIONS + 1,
         })
     );
 }
 
 #[test]
-fn points_rotation_rejects_duplicate_active_channel_ids() {
-    let session = PointsSession {
+fn stream_rotation_rejects_duplicate_active_channel_ids() {
+    let session = StreamSession {
         channel_id: "duplicate".to_owned(),
-        eligibility: PointsEligibility::default(),
+        eligibility: TurnEligibility::default(),
     };
     let sessions = [session.clone(), session];
 
     assert_eq!(
-        PointsRotation::default().observe_active_sessions(&sessions, Duration::ZERO),
-        Err(PointsRotationError::DuplicateChannel)
+        StreamRotation::default().observe_active_sessions(&sessions, Duration::ZERO),
+        Err(StreamRotationError::DuplicateChannel)
     );
 }

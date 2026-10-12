@@ -1,4 +1,5 @@
 use crate::model::{ChannelSelection, SchedulingMode};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 const MAX_APP_STREAMS: usize = SchedulingMode::OpenAll.app_stream_limit();
 
@@ -25,19 +26,43 @@ pub struct QueuePlan {
 
 #[derive(Default)]
 pub struct QueuePlanner {
-    last_streak_completed: Option<String>,
+    last_streak_turn_finished: Option<String>,
     last_points_turn_finished: Option<String>,
+    deferred_streak_channels: HashMap<String, Duration>,
 }
 
 impl QueuePlanner {
     pub fn record_streak_completed(&mut self, channel_id: impl Into<String>) {
-        self.last_streak_completed = Some(channel_id.into());
+        let channel_id = channel_id.into();
+        self.last_streak_turn_finished = Some(channel_id.clone());
+        self.deferred_streak_channels.remove(&channel_id);
+    }
+
+    pub fn record_streak_turn_timed_out(&mut self, channel_id: impl Into<String>, now: Duration) {
+        let channel_id = channel_id.into();
+        self.last_streak_turn_finished = Some(channel_id.clone());
+        self.last_points_turn_finished = Some(channel_id.clone());
+        self.deferred_streak_channels
+            .insert(channel_id, now.saturating_add(STREAM_TURN_DURATION));
     }
 
     pub fn record_points_turn_finished(&mut self, channel_id: impl Into<String>) {
         self.last_points_turn_finished = Some(channel_id.into());
+        self.deferred_streak_channels.clear();
     }
 
+    pub fn retain_live_channels(&mut self, live_channel_ids: &HashSet<String>) {
+        self.deferred_streak_channels
+            .retain(|channel_id, _| live_channel_ids.contains(channel_id));
+    }
+
+    pub fn clear_streak_turn_deferrals(&mut self) {
+        self.deferred_streak_channels.clear();
+    }
+    pub fn expire_streak_turn_deferrals(&mut self, now: Duration) {
+        self.deferred_streak_channels
+            .retain(|_, expires_at| *expires_at > now);
+    }
     pub fn plan<'a>(
         &self,
         candidates: impl Iterator<Item = QueueCandidate<'a>>,
@@ -48,18 +73,32 @@ impl QueuePlanner {
             .app_stream_limit()
             .saturating_sub(manual_active_streams);
         let mut streak_candidates = CandidateRotation::default();
+        let mut deferred_streak_candidates = CandidateRotation::default();
         let mut points_candidates = CandidateRotation::default();
         let mut has_streak_candidates = false;
+        let mut has_deferred_streak_candidates = false;
         let mut has_points_candidates = false;
 
         for candidate in candidates {
             if is_eligible(QueueStage::Streak, &candidate) {
-                has_streak_candidates = true;
-                streak_candidates.observe(
-                    candidate.channel_id,
-                    self.last_streak_completed.as_deref(),
-                    app_capacity,
-                );
+                if self
+                    .deferred_streak_channels
+                    .contains_key(candidate.channel_id)
+                {
+                    has_deferred_streak_candidates = true;
+                    deferred_streak_candidates.observe(
+                        candidate.channel_id,
+                        self.last_streak_turn_finished.as_deref(),
+                        app_capacity,
+                    );
+                } else {
+                    has_streak_candidates = true;
+                    streak_candidates.observe(
+                        candidate.channel_id,
+                        self.last_streak_turn_finished.as_deref(),
+                        app_capacity,
+                    );
+                }
             }
             if is_eligible(QueueStage::Points, &candidate) {
                 has_points_candidates = true;
@@ -70,7 +109,6 @@ impl QueuePlanner {
                 );
             }
         }
-
         if has_streak_candidates {
             QueuePlan {
                 stage: QueueStage::Streak,
@@ -81,6 +119,11 @@ impl QueuePlanner {
                 stage: QueueStage::Points,
                 channel_ids: points_candidates.into_channel_ids(app_capacity),
             }
+        } else if has_deferred_streak_candidates {
+            QueuePlan {
+                stage: QueueStage::Streak,
+                channel_ids: deferred_streak_candidates.into_channel_ids(app_capacity),
+            }
         } else {
             QueuePlan {
                 stage: QueueStage::Idle,
@@ -89,54 +132,54 @@ impl QueuePlanner {
         }
     }
 }
-pub const POINTS_TURN_DURATION: Duration = Duration::from_secs(16 * 60);
-pub const MAX_TRACKED_POINTS_SESSIONS: usize = 4;
+pub const STREAM_TURN_DURATION: Duration = Duration::from_secs(16 * 60);
+pub const MAX_TRACKED_STREAM_SESSIONS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PointsEligibility {
+pub struct TurnEligibility {
     pub player_playing: bool,
     pub chat_ready: bool,
     pub capacity_available: bool,
 }
 
-impl PointsEligibility {
+impl TurnEligibility {
     pub const fn is_eligible(self) -> bool {
         self.player_playing && self.chat_ready && self.capacity_available
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PointsSession {
+pub struct StreamSession {
     pub channel_id: String,
-    pub eligibility: PointsEligibility,
+    pub eligibility: TurnEligibility,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PointsRotationError {
+pub enum StreamRotationError {
     TooManySessions { limit: usize, actual: usize },
     DuplicateChannel,
 }
 
 #[derive(Default)]
-pub struct PointsRotation {
-    turns: Vec<TrackedPointsTurn>,
+pub struct StreamRotation {
+    turns: Vec<TrackedStreamTurn>,
 }
 
 #[derive(Default)]
-struct TrackedPointsTurn {
+struct TrackedStreamTurn {
     channel_id: String,
-    timer: PointsTurnTimer,
+    timer: StreamTurnTimer,
 }
 
 #[derive(Default)]
-pub struct PointsTurnTimer {
+pub struct StreamTurnTimer {
     eligible_duration: Duration,
     eligible_since: Option<Duration>,
     complete: bool,
 }
 
-impl PointsTurnTimer {
-    pub fn observe(&mut self, eligibility: PointsEligibility, now: Duration) -> bool {
+impl StreamTurnTimer {
+    pub fn observe(&mut self, eligibility: TurnEligibility, now: Duration) -> bool {
         if self.complete {
             return false;
         }
@@ -149,13 +192,21 @@ impl PointsTurnTimer {
                 .saturating_add(now.saturating_sub(eligible_since));
         }
 
-        if self.elapsed_eligible(now) >= POINTS_TURN_DURATION {
-            self.eligible_duration = POINTS_TURN_DURATION;
+        if self.elapsed_eligible(now) >= STREAM_TURN_DURATION {
+            self.eligible_duration = STREAM_TURN_DURATION;
             self.eligible_since = None;
             self.complete = true;
             true
         } else {
             false
+        }
+    }
+
+    fn pause(&mut self, now: Duration) {
+        if let Some(eligible_since) = self.eligible_since.take() {
+            self.eligible_duration = self
+                .eligible_duration
+                .saturating_add(now.saturating_sub(eligible_since));
         }
     }
 
@@ -165,19 +216,19 @@ impl PointsTurnTimer {
                 self.eligible_since
                     .map_or(Duration::ZERO, |start| now.saturating_sub(start)),
             )
-            .min(POINTS_TURN_DURATION)
+            .min(STREAM_TURN_DURATION)
     }
 }
 
-impl PointsRotation {
+impl StreamRotation {
     pub fn observe_active_sessions(
         &mut self,
-        sessions: &[PointsSession],
+        sessions: &[StreamSession],
         now: Duration,
-    ) -> Result<Vec<String>, PointsRotationError> {
-        if sessions.len() > MAX_TRACKED_POINTS_SESSIONS {
-            return Err(PointsRotationError::TooManySessions {
-                limit: MAX_TRACKED_POINTS_SESSIONS,
+    ) -> Result<Vec<String>, StreamRotationError> {
+        if sessions.len() > MAX_TRACKED_STREAM_SESSIONS {
+            return Err(StreamRotationError::TooManySessions {
+                limit: MAX_TRACKED_STREAM_SESSIONS,
                 actual: sessions.len(),
             });
         }
@@ -186,7 +237,7 @@ impl PointsRotation {
                 .iter()
                 .any(|earlier| earlier.channel_id == session.channel_id)
             {
-                return Err(PointsRotationError::DuplicateChannel);
+                return Err(StreamRotationError::DuplicateChannel);
             }
         }
 
@@ -205,9 +256,9 @@ impl PointsRotation {
             {
                 turn
             } else {
-                self.turns.push(TrackedPointsTurn {
+                self.turns.push(TrackedStreamTurn {
                     channel_id: session.channel_id.clone(),
-                    timer: PointsTurnTimer::default(),
+                    timer: StreamTurnTimer::default(),
                 });
                 self.turns.last_mut().expect("turn was just inserted")
             };
@@ -222,7 +273,7 @@ impl PointsRotation {
 
     pub fn pause_active_sessions(&mut self, now: Duration) {
         for turn in &mut self.turns {
-            turn.timer.observe(PointsEligibility::default(), now);
+            turn.timer.pause(now);
         }
     }
     pub fn reset_completed_turn(&mut self, channel_id: &str) {
@@ -232,7 +283,7 @@ impl PointsRotation {
             .find(|turn| turn.channel_id == channel_id)
         {
             if turn.timer.complete {
-                turn.timer = PointsTurnTimer::default();
+                turn.timer = StreamTurnTimer::default();
             }
         }
     }
