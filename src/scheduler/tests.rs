@@ -2,7 +2,7 @@ use super::{
     QueueCandidate, QueuePlanner, QueueStage, StreamRotation, StreamRotationError, StreamSession,
     StreamTurnTimer, TurnEligibility, MAX_TRACKED_STREAM_SESSIONS, STREAM_TURN_DURATION,
 };
-use crate::model::{ChannelSelection, SchedulingMode};
+use crate::model::ChannelSelection;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ fn earn_mode_prioritizes_streaks_and_respects_manual_capacity() {
         candidate("streak-b", true, true, false, false),
     ];
     let planner = QueuePlanner::default();
-    let plan = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 1);
+    let plan = planner.plan(channels.iter().copied(), 1);
     assert_eq!(plan.stage, QueueStage::Streak);
     assert_eq!(plan.channel_ids, ["streak-a"]);
 }
@@ -40,11 +40,7 @@ fn planner_accepts_a_single_pass_candidate_source() {
         candidate("streak-b", true, true, false, false),
     ];
     let mut source = channels.into_iter();
-    let plan = QueuePlanner::default().plan(
-        std::iter::from_fn(|| source.next()),
-        SchedulingMode::Earn,
-        0,
-    );
+    let plan = QueuePlanner::default().plan(std::iter::from_fn(|| source.next()), 0);
 
     assert_eq!(plan.stage, QueueStage::Streak);
     assert_eq!(plan.channel_ids, ["streak-a", "streak-b"]);
@@ -59,7 +55,7 @@ fn completed_streak_channels_enter_points_queue_after_streak_phase() {
     ];
     let mut planner = QueuePlanner::default();
     planner.record_streak_completed("both-b");
-    let plan = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let plan = planner.plan(channels.iter().copied(), 0);
 
     assert_eq!(plan.stage, QueueStage::Points);
     assert_eq!(plan.channel_ids, ["both-a", "both-b"]);
@@ -74,11 +70,11 @@ fn points_turn_advances_round_robin_from_the_completed_channel() {
     ];
     let mut planner = QueuePlanner::default();
 
-    let first = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let first = planner.plan(channels.iter().copied(), 0);
     assert_eq!(first.channel_ids, ["a", "b"]);
 
     planner.record_points_turn_finished("a");
-    let next = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let next = planner.plan(channels.iter().copied(), 0);
     assert_eq!(next.channel_ids, ["b", "c"]);
 }
 #[test]
@@ -89,7 +85,7 @@ fn timed_streak_turn_yields_to_points_without_a_streak_event() {
         candidate("c", true, false, true, false),
     ];
     let mut planner = QueuePlanner::default();
-    let first = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let first = planner.plan(channels.iter().copied(), 0);
     assert_eq!(first.stage, QueueStage::Streak);
     assert_eq!(first.channel_ids, ["a", "b"]);
 
@@ -120,12 +116,12 @@ fn timed_streak_turn_yields_to_points_without_a_streak_event() {
         planner.record_streak_turn_timed_out(channel_id.clone(), STREAM_TURN_DURATION);
         rotation.reset_completed_turn(&channel_id);
     }
-    let points = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let points = planner.plan(channels.iter().copied(), 0);
     assert_eq!(points.stage, QueueStage::Points);
     assert_eq!(points.channel_ids, ["c", "a"]);
 
     planner.record_points_turn_finished("c");
-    let streak = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let streak = planner.plan(channels.iter().copied(), 0);
     assert_eq!(streak.stage, QueueStage::Streak);
     assert_eq!(streak.channel_ids, ["a", "b"]);
 }
@@ -138,17 +134,17 @@ fn timed_out_streak_only_channels_continue_cycling_without_points() {
         candidate("c", true, true, false, false),
     ];
     let mut planner = QueuePlanner::default();
-    let first = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let first = planner.plan(channels.iter().copied(), 0);
     assert_eq!(first.channel_ids, ["a", "b"]);
     planner.record_streak_turn_timed_out("a", Duration::ZERO);
     planner.record_streak_turn_timed_out("b", Duration::ZERO);
 
-    let remaining = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let remaining = planner.plan(channels.iter().copied(), 0);
     assert_eq!(remaining.stage, QueueStage::Streak);
     assert_eq!(remaining.channel_ids, ["c"]);
     planner.record_streak_turn_timed_out("c", Duration::ZERO);
 
-    let next = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let next = planner.plan(channels.iter().copied(), 0);
     assert_eq!(next.stage, QueueStage::Streak);
     assert_eq!(next.channel_ids, ["a", "b"]);
 }
@@ -161,13 +157,13 @@ fn timed_out_streak_only_streams_yield_to_points_only_candidate() {
         candidate("c", true, false, true, false),
     ];
     let mut planner = QueuePlanner::default();
-    let first = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let first = planner.plan(channels.iter().copied(), 0);
     assert_eq!(first.stage, QueueStage::Streak);
     assert_eq!(first.channel_ids, ["a", "b"]);
 
     planner.record_streak_turn_timed_out("a", Duration::ZERO);
     planner.record_streak_turn_timed_out("b", Duration::ZERO);
-    let next = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let next = planner.plan(channels.iter().copied(), 0);
     assert_eq!(next.stage, QueueStage::Points);
     assert_eq!(next.channel_ids, ["c"]);
 }
@@ -182,7 +178,7 @@ fn timed_out_streak_deferral_expires_after_the_channel_goes_offline() {
         candidate("b", false, true, false, false),
         candidate("c", true, false, true, false),
     ];
-    let plan = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let plan = planner.plan(channels.iter().copied(), 0);
     assert_eq!(plan.stage, QueueStage::Streak);
     assert_eq!(plan.channel_ids, ["a"]);
 }
@@ -195,21 +191,21 @@ fn stalled_points_queue_cannot_defer_streak_priority_forever() {
     let mut planner = QueuePlanner::default();
     planner.record_streak_turn_timed_out("streak", Duration::ZERO);
 
-    let points = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let points = planner.plan(channels.iter().copied(), 0);
     assert_eq!(points.stage, QueueStage::Points);
     assert_eq!(points.channel_ids, ["points"]);
 
     planner.expire_streak_turn_deferrals(STREAM_TURN_DURATION - Duration::from_secs(1));
-    let still_points = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let still_points = planner.plan(channels.iter().copied(), 0);
     assert_eq!(still_points.stage, QueueStage::Points);
 
     planner.expire_streak_turn_deferrals(STREAM_TURN_DURATION);
-    let streak = planner.plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let streak = planner.plan(channels.iter().copied(), 0);
     assert_eq!(streak.stage, QueueStage::Streak);
     assert_eq!(streak.channel_ids, ["streak"]);
 }
 #[test]
-fn open_all_respects_capacity() {
+fn planner_caps_automatic_streams_at_two() {
     let channels = [
         candidate("a", true, false, true, false),
         candidate("b", true, false, true, false),
@@ -217,27 +213,27 @@ fn open_all_respects_capacity() {
         candidate("d", true, false, true, false),
         candidate("e", true, false, true, false),
     ];
-    let plan = QueuePlanner::default().plan(channels.iter().copied(), SchedulingMode::OpenAll, 0);
+    let plan = QueuePlanner::default().plan(channels.iter().copied(), 0);
 
     assert_eq!(plan.stage, QueueStage::Points);
-    assert_eq!(plan.channel_ids, ["a", "b", "c", "d"]);
+    assert_eq!(plan.channel_ids, ["a", "b"]);
 }
 
 #[test]
-fn open_all_reserves_capacity_for_manually_open_streams() {
+fn planner_reserves_manually_open_stream_slots() {
     let channels = [
         candidate("a", true, false, true, false),
         candidate("b", true, false, true, false),
         candidate("c", true, false, true, false),
         candidate("d", true, false, true, false),
     ];
-    let plan = QueuePlanner::default().plan(channels.iter().copied(), SchedulingMode::OpenAll, 1);
-    assert_eq!(plan.channel_ids, ["a", "b", "c"]);
+    let plan = QueuePlanner::default().plan(channels.iter().copied(), 1);
+    assert_eq!(plan.channel_ids, ["a"]);
 }
 #[test]
 fn offline_channels_do_not_enter_the_queue() {
     let channels = [candidate("offline", false, true, true, false)];
-    let plan = QueuePlanner::default().plan(channels.iter().copied(), SchedulingMode::Earn, 0);
+    let plan = QueuePlanner::default().plan(channels.iter().copied(), 0);
 
     assert_eq!(plan.stage, QueueStage::Idle);
     assert!(plan.channel_ids.is_empty());

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Twitch Streak Saver",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Open active Twitch channel pages in dedicated windows and report stream availability to Twitch Streak Saver.",
   "permissions": ["nativeMessaging", "storage", "tabs"],
   "host_permissions": ["https://www.twitch.tv/*", "https://player.twitch.tv/*"],

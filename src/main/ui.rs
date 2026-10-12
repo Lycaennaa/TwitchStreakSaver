@@ -132,19 +132,8 @@ impl Dashboard {
         ui.group(|ui| {
             ui.strong("Watch strategy");
             ui.add_space(6.0);
-
-            ui.selectable_value(&mut self.mode, SchedulingMode::Earn, "Earn");
-            ui.label("Prioritize streaks and keep to two app-managed streams.");
-            ui.add_space(6.0);
-
-            ui.selectable_value(&mut self.mode, SchedulingMode::OpenAll, "Open All");
-            ui.label(
-                "Keep up to four app-managed streams open. More than two may not earn progress.",
-            );
-            ui.label(format!(
-                "App-managed stream limit: {}",
-                self.mode.app_stream_limit()
-            ));
+            ui.label("Prioritize Streak channels and rotate eligible Streak and Points turns.");
+            ui.label(format!("App-managed stream limit: {APP_STREAM_LIMIT}"));
         });
 
         let browser_connected = self.browser_connected;

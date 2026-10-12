@@ -24,7 +24,7 @@ async function createExtension({
   pauseFirstNavigation = false,
   storedManagedTabs = [],
   initialTabs = [],
-  extensionVersion = "0.3.3",
+  extensionVersion = "0.3.4",
 } = {}) {
   const tabsById = new Map();
   const windowsById = new Map([[17, { id: 17, focused: true, state: "normal", type: "normal" }]]);
@@ -277,6 +277,9 @@ async function createExtension({
     send(message) {
       port.onMessage.dispatch(message);
       return vm.runInContext("nativeCommandQueue", context);
+    },
+    reportExternalStreams() {
+      return vm.runInContext("reportExternalStreams()", context);
     },
     disconnectHost(error) {
       runtimeLastError = error;
@@ -604,6 +607,34 @@ test("sync after extension reload restores persisted managed tabs", async () => 
   assert.equal(restarted.tabsById.size, 0);
   assert.deepEqual(restarted.snapshotManagedTabs(), []);
 });
+test("external inventory reports restored app-managed player channels separately", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["deselected-channel", {
+        login: "deselected",
+        layout: "combined_window",
+        playerTabId: 11,
+        chatTabId: 11,
+        contentVersion: "0.3.4",
+      }],
+    ],
+    initialTabs: [
+      { id: 11, url: "https://www.twitch.tv/deselected" },
+      { id: 12, url: "https://www.twitch.tv/external" },
+    ],
+  });
+
+  await extension.reportExternalStreams();
+
+  const [inventory] = extension.calls.nativeMessages
+    .filter((message) => message.type === "external_streams");
+  assert.deepEqual(JSON.parse(JSON.stringify(inventory)), {
+    type: "external_streams",
+    channel_counts: {},
+    unmatched_count: 1,
+    managed_channel_ids: ["deselected-channel"],
+  });
+});
 test("sync reloads managed pages when the extension version changes", async () => {
   const original = await createExtension({ extensionVersion: "0.3.2" });
   await original.open({
@@ -613,7 +644,7 @@ test("sync reloads managed pages when the extension version changes", async () =
   });
   const [originalTab] = [...original.tabsById.values()];
   const restarted = await createExtension({
-    extensionVersion: "0.3.3",
+    extensionVersion: "0.3.4",
     storedManagedTabs: original.snapshotManagedTabs(),
     initialTabs: [originalTab],
   });
@@ -630,7 +661,7 @@ test("sync reloads managed pages when the extension version changes", async () =
     ).length,
     1,
   );
-  assert.equal(restarted.snapshotManagedTabs()[0][1].contentVersion, "0.3.3");
+  assert.equal(restarted.snapshotManagedTabs()[0][1].contentVersion, "0.3.4");
   assert.deepEqual(restarted.calls.windowUpdates, []);
 });
 
@@ -666,7 +697,7 @@ test("sync resumes a saved blank tab after an interrupted navigation", async () 
         playerTabId: 44,
         chatTabId: 44,
         pendingUrl: "https://www.twitch.tv/streamer",
-        contentVersion: "0.3.3",
+        contentVersion: "0.3.4",
       }],
     ],
     initialTabs: [{ id: 44, url: "about:blank" }],
@@ -692,7 +723,7 @@ test("interrupted login rename survives reconnect without restarting stale monit
         layout: "combined_window",
         playerTabId: 51,
         chatTabId: 51,
-        contentVersion: "0.3.3",
+        contentVersion: "0.3.4",
       }],
     ],
     initialTabs: [{ id: 51, url: "https://www.twitch.tv/oldname", active: true }],

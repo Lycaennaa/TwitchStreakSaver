@@ -11,10 +11,10 @@ use twitch_streak_saver::browser_protocol::{
     BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, ChatState, KnownBrowserMessage,
     PlayerState,
 };
-use twitch_streak_saver::model::{AppPreferences, FollowedChannel, SchedulingMode};
+use twitch_streak_saver::model::{AppPreferences, FollowedChannel};
 use twitch_streak_saver::scheduler::{
     QueueCandidate, QueuePlanner, QueueStage, StreamRotation, StreamSession, TurnEligibility,
-    STREAM_TURN_DURATION,
+    APP_STREAM_LIMIT, STREAM_TURN_DURATION,
 };
 use twitch_streak_saver::twitch as twitch_api;
 use twitch_streak_saver::twitch::TwitchUpdate;
@@ -119,6 +119,37 @@ fn active_external_stream_count(
         .fold(unmatched_count, |total, (_, count)| {
             total.saturating_add(*count)
         })
+}
+
+fn active_app_stream_count(
+    app_open_channels: &HashSet<String>,
+    followed_channels: &[FollowedChannel],
+    live_channel_ids: &HashSet<String>,
+) -> usize {
+    app_open_channels
+        .iter()
+        .filter(|channel_id| {
+            let channel_id = channel_id.as_str();
+            live_channel_ids.contains(channel_id)
+                || !followed_channels
+                    .iter()
+                    .any(|channel| channel.id.as_str() == channel_id)
+        })
+        .count()
+}
+
+fn restore_managed_channel_ownership(
+    reported_channels: impl IntoIterator<Item = String>,
+    auto_open_channels: &mut HashSet<String>,
+    manual_open_channels: &mut HashSet<String>,
+) {
+    let reported_channels = reported_channels
+        .into_iter()
+        .filter(|channel_id| !channel_id.is_empty())
+        .collect::<HashSet<_>>();
+    auto_open_channels.retain(|channel_id| reported_channels.contains(channel_id));
+    manual_open_channels.retain(|channel_id| reported_channels.contains(channel_id));
+    manual_open_channels.extend(reported_channels.difference(auto_open_channels).cloned());
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,7 +258,6 @@ fn main() -> eframe::Result<()> {
 }
 
 struct Dashboard {
-    mode: SchedulingMode,
     auto_start_on_launch: bool,
     wake_browser_on_open: bool,
     automation_enabled: bool,
@@ -281,7 +311,6 @@ impl Dashboard {
         let (twitch_sender, twitch_updates) = mpsc::channel();
 
         Self {
-            mode: preferences.mode,
             auto_start_on_launch: preferences.auto_start_on_launch,
             wake_browser_on_open: preferences.wake_browser_on_open,
             automation_enabled: preferences.auto_start_on_launch,
@@ -322,7 +351,6 @@ impl Dashboard {
 
     fn preferences(&self) -> AppPreferences {
         AppPreferences {
-            mode: self.mode,
             auto_start_on_launch: self.auto_start_on_launch,
             wake_browser_on_open: self.wake_browser_on_open,
             channels: self.channels.clone(),

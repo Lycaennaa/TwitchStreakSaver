@@ -10,22 +10,6 @@ impl ChannelSelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SchedulingMode {
-    Earn,
-    OpenAll,
-}
-
-impl SchedulingMode {
-    pub const fn app_stream_limit(self) -> usize {
-        match self {
-            Self::Earn => 2,
-            Self::OpenAll => 4,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FollowedChannel {
     pub id: String,
@@ -68,7 +52,6 @@ pub fn merge_followed_channels(
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppPreferences {
-    pub mode: SchedulingMode,
     pub auto_start_on_launch: bool,
     pub wake_browser_on_open: bool,
     pub channels: Vec<FollowedChannel>,
@@ -77,7 +60,6 @@ pub struct AppPreferences {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
-            mode: SchedulingMode::Earn,
             auto_start_on_launch: true,
             wake_browser_on_open: false,
             channels: vec![
@@ -91,7 +73,7 @@ impl Default for AppPreferences {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppPreferences, ChannelSelection, SchedulingMode};
+    use super::{AppPreferences, ChannelSelection};
 
     #[test]
     fn followed_channel_refresh_keeps_selections_for_matching_ids() {
@@ -120,9 +102,8 @@ mod tests {
         assert_eq!(refreshed[1].selection, ChannelSelection::default());
     }
     #[test]
-    fn preferences_round_trip_channel_modes_and_settings() {
+    fn preferences_round_trip_settings() {
         let mut preferences = AppPreferences::default();
-        preferences.mode = SchedulingMode::OpenAll;
         preferences.channels[0].selection = ChannelSelection {
             streak: true,
             points: true,
@@ -137,19 +118,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_preferences_ignore_removed_tab_layout() {
+    fn legacy_preferences_ignore_removed_fields() {
         let preferences: AppPreferences = ron::from_str(
-            "(mode: earn, tab_layout: separate_player_chat, channels: [], legacy_setting: false)",
+            "(mode: open_all, auto_start_on_launch: false, wake_browser_on_open: true, tab_layout: separate_player_chat, channels: [], legacy_setting: false)",
         )
         .unwrap();
 
-        assert!(preferences.auto_start_on_launch);
-        assert!(!preferences.wake_browser_on_open);
+        assert!(!preferences.auto_start_on_launch);
+        assert!(preferences.wake_browser_on_open);
         assert!(preferences.channels.is_empty());
     }
 
     #[test]
-    fn channel_can_be_selected_for_both_modes_independently() {
+    fn channel_can_be_selected_for_streaks_and_points_independently() {
         let mut selection = ChannelSelection::default();
         assert!(!selection.is_selected());
 
@@ -160,11 +141,5 @@ mod tests {
         selection.streak = false;
         assert!(selection.is_selected());
         assert!(selection.points);
-    }
-
-    #[test]
-    fn scheduling_modes_expose_their_app_stream_limits() {
-        assert_eq!(SchedulingMode::Earn.app_stream_limit(), 2);
-        assert_eq!(SchedulingMode::OpenAll.app_stream_limit(), 4);
     }
 }

@@ -63,7 +63,13 @@ async function reportExternalStreams() {
     managedTabIds,
     channelsByLogin,
   );
-  sendNative({ type: "external_streams", ...inventory });
+  sendNative({
+    type: "external_streams",
+    ...inventory,
+    managed_channel_ids: Array.from(managedTabs.entries())
+      .filter(([, record]) => Number.isInteger(record.playerTabId))
+      .map(([channelId]) => channelId),
+  });
 }
 
 function scheduleExternalStreamReport() {

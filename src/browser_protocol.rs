@@ -50,6 +50,8 @@ pub enum KnownBrowserMessage {
         #[serde(deserialize_with = "deserialize_channel_counts")]
         channel_counts: HashMap<String, usize>,
         unmatched_count: usize,
+        #[serde(default)]
+        managed_channel_ids: Option<Vec<String>>,
     },
     TabOpened {
         channel_id: String,
@@ -251,12 +253,14 @@ mod tests {
             "type": "external_streams",
             "channel_counts": {"live": 2, "invalid": "many", "zero": 0},
             "unmatched_count": 3,
+            "managed_channel_ids": ["managed-channel"],
         }))
         .unwrap();
 
         let BrowserMessage::Known(KnownBrowserMessage::ExternalStreams {
             channel_counts,
             unmatched_count,
+            managed_channel_ids,
         }) = message
         else {
             panic!("expected external stream inventory");
@@ -266,5 +270,22 @@ mod tests {
             HashMap::from([("live".to_owned(), 2), ("zero".to_owned(), 0)]),
         );
         assert_eq!(unmatched_count, 3);
+        assert_eq!(
+            managed_channel_ids,
+            Some(vec!["managed-channel".to_owned()])
+        );
+        let legacy = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "external_streams",
+            "channel_counts": {},
+            "unmatched_count": 0,
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            BrowserMessage::Known(KnownBrowserMessage::ExternalStreams {
+                managed_channel_ids: None,
+                ..
+            })
+        ));
     }
 }

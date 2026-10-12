@@ -7,6 +7,8 @@ enum BrowserTabUpdate {
         chat: Option<ChatState>,
     },
 }
+const STREAM_LIMIT_EXTENSION_ERROR: &str =
+    "Reload the Chrome/Brave extension (version 0.3.4 or newer) to enforce the two-stream limit.";
 
 impl Dashboard {
     pub(super) fn poll_browser_bridge(&mut self) {
@@ -23,7 +25,6 @@ impl Dashboard {
                     self.external_stream_counts.clear();
                     self.external_unmatched_streams = 0;
                     self.external_inventory_received = false;
-                    self.auto_open_channels.clear();
                     self.auto_open_retry_after.clear();
                     self.browser_error = None;
                     self.browser_notice = None;
@@ -56,6 +57,7 @@ impl Dashboard {
             KnownBrowserMessage::ExternalStreams {
                 channel_counts,
                 unmatched_count,
+                managed_channel_ids,
             } => {
                 let known_channel_ids = self
                     .channels
@@ -69,7 +71,25 @@ impl Dashboard {
                     })
                     .collect();
                 self.external_unmatched_streams = unmatched_count;
-                self.external_inventory_received = true;
+                if let Some(managed_channel_ids) = managed_channel_ids {
+                    if !self.external_inventory_received {
+                        restore_managed_channel_ownership(
+                            managed_channel_ids,
+                            &mut self.auto_open_channels,
+                            &mut self.manual_open_channels,
+                        );
+                        let auto_open_channels = &self.auto_open_channels;
+                        self.auto_open_retry_after
+                            .retain(|channel_id, _| auto_open_channels.contains(channel_id));
+                    }
+                    self.external_inventory_received = true;
+                    if self.browser_error.as_deref() == Some(STREAM_LIMIT_EXTENSION_ERROR) {
+                        self.browser_error = None;
+                    }
+                } else {
+                    self.external_inventory_received = false;
+                    self.browser_error = Some(STREAM_LIMIT_EXTENSION_ERROR.to_owned());
+                }
             }
             KnownBrowserMessage::Ready => {
                 self.sync_extension_channels();
@@ -98,35 +118,15 @@ impl Dashboard {
                 channel_id,
                 tab_id,
                 surface,
-            } => {
-                if channel_id.is_empty() || tab_id <= 0 {
-                    return;
-                }
-                let remove_state = if let Some(state) = self.browser_states.get_mut(&channel_id) {
-                    match surface {
-                        BrowserSurface::Player if state.player_tab_id == Some(tab_id) => {
-                            state.player_tab_id = None;
-                            state.player_state = None;
-                            state.player_last_seen = None;
-                        }
-                        BrowserSurface::Chat if state.chat_tab_id == Some(tab_id) => {
-                            state.chat_tab_id = None;
-                            state.chat_state = None;
-                            state.chat_last_seen = None;
-                        }
-                        _ => return,
-                    }
-                    state.player_tab_id.is_none() && state.chat_tab_id.is_none()
-                } else {
-                    false
-                };
-                if remove_state {
-                    self.browser_states.remove(&channel_id);
-                    self.manual_open_channels.remove(&channel_id);
-                }
-                self.auto_open_channels.remove(&channel_id);
-                self.auto_open_retry_after.remove(&channel_id);
-            }
+            } => handle_closed_browser_tab(
+                channel_id,
+                tab_id,
+                surface,
+                &mut self.browser_states,
+                &mut self.manual_open_channels,
+                &mut self.auto_open_channels,
+                &mut self.auto_open_retry_after,
+            ),
             KnownBrowserMessage::Error {
                 channel_id,
                 message,
@@ -237,7 +237,7 @@ impl Dashboard {
             return;
         }
 
-        let limit = self.mode.app_stream_limit();
+        let limit = APP_STREAM_LIMIT;
         let selected_count = self
             .channels
             .iter()
@@ -245,10 +245,8 @@ impl Dashboard {
             .count();
         let mut app_open_channels = self.manual_open_channels.clone();
         app_open_channels.extend(self.auto_open_channels.iter().cloned());
-        let app_open_streams = app_open_channels
-            .iter()
-            .filter(|channel_id| self.live_channel_ids.contains(*channel_id))
-            .count();
+        let app_open_streams =
+            active_app_stream_count(&app_open_channels, &self.channels, &self.live_channel_ids);
         let external_streams = active_external_stream_count(
             &self.external_stream_counts,
             self.external_unmatched_streams,
@@ -307,5 +305,81 @@ impl Dashboard {
             "Each selected channel opens as one combined Twitch page in its own active window. Windows stay unfocused unless browser focus is enabled. App-opened player audio is muted."
                 .to_owned(),
         );
+    }
+}
+fn handle_closed_browser_tab(
+    channel_id: String,
+    tab_id: i64,
+    surface: BrowserSurface,
+    browser_states: &mut HashMap<String, BrowserChannelState>,
+    manual_open_channels: &mut HashSet<String>,
+    auto_open_channels: &mut HashSet<String>,
+    auto_open_retry_after: &mut HashMap<String, Instant>,
+) {
+    if channel_id.is_empty() || tab_id <= 0 {
+        return;
+    }
+    let remove_state = if let Some(state) = browser_states.get_mut(&channel_id) {
+        match surface {
+            BrowserSurface::Player if state.player_tab_id == Some(tab_id) => {
+                state.player_tab_id = None;
+                state.player_state = None;
+                state.player_last_seen = None;
+            }
+            BrowserSurface::Chat if state.chat_tab_id == Some(tab_id) => {
+                state.chat_tab_id = None;
+                state.chat_state = None;
+                state.chat_last_seen = None;
+            }
+            _ => return,
+        }
+        state.player_tab_id.is_none() && state.chat_tab_id.is_none()
+    } else {
+        false
+    };
+    if remove_state {
+        browser_states.remove(&channel_id);
+    }
+    if remove_state || surface == BrowserSurface::Player {
+        manual_open_channels.remove(&channel_id);
+    }
+    auto_open_channels.remove(&channel_id);
+    auto_open_retry_after.remove(&channel_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_closed_browser_tab, BrowserSurface};
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn unknown_managed_player_close_releases_manual_reservation() {
+        let channel_id = "unfollowed".to_owned();
+        let mut browser_states = HashMap::new();
+        let mut manual_open_channels = HashSet::from([channel_id.clone()]);
+        let mut auto_open_channels = HashSet::new();
+        let mut auto_open_retry_after = HashMap::new();
+
+        handle_closed_browser_tab(
+            channel_id.clone(),
+            7,
+            BrowserSurface::Chat,
+            &mut browser_states,
+            &mut manual_open_channels,
+            &mut auto_open_channels,
+            &mut auto_open_retry_after,
+        );
+        assert_eq!(manual_open_channels, HashSet::from([channel_id.clone()]));
+
+        handle_closed_browser_tab(
+            channel_id,
+            7,
+            BrowserSurface::Player,
+            &mut browser_states,
+            &mut manual_open_channels,
+            &mut auto_open_channels,
+            &mut auto_open_retry_after,
+        );
+        assert!(manual_open_channels.is_empty());
     }
 }

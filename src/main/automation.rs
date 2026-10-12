@@ -44,11 +44,11 @@ impl Dashboard {
             self.external_unmatched_streams,
             &self.live_channel_ids,
         );
-        let manually_open_streams = self
-            .manual_open_channels
-            .iter()
-            .filter(|channel_id| self.live_channel_ids.contains(*channel_id))
-            .count();
+        let manually_open_streams = active_app_stream_count(
+            &self.manual_open_channels,
+            &self.channels,
+            &self.live_channel_ids,
+        );
         let manual_active_streams = manually_open_streams.saturating_add(external_streams);
         let external_channel_ids = self
             .external_stream_counts
@@ -77,9 +77,7 @@ impl Dashboard {
                     streak_completed_for_live: streak_completed.contains_key(&channel.id),
                 })
         };
-        let mut plan = self
-            .queue_planner
-            .plan(candidates(), self.mode, manual_active_streams);
+        let mut plan = self.queue_planner.plan(candidates(), manual_active_streams);
 
         match plan.stage {
             QueueStage::Points if !plan.channel_ids.is_empty() => {
@@ -117,9 +115,7 @@ impl Dashboard {
                                 );
                             }
                         }
-                        plan =
-                            self.queue_planner
-                                .plan(candidates(), self.mode, manual_active_streams);
+                        plan = self.queue_planner.plan(candidates(), manual_active_streams);
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -168,9 +164,7 @@ impl Dashboard {
                                 );
                             }
                         }
-                        plan =
-                            self.queue_planner
-                                .plan(candidates(), self.mode, manual_active_streams);
+                        plan = self.queue_planner.plan(candidates(), manual_active_streams);
                     }
                     Ok(_) => {}
                     Err(error) => {

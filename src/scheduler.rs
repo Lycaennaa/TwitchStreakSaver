@@ -1,7 +1,7 @@
-use crate::model::{ChannelSelection, SchedulingMode};
+use crate::model::ChannelSelection;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-const MAX_APP_STREAMS: usize = SchedulingMode::OpenAll.app_stream_limit();
+pub const APP_STREAM_LIMIT: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueCandidate<'a> {
@@ -66,12 +66,9 @@ impl QueuePlanner {
     pub fn plan<'a>(
         &self,
         candidates: impl Iterator<Item = QueueCandidate<'a>>,
-        mode: SchedulingMode,
         manual_active_streams: usize,
     ) -> QueuePlan {
-        let app_capacity = mode
-            .app_stream_limit()
-            .saturating_sub(manual_active_streams);
+        let app_capacity = APP_STREAM_LIMIT.saturating_sub(manual_active_streams);
         let mut streak_candidates = CandidateRotation::default();
         let mut deferred_streak_candidates = CandidateRotation::default();
         let mut points_candidates = CandidateRotation::default();
@@ -133,7 +130,7 @@ impl QueuePlanner {
     }
 }
 pub const STREAM_TURN_DURATION: Duration = Duration::from_secs(16 * 60);
-pub const MAX_TRACKED_STREAM_SESSIONS: usize = 4;
+pub const MAX_TRACKED_STREAM_SESSIONS: usize = APP_STREAM_LIMIT;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TurnEligibility {
@@ -309,9 +306,9 @@ fn is_eligible(stage: QueueStage, candidate: &QueueCandidate<'_>) -> bool {
 
 #[derive(Default)]
 struct CandidateRotation<'a> {
-    before_anchor: [Option<&'a str>; MAX_APP_STREAMS],
+    before_anchor: [Option<&'a str>; APP_STREAM_LIMIT],
     before_count: usize,
-    after_anchor: [Option<&'a str>; MAX_APP_STREAMS],
+    after_anchor: [Option<&'a str>; APP_STREAM_LIMIT],
     after_count: usize,
     anchor_found: bool,
 }

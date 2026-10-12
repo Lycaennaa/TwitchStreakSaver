@@ -1,11 +1,13 @@
 use super::{
-    active_external_stream_count, followed_channel_search_indices, push_activity_log,
-    record_claim_available_once, resume_due_auto_open_retries, schedule_auto_open_retry,
-    stream_turn_session_for, ActivityLogEntry, BrowserChannelState, ChatState, FollowedChannel,
-    PlayerState, AUTO_TAB_RETRY_DELAY, BROWSER_STATE_STALE_AFTER, MAX_ACTIVITY_LOG_ENTRIES,
+    active_app_stream_count, active_external_stream_count, followed_channel_search_indices,
+    push_activity_log, record_claim_available_once, restore_managed_channel_ownership,
+    resume_due_auto_open_retries, schedule_auto_open_retry, stream_turn_session_for,
+    ActivityLogEntry, BrowserChannelState, ChatState, FollowedChannel, PlayerState, QueueCandidate,
+    QueuePlanner, AUTO_TAB_RETRY_DELAY, BROWSER_STATE_STALE_AFTER, MAX_ACTIVITY_LOG_ENTRIES,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
+use twitch_streak_saver::model::ChannelSelection;
 
 #[test]
 fn followed_search_matches_case_insensitive_fuzzy_subsequences() {
@@ -166,6 +168,79 @@ fn external_capacity_counts_live_followed_and_unmatched_tabs() {
         active_external_stream_count(&channel_counts, 3, &live_channel_ids),
         5
     );
+}
+
+#[test]
+fn reconnect_inventory_restores_managed_channel_ownership() {
+    let mut automatic = HashSet::from(["automatic".to_owned(), "closed-auto".to_owned()]);
+    let mut manual = HashSet::from(["manual".to_owned(), "closed-manual".to_owned()]);
+
+    restore_managed_channel_ownership(
+        [
+            "automatic".to_owned(),
+            "manual".to_owned(),
+            "orphan".to_owned(),
+            String::new(),
+        ],
+        &mut automatic,
+        &mut manual,
+    );
+
+    assert_eq!(automatic, HashSet::from(["automatic".to_owned()]));
+    assert_eq!(
+        manual,
+        HashSet::from(["manual".to_owned(), "orphan".to_owned()])
+    );
+}
+
+#[test]
+fn reconnected_managed_streams_reserve_automatic_open_slots() {
+    let followed = vec![
+        FollowedChannel::new("restored-live", "Restored live"),
+        FollowedChannel::new("offline", "Offline"),
+    ];
+    let live = HashSet::from(["restored-live".to_owned()]);
+    let candidates = [
+        QueueCandidate {
+            channel_id: "candidate-a",
+            is_live: true,
+            selection: ChannelSelection {
+                streak: false,
+                points: true,
+            },
+            streak_completed_for_live: false,
+        },
+        QueueCandidate {
+            channel_id: "candidate-b",
+            is_live: true,
+            selection: ChannelSelection {
+                streak: false,
+                points: true,
+            },
+            streak_completed_for_live: false,
+        },
+    ];
+    let mut automatic = HashSet::new();
+    let mut manual = HashSet::new();
+    restore_managed_channel_ownership(["restored-live".to_owned()], &mut automatic, &mut manual);
+    let managed_count = active_app_stream_count(&manual, &followed, &live);
+    assert_eq!(managed_count, 1);
+    let plan = QueuePlanner::default().plan(candidates.iter().copied(), managed_count);
+    assert_eq!(plan.channel_ids, ["candidate-a"]);
+
+    restore_managed_channel_ownership(
+        [
+            "restored-live".to_owned(),
+            "unfollowed".to_owned(),
+            "offline".to_owned(),
+        ],
+        &mut automatic,
+        &mut manual,
+    );
+    let managed_count = active_app_stream_count(&manual, &followed, &live);
+    assert_eq!(managed_count, 2);
+    let plan = QueuePlanner::default().plan(candidates.iter().copied(), managed_count);
+    assert!(plan.channel_ids.is_empty());
 }
 #[test]
 fn automatic_tab_failures_retry_after_a_bounded_delay() {
