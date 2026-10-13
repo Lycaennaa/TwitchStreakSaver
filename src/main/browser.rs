@@ -21,6 +21,7 @@ impl Dashboard {
         for event in events {
             match event {
                 BridgeEvent::Connected => {
+                    self.pending_stream_switch = None;
                     self.browser_connected = true;
                     self.external_stream_counts.clear();
                     self.external_unmatched_streams = 0;
@@ -32,6 +33,7 @@ impl Dashboard {
                     self.sync_extension_channels();
                 }
                 BridgeEvent::Disconnected => {
+                    self.pending_stream_switch = None;
                     self.browser_connected = false;
                     self.external_stream_counts.clear();
                     self.external_unmatched_streams = 0;
@@ -47,12 +49,15 @@ impl Dashboard {
                     self.handle_browser_message(message);
                 }
                 BridgeEvent::Message(BrowserMessage::Unknown(_)) => {}
-                BridgeEvent::Failed(message) => self.browser_error = Some(message),
+                BridgeEvent::Failed(message) => {
+                    self.pending_stream_switch = None;
+                    self.browser_error = Some(message);
+                }
             }
         }
     }
 
-    fn handle_browser_message(&mut self, message: KnownBrowserMessage) {
+    pub(super) fn handle_browser_message(&mut self, message: KnownBrowserMessage) {
         match message {
             KnownBrowserMessage::ExternalStreams {
                 channel_counts,
@@ -98,39 +103,87 @@ impl Dashboard {
                 channel_id,
                 tab_id,
                 surface,
-            } => self.handle_browser_tab(channel_id, tab_id, surface, BrowserTabUpdate::Opened),
+            } => {
+                let accepted = self.handle_browser_tab(
+                    channel_id.clone(),
+                    tab_id,
+                    surface,
+                    BrowserTabUpdate::Opened,
+                );
+                let pending_open = !channel_id.is_empty()
+                    && tab_id > 0
+                    && self
+                        .pending_stream_switch
+                        .as_ref()
+                        .is_some_and(|pending| pending.is_awaiting_open(&channel_id));
+                if surface == BrowserSurface::Player && (accepted || pending_open) {
+                    if let Some(pending) = &mut self.pending_stream_switch {
+                        pending.confirm_opened(&channel_id);
+                    }
+                    self.finish_pending_stream_switch();
+                }
+            }
             KnownBrowserMessage::ChannelStatus {
                 channel_id,
                 tab_id,
                 surface,
                 player_state,
                 chat_state,
-            } => self.handle_browser_tab(
-                channel_id,
-                tab_id,
-                surface,
-                BrowserTabUpdate::Status {
-                    player: player_state,
-                    chat: chat_state,
-                },
-            ),
+            } => {
+                self.handle_browser_tab(
+                    channel_id,
+                    tab_id,
+                    surface,
+                    BrowserTabUpdate::Status {
+                        player: player_state,
+                        chat: chat_state,
+                    },
+                );
+            }
             KnownBrowserMessage::TabClosed {
                 channel_id,
                 tab_id,
                 surface,
-            } => handle_closed_browser_tab(
-                channel_id,
-                tab_id,
-                surface,
-                &mut self.browser_states,
-                &mut self.manual_open_channels,
-                &mut self.auto_open_channels,
-                &mut self.auto_open_retry_after,
-            ),
+            } => {
+                let player_tab_closed = surface == BrowserSurface::Player
+                    && !channel_id.is_empty()
+                    && tab_id > 0
+                    && self
+                        .pending_stream_switch
+                        .as_ref()
+                        .is_some_and(|pending| pending.is_awaiting_close(&channel_id))
+                    && self
+                        .browser_states
+                        .get(&channel_id)
+                        .map_or(true, |state| state.player_tab_id == Some(tab_id));
+                handle_closed_browser_tab(
+                    channel_id.clone(),
+                    tab_id,
+                    surface,
+                    &mut self.browser_states,
+                    &mut self.manual_open_channels,
+                    &mut self.auto_open_channels,
+                    &mut self.auto_open_retry_after,
+                );
+                if player_tab_closed {
+                    if let Some(pending) = &mut self.pending_stream_switch {
+                        pending.confirm_closed(&channel_id);
+                    }
+                    self.finish_pending_stream_switch();
+                }
+            }
             KnownBrowserMessage::Error {
                 channel_id,
                 message,
             } => {
+                let retryable_destination = channel_id.as_deref().is_some_and(|channel_id| {
+                    self.channels.iter().any(|channel| channel.id == channel_id)
+                });
+                if self.pending_stream_switch.as_ref().is_some_and(|pending| {
+                    pending.should_cancel_for_error(channel_id.as_deref(), retryable_destination)
+                }) {
+                    self.pending_stream_switch = None;
+                }
                 if let Some(channel_id) = channel_id {
                     schedule_auto_open_retry(
                         &self.auto_open_channels,
@@ -152,12 +205,12 @@ impl Dashboard {
         tab_id: i64,
         surface: BrowserSurface,
         update: BrowserTabUpdate,
-    ) {
+    ) -> bool {
         if channel_id.is_empty()
             || tab_id <= 0
             || !self.channels.iter().any(|channel| channel.id == channel_id)
         {
-            return;
+            return false;
         }
         if matches!(update, BrowserTabUpdate::Opened) {
             self.auto_open_retry_after.remove(&channel_id);
@@ -194,6 +247,29 @@ impl Dashboard {
                         state.chat_last_seen = Some(Instant::now());
                     }
                 }
+            }
+        }
+        true
+    }
+
+    fn finish_pending_stream_switch(&mut self) {
+        let complete = self
+            .pending_stream_switch
+            .as_ref()
+            .is_some_and(PendingStreamSwitch::is_complete);
+        if complete {
+            if let Some(pending) = self.pending_stream_switch.take() {
+                let PendingStreamSwitch {
+                    streamer,
+                    event,
+                    desired_channels,
+                    channels,
+                } = pending;
+                self.auto_open_channels = desired_channels;
+                for channel_id in channels.keys() {
+                    self.auto_open_retry_after.remove(channel_id);
+                }
+                record_activity(&mut self.activity_log, streamer, event);
             }
         }
     }

@@ -64,7 +64,8 @@ fn resume_due_auto_open_retries(
     auto_open_channels: &mut HashSet<String>,
     retry_after: &mut HashMap<String, Instant>,
     now: Instant,
-) {
+    defer: bool,
+) -> Vec<String> {
     let due = retry_after
         .iter()
         .filter_map(|(channel_id, retry_at)| {
@@ -72,10 +73,13 @@ fn resume_due_auto_open_retries(
                 .then(|| channel_id.clone())
         })
         .collect::<Vec<_>>();
-    for channel_id in due {
-        auto_open_channels.remove(&channel_id);
-        retry_after.remove(&channel_id);
+    if !defer {
+        for channel_id in &due {
+            auto_open_channels.remove(channel_id);
+            retry_after.remove(channel_id);
+        }
     }
+    due
 }
 
 fn stream_turn_session_for(
@@ -157,6 +161,71 @@ struct ActivityLogEntry {
     time: String,
     streamer: String,
     event: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingStreamChannelState {
+    Closing,
+    Opening,
+    Closed,
+    Opened,
+}
+
+struct PendingStreamSwitch {
+    streamer: String,
+    event: String,
+    desired_channels: HashSet<String>,
+    channels: HashMap<String, PendingStreamChannelState>,
+}
+
+impl PendingStreamSwitch {
+    fn confirm_closed(&mut self, channel_id: &str) {
+        if let Some(state) = self.channels.get_mut(channel_id) {
+            if *state == PendingStreamChannelState::Closing {
+                *state = PendingStreamChannelState::Closed;
+            }
+        }
+    }
+    fn is_awaiting_close(&self, channel_id: &str) -> bool {
+        self.channels.get(channel_id) == Some(&PendingStreamChannelState::Closing)
+    }
+
+    fn should_cancel_for_error(
+        &self,
+        channel_id: Option<&str>,
+        retryable_destination: bool,
+    ) -> bool {
+        match channel_id {
+            None => true,
+            Some(channel_id) => match self.channels.get(channel_id) {
+                Some(state) if *state == PendingStreamChannelState::Closing => false,
+                Some(state) if *state == PendingStreamChannelState::Opening => {
+                    !retryable_destination
+                }
+                _ => false,
+            },
+        }
+    }
+
+    fn confirm_opened(&mut self, channel_id: &str) {
+        if let Some(state) = self.channels.get_mut(channel_id) {
+            if *state == PendingStreamChannelState::Opening {
+                *state = PendingStreamChannelState::Opened;
+            }
+        }
+    }
+    fn is_awaiting_open(&self, channel_id: &str) -> bool {
+        self.channels.get(channel_id) == Some(&PendingStreamChannelState::Opening)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.channels.values().all(|state| {
+            matches!(
+                *state,
+                PendingStreamChannelState::Closed | PendingStreamChannelState::Opened
+            )
+        })
+    }
 }
 
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 200;
@@ -292,6 +361,8 @@ struct Dashboard {
     streak_rotation: StreamRotation,
     manual_open_channels: HashSet<String>,
     auto_open_channels: HashSet<String>,
+    removed_auto_streamer_names: HashMap<String, String>,
+    pending_stream_switch: Option<PendingStreamSwitch>,
     auto_open_retry_after: HashMap<String, Instant>,
 }
 impl Dashboard {
@@ -345,7 +416,9 @@ impl Dashboard {
             streak_rotation: StreamRotation::default(),
             manual_open_channels: HashSet::new(),
             auto_open_channels: HashSet::new(),
+            removed_auto_streamer_names: HashMap::new(),
             auto_open_retry_after: HashMap::new(),
+            pending_stream_switch: None,
         }
     }
 
@@ -366,6 +439,9 @@ impl Drop for Dashboard {
     }
 }
 
+#[cfg(test)]
+#[path = "main/stream_switch_tests.rs"]
+mod stream_switch_tests;
 #[cfg(test)]
 #[path = "main/tests.rs"]
 mod tests;

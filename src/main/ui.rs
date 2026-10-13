@@ -104,7 +104,7 @@ impl Dashboard {
             );
         });
         if self.activity_log.is_empty() {
-            ui.label("Point and Streak events will appear here.");
+            ui.label("Point, Streak, and stream-switch events will appear here.");
             return;
         }
         egui::ScrollArea::vertical()

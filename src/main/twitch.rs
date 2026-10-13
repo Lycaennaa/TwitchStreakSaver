@@ -47,6 +47,7 @@ impl Dashboard {
             .cloned()
             .collect::<Vec<_>>();
         self.auto_open_channels.clear();
+        self.pending_stream_switch = None;
         self.auto_open_retry_after.clear();
         if !close_ids.is_empty() {
             self.send_bridge_command(BrowserCommand::CloseChannels {
@@ -57,6 +58,16 @@ impl Dashboard {
     }
 
     fn replace_followed_channels(&mut self, incoming: Vec<FollowedChannel>) {
+        for channel in &self.channels {
+            if self.auto_open_channels.contains(&channel.id)
+                && !incoming
+                    .iter()
+                    .any(|incoming_channel| incoming_channel.id == channel.id)
+            {
+                self.removed_auto_streamer_names
+                    .insert(channel.id.clone(), channel.display_name.clone());
+            }
+        }
         self.channels =
             twitch_streak_saver::model::merge_followed_channels(&self.channels, incoming);
         let followed_ids = self
@@ -250,6 +261,7 @@ impl Dashboard {
                         .cloned()
                         .collect::<Vec<_>>();
                     self.auto_open_channels.clear();
+                    self.pending_stream_switch = None;
                     self.auto_open_retry_after.clear();
                     if !close_ids.is_empty() {
                         self.send_bridge_command(BrowserCommand::CloseChannels {

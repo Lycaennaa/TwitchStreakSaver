@@ -276,7 +276,8 @@ fn only_due_automatic_tab_failures_are_retried() {
         ("later".to_owned(), now + Duration::from_secs(10)),
     ]);
 
-    resume_due_auto_open_retries(&mut active, &mut retries, now);
+    let due = resume_due_auto_open_retries(&mut active, &mut retries, now, false);
+    assert_eq!(due, vec!["due".to_owned()]);
 
     assert_eq!(active, HashSet::from(["later".to_owned()]));
     assert_eq!(
