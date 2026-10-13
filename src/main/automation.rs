@@ -204,7 +204,7 @@ impl Dashboard {
             let mut retry_close_ids = Vec::new();
             let mut retry_open_channels = Vec::new();
             let mut retry_channel_ids = Vec::new();
-            let mut missing_retry_destination = false;
+            let mut abandoned_destination_ids = Vec::new();
             for channel_id in due_auto_open_retries {
                 let state = self
                     .pending_stream_switch
@@ -225,16 +225,26 @@ impl Dashboard {
                             retry_open_channels.push(BrowserChannel::from(channel));
                             retry_channel_ids.push(channel_id);
                         } else {
-                            missing_retry_destination = true;
-                            break;
+                            abandoned_destination_ids.push(channel_id);
                         }
                     }
                     _ => {}
                 }
             }
-            if missing_retry_destination {
-                self.pending_stream_switch = None;
-                return;
+            if !abandoned_destination_ids.is_empty() {
+                if let Some(pending) = &mut self.pending_stream_switch {
+                    for channel_id in &abandoned_destination_ids {
+                        pending.abandon_open(channel_id);
+                    }
+                    pending
+                        .desired_channels
+                        .retain(|channel_id| desired.contains(channel_id));
+                }
+                for channel_id in &abandoned_destination_ids {
+                    self.auto_open_channels.remove(channel_id);
+                    self.auto_open_retry_after.remove(channel_id);
+                }
+                self.finish_pending_stream_switch();
             }
             for channel_id in &retry_channel_ids {
                 self.auto_open_channels.remove(channel_id);

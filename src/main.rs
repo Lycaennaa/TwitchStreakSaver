@@ -169,6 +169,7 @@ enum PendingStreamChannelState {
     Opening,
     Closed,
     Opened,
+    Abandoned,
 }
 
 struct PendingStreamSwitch {
@@ -190,23 +191,6 @@ impl PendingStreamSwitch {
         self.channels.get(channel_id) == Some(&PendingStreamChannelState::Closing)
     }
 
-    fn should_cancel_for_error(
-        &self,
-        channel_id: Option<&str>,
-        retryable_destination: bool,
-    ) -> bool {
-        match channel_id {
-            None => true,
-            Some(channel_id) => match self.channels.get(channel_id) {
-                Some(state) if *state == PendingStreamChannelState::Closing => false,
-                Some(state) if *state == PendingStreamChannelState::Opening => {
-                    !retryable_destination
-                }
-                _ => false,
-            },
-        }
-    }
-
     fn confirm_opened(&mut self, channel_id: &str) {
         if let Some(state) = self.channels.get_mut(channel_id) {
             if *state == PendingStreamChannelState::Opening {
@@ -217,8 +201,26 @@ impl PendingStreamSwitch {
     fn is_awaiting_open(&self, channel_id: &str) -> bool {
         self.channels.get(channel_id) == Some(&PendingStreamChannelState::Opening)
     }
+    fn abandon_open(&mut self, channel_id: &str) {
+        if let Some(state) = self.channels.get_mut(channel_id) {
+            if *state == PendingStreamChannelState::Opening {
+                *state = PendingStreamChannelState::Abandoned;
+            }
+        }
+    }
 
     fn is_complete(&self) -> bool {
+        self.channels.values().all(|state| {
+            matches!(
+                *state,
+                PendingStreamChannelState::Closed
+                    | PendingStreamChannelState::Opened
+                    | PendingStreamChannelState::Abandoned
+            )
+        })
+    }
+
+    fn is_successful(&self) -> bool {
         self.channels.values().all(|state| {
             matches!(
                 *state,

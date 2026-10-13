@@ -176,14 +176,6 @@ impl Dashboard {
                 channel_id,
                 message,
             } => {
-                let retryable_destination = channel_id.as_deref().is_some_and(|channel_id| {
-                    self.channels.iter().any(|channel| channel.id == channel_id)
-                });
-                if self.pending_stream_switch.as_ref().is_some_and(|pending| {
-                    pending.should_cancel_for_error(channel_id.as_deref(), retryable_destination)
-                }) {
-                    self.pending_stream_switch = None;
-                }
                 if let Some(channel_id) = channel_id {
                     schedule_auto_open_retry(
                         &self.auto_open_channels,
@@ -191,6 +183,21 @@ impl Dashboard {
                         &channel_id,
                         Instant::now(),
                     );
+                } else if let Some(pending) = &self.pending_stream_switch {
+                    let now = Instant::now();
+                    for (channel_id, state) in &pending.channels {
+                        if matches!(
+                            *state,
+                            PendingStreamChannelState::Closing | PendingStreamChannelState::Opening
+                        ) {
+                            schedule_auto_open_retry(
+                                &self.auto_open_channels,
+                                &mut self.auto_open_retry_after,
+                                channel_id,
+                                now,
+                            );
+                        }
+                    }
                 }
                 if let Some(message) = message {
                     self.browser_error = Some(message.chars().take(240).collect());
@@ -252,13 +259,14 @@ impl Dashboard {
         true
     }
 
-    fn finish_pending_stream_switch(&mut self) {
+    pub(super) fn finish_pending_stream_switch(&mut self) {
         let complete = self
             .pending_stream_switch
             .as_ref()
             .is_some_and(PendingStreamSwitch::is_complete);
         if complete {
             if let Some(pending) = self.pending_stream_switch.take() {
+                let successful = pending.is_successful();
                 let PendingStreamSwitch {
                     streamer,
                     event,
@@ -269,7 +277,9 @@ impl Dashboard {
                 for channel_id in channels.keys() {
                     self.auto_open_retry_after.remove(channel_id);
                 }
-                record_activity(&mut self.activity_log, streamer, event);
+                if successful {
+                    record_activity(&mut self.activity_log, streamer, event);
+                }
             }
         }
     }

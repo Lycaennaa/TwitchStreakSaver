@@ -144,7 +144,7 @@ fn unfollowed_source_close_ack_without_cached_state_completes_switch() {
 
 #[test]
 fn browser_errors_wait_for_confirmations() {
-    for failed_channel_id in [Some("old"), Some("new")] {
+    for failed_channel_id in [Some("old"), Some("new"), None] {
         let mut dashboard = dashboard_with_pending_stream_switch(true);
         dashboard.handle_browser_message(KnownBrowserMessage::Error {
             channel_id: failed_channel_id.map(str::to_owned),
@@ -153,23 +153,6 @@ fn browser_errors_wait_for_confirmations() {
         assert!(dashboard.activity_log.is_empty());
         assert!(dashboard.pending_stream_switch.is_some());
     }
-
-    let mut dashboard = dashboard_with_pending_stream_switch(true);
-    dashboard.handle_browser_message(KnownBrowserMessage::Error {
-        channel_id: None,
-        message: Some("bridge operation failed".to_owned()),
-    });
-    dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
-        channel_id: "old".to_owned(),
-        tab_id: 1,
-        surface: BrowserSurface::Player,
-    });
-    dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
-        channel_id: "new".to_owned(),
-        tab_id: 2,
-        surface: BrowserSurface::Player,
-    });
-    assert!(dashboard.activity_log.is_empty());
 }
 
 #[test]
@@ -265,6 +248,52 @@ fn unrelated_browser_error_does_not_cancel_pending_switch() {
         dashboard.activity_log.front().unwrap().event,
         "Switched from Old Streamer to New Streamer."
     );
+}
+
+#[test]
+fn removed_retry_destination_keeps_source_close_retry_owned() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    for channel_id in ["old", "new"] {
+        dashboard.handle_browser_message(KnownBrowserMessage::Error {
+            channel_id: Some(channel_id.to_owned()),
+            message: Some("tab operation failed".to_owned()),
+        });
+    }
+
+    dashboard.browser_connected = false;
+    assert!(dashboard
+        .twitch_sender
+        .send(TwitchUpdate::Refreshed {
+            generation: 0,
+            channels: Vec::new(),
+            live_channel_ids: HashSet::new(),
+        })
+        .is_ok());
+    dashboard.poll_twitch_updates();
+    dashboard.browser_connected = true;
+    dashboard.external_inventory_received = true;
+    let retry_at = Instant::now() - Duration::from_secs(1);
+    dashboard
+        .auto_open_retry_after
+        .insert("old".to_owned(), retry_at);
+    dashboard
+        .auto_open_retry_after
+        .insert("new".to_owned(), retry_at);
+
+    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+
+    assert!(dashboard.pending_stream_switch.is_some());
+    assert!(dashboard.auto_open_channels.contains("old"));
+    assert!(!dashboard.auto_open_channels.contains("new"));
+    assert!(dashboard.activity_log.is_empty());
+    dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
+        channel_id: "old".to_owned(),
+        tab_id: 1,
+        surface: BrowserSurface::Player,
+    });
+    assert!(dashboard.pending_stream_switch.is_none());
+    assert!(dashboard.auto_open_channels.is_empty());
+    assert!(dashboard.activity_log.is_empty());
 }
 
 #[test]
