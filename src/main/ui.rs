@@ -72,60 +72,78 @@ impl eframe::App for Dashboard {
         });
 
         egui::CentralPanel::default().show(context, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(8.0);
-                ui.heading("Your watch list");
-                ui.label("Choose Streaks, Channel Points, or both for each followed channel.");
-                ui.add_space(12.0);
+            let content_max_height = dashboard_content_max_height(ui.available_height());
+            egui::ScrollArea::vertical()
+                .max_height(content_max_height)
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.heading("Your watch list");
+                    ui.label("Choose Streaks, Channel Points, or both for each followed channel.");
+                    ui.add_space(12.0);
 
-                ui.columns(2, |columns| {
-                    self.channel_list(&mut columns[0]);
-                    self.watch_settings(&mut columns[1]);
+                    ui.columns(2, |columns| {
+                        self.channel_list(&mut columns[0]);
+                        self.watch_settings(&mut columns[1]);
+                    });
+
+                    if let Some(error) = &self.connection_error {
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("Twitch: {error}"));
+                    }
                 });
-
-                ui.add_space(8.0);
-                self.activity_log_panel(ui);
-                if let Some(error) = &self.connection_error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("Twitch: {error}"));
-                }
-            });
+            ui.add_space(8.0);
+            Self::activity_log_panel(ui, &self.activity_log);
         });
     }
 }
 
+const MIN_ACTIVITY_LOG_HEIGHT: f32 = 48.0;
+const ACTIVITY_LOG_HEIGHT_FRACTION: f32 = 0.3;
+
+fn dashboard_content_max_height(available_height: f32) -> f32 {
+    let reserved_log_height =
+        (available_height * ACTIVITY_LOG_HEIGHT_FRACTION).max(MIN_ACTIVITY_LOG_HEIGHT);
+    (available_height - reserved_log_height).max(0.0)
+}
+
 impl Dashboard {
-    fn activity_log_panel(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Activity log");
-            ui.label(
-                egui::RichText::new("Local time · newest first")
-                    .small()
-                    .weak(),
-            );
-        });
-        if self.activity_log.is_empty() {
-            ui.label("Point, Streak, and stream-switch events will appear here.");
-            return;
-        }
-        egui::ScrollArea::vertical()
-            .max_height(76.0)
-            .show(ui, |ui| {
-                egui::Grid::new("activity_log_entries")
-                    .num_columns(3)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.strong("Time");
-                        ui.strong("Streamer");
-                        ui.strong("Event");
-                        ui.end_row();
-                        for entry in &self.activity_log {
-                            ui.label(egui::RichText::new(&entry.time).monospace());
-                            ui.label(&entry.streamer);
-                            ui.label(&entry.event);
-                            ui.end_row();
-                        }
-                    });
+    fn activity_log_panel(
+        ui: &mut egui::Ui,
+        activity_log: &std::collections::VecDeque<ActivityLogEntry>,
+    ) -> egui::Response {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Activity log");
+                ui.label(
+                    egui::RichText::new("Local time · newest first")
+                        .small()
+                        .weak(),
+                );
             });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if activity_log.is_empty() {
+                        ui.label("Point, Streak, and stream-switch events will appear here.");
+                        return;
+                    }
+                    egui::Grid::new("activity_log_entries")
+                        .num_columns(3)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("Time");
+                            ui.strong("Streamer");
+                            ui.strong("Event");
+                            ui.end_row();
+                            for entry in activity_log {
+                                ui.label(egui::RichText::new(&entry.time).monospace());
+                                ui.label(&entry.streamer);
+                                ui.label(&entry.event);
+                                ui.end_row();
+                            }
+                        });
+                });
+        })
+        .response
     }
 
     fn watch_settings(&mut self, ui: &mut egui::Ui) {
@@ -237,6 +255,56 @@ impl Dashboard {
         }
         if stop {
             self.stop_automation();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_activity_log_fills_the_reserved_bottom_region() {
+        for screen_size in [egui::vec2(1471.0, 274.0), egui::vec2(800.0, 600.0)] {
+            let context = egui::Context::default();
+            let mut panel_response = None;
+            let mut minimum_panel_height = 0.0;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+                ..Default::default()
+            };
+
+            let _ = context.run(input, |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    let available_height = ui.available_height();
+                    let content_max_height = dashboard_content_max_height(available_height);
+                    minimum_panel_height = (available_height - content_max_height - 16.0).max(0.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(content_max_height)
+                        .show(ui, |ui| {
+                            ui.add_space(content_max_height + 200.0);
+                        });
+                    ui.add_space(8.0);
+                    panel_response = Some(Dashboard::activity_log_panel(
+                        ui,
+                        &std::collections::VecDeque::new(),
+                    ));
+                });
+            });
+
+            let panel_response = panel_response.expect("activity log panel was not rendered");
+            assert!(
+                panel_response.rect.height() >= minimum_panel_height,
+                "activity log only used {} points instead of the reserved {}",
+                panel_response.rect.height(),
+                minimum_panel_height
+            );
+            assert!(
+                panel_response.rect.bottom() >= screen_size.y - 15.0,
+                "activity log ended at {} in a {}-point viewport",
+                panel_response.rect.bottom(),
+                screen_size.y
+            );
         }
     }
 }
