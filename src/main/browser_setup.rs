@@ -155,6 +155,15 @@ fn launch_browser_extensions(_: SetupBrowser) -> Result<(), String> {
 }
 
 fn browser_extension_directory() -> Result<std::path::PathBuf, String> {
+    #[cfg(debug_assertions)]
+    {
+        let source_directory =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chrome-extension");
+        if source_directory.join("manifest.json").is_file() {
+            return Ok(source_directory);
+        }
+    }
+
     let executable = std::env::current_exe()
         .map_err(|error| format!("Could not locate Twitch Streak Saver: {error}"))?;
     let executable_directory = executable
@@ -172,15 +181,6 @@ fn browser_extension_directory() -> Result<std::path::PathBuf, String> {
     let adjacent_directory = executable_directory.join("chrome-extension");
     if adjacent_directory.join("manifest.json").is_file() {
         return Ok(adjacent_directory);
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        let source_directory =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chrome-extension");
-        if source_directory.join("manifest.json").is_file() {
-            return Ok(source_directory);
-        }
     }
 
     Err(format!(
@@ -219,6 +219,10 @@ mod extension_setup_tests {
     #[test]
     fn resolves_a_complete_extension_folder_for_development() {
         let directory = browser_extension_directory().unwrap();
+        assert_eq!(
+            directory,
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chrome-extension")
+        );
         assert!(directory.join("manifest.json").is_file());
         assert!(directory.join("background.js").is_file());
         assert!(directory.join("trusted-extension-id").is_file());
