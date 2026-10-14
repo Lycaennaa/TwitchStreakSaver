@@ -7,6 +7,7 @@ impl eframe::App for Dashboard {
 
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_twitch_updates();
+        self.poll_browser_port_check();
         self.poll_browser_bridge();
         let now = self.started_at.elapsed();
         let poll_interval = Duration::from_secs(1);
@@ -150,6 +151,9 @@ impl Dashboard {
         });
 
         let browser_notice = self.browser_notice.clone();
+        let detected_browsers = browser_setup::detected_setup_browsers();
+        let port_check_in_flight = self.browser_port_check_in_flight;
+        let mut connect_browser = false;
         let mut setup_browser = None;
         ui.add_space(8.0);
         ui.group(|ui| {
@@ -157,14 +161,27 @@ impl Dashboard {
             ui.label(if self.browser_connected {
                 "Native host connected."
             } else {
-                "Load the unpacked extension once; native-host pairing is automatic."
+                "Load the unpacked extension once; the browser must be running with it enabled for tabs to open."
             });
+            let button_label = if port_check_in_flight {
+                "Checking browser port…"
+            } else {
+                "Connect to browser"
+            };
+            if ui
+                .add_enabled(
+                    !port_check_in_flight,
+                    egui::Button::new(button_label),
+                )
+                .clicked()
+            {
+                connect_browser = true;
+            }
             ui.menu_button("Set up browser extension", |ui| {
-                let browsers = browser_setup::detected_setup_browsers();
-                if browsers.is_empty() {
+                if detected_browsers.is_empty() {
                     ui.label("No supported browsers detected.");
                 }
-                for browser in browsers {
+                for browser in detected_browsers.iter().copied() {
                     if ui.button(browser.name()).clicked() {
                         setup_browser = Some(browser);
                         ui.close_menu();
@@ -175,6 +192,9 @@ impl Dashboard {
                 ui.label(egui::RichText::new(notice).small().weak());
             }
         });
+        if connect_browser {
+            self.connect_to_browser();
+        }
         if let Some(target) = setup_browser {
             self.open_extension_setup(target);
         }

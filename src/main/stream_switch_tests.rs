@@ -9,6 +9,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
     let mut new_streamer = FollowedChannel::new("new", "New Streamer");
     new_streamer.selection.streak = true;
     let (twitch_sender, twitch_updates) = std::sync::mpsc::channel();
+    let (browser_port_check_sender, browser_port_check_receiver) = std::sync::mpsc::channel();
     let mut dashboard = Dashboard {
         auto_start_on_launch: false,
         wake_browser_on_open: false,
@@ -30,6 +31,9 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         browser_connected: true,
         browser_error: None,
         browser_notice: None,
+        browser_port_check_sender,
+        browser_port_check_receiver,
+        browser_port_check_in_flight: false,
         browser_states: if source_state_available {
             HashMap::from([(
                 "old".to_owned(),

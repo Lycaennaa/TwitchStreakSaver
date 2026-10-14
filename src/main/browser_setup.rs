@@ -97,6 +97,7 @@ impl Dashboard {
         }
     }
 }
+
 fn open_browser_extension_setup(target: SetupBrowser) -> Result<(), String> {
     let extension_directory = browser_extension_directory()?;
     reveal_extension_directory(&extension_directory)?;

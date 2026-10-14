@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use twitch_streak_saver::browser_bridge::{BridgeEvent, BrowserBridge};
+use twitch_streak_saver::browser_bridge::{
+    BridgeEvent, BrowserBridge, EXTENSION_REGISTRATION_ADDRESS,
+};
 use twitch_streak_saver::browser_protocol::{
     BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, ChatState, KnownBrowserMessage,
     PlayerState,
@@ -22,6 +24,8 @@ use twitch_streak_saver::twitch::TwitchUpdate;
 mod automation;
 #[path = "main/browser.rs"]
 mod browser;
+#[path = "main/browser_connection.rs"]
+mod browser_connection;
 #[path = "main/browser_setup.rs"]
 mod browser_setup;
 #[path = "main/channel_list.rs"]
@@ -327,6 +331,7 @@ fn selected_channel_indices(channels: &[FollowedChannel], limit: usize) -> Vec<u
         .collect()
 }
 const PREFERENCES_KEY: &str = "preferences";
+const BROWSER_EXTENSION_ID: &str = include_str!("../chrome-extension/trusted-extension-id");
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -357,6 +362,9 @@ struct Dashboard {
     twitch_cancel: Option<Arc<AtomicBool>>,
     twitch_sender: Sender<TwitchUpdate>,
     twitch_updates: Receiver<TwitchUpdate>,
+    browser_port_check_sender: Sender<Result<(), String>>,
+    browser_port_check_receiver: Receiver<Result<(), String>>,
+    browser_port_check_in_flight: bool,
     browser_bridge: Option<BrowserBridge>,
     browser_connected: bool,
     browser_error: Option<String>,
@@ -392,6 +400,7 @@ impl Dashboard {
             Err(error) => (None, Some(error)),
         };
         let (twitch_sender, twitch_updates) = mpsc::channel();
+        let (browser_port_check_sender, browser_port_check_receiver) = mpsc::channel();
 
         Self {
             auto_start_on_launch: preferences.auto_start_on_launch,
@@ -410,6 +419,9 @@ impl Dashboard {
             browser_bridge,
             browser_connected: false,
             browser_error,
+            browser_port_check_sender,
+            browser_port_check_receiver,
+            browser_port_check_in_flight: false,
             browser_notice: None,
             browser_states: HashMap::new(),
             external_stream_counts: HashMap::new(),

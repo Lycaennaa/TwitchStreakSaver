@@ -1,12 +1,14 @@
 const NATIVE_HOST = "com.twitchstreaksaver.bridge";
 const NATIVE_HOST_SYNC_ALARM = "twitch-streak-saver-native-host-sync";
+// MV3 alarms wake suspended workers; active workers retry failed checks after 5 seconds.
+const NATIVE_HOST_SYNC_INTERVAL_MINUTES = 0.5;
+const NATIVE_HOST_RETRY_DELAY_MS = 5000;
 const NATIVE_HOST_REGISTRATION_URL = "http://127.0.0.1:43128/register";
 importScripts("twitch_tabs.js");
 
 let nativePort = null;
 let syncedNativePort = null;
 let reconnectTimer = null;
-let reconnectDelay = 1000;
 let managedTabs = new Map();
 const closingManagedTabIds = new Set();
 let channelsByLogin = new Map();
@@ -16,6 +18,7 @@ let nativeCommandQueue = Promise.resolve();
 
 const restorePromise = restoreManagedTabs();
 async function synchronizeNativeHost() {
+  if (nativePort) return true;
   const url = new URL(NATIVE_HOST_REGISTRATION_URL);
   url.searchParams.set("id", chrome.runtime.id);
   const controller = new AbortController();
@@ -27,11 +30,18 @@ async function synchronizeNativeHost() {
       credentials: "omit",
       signal: controller.signal,
     });
-    if (response.status !== 204) return false;
+    if (response.status !== 204) {
+      console.debug(
+        `Twitch Streak Saver app registration returned HTTP ${response.status}.`,
+      );
+      scheduleReconnect();
+      return false;
+    }
     connectNativeHost();
     return true;
   } catch (error) {
     console.debug("Twitch Streak Saver app registration is unavailable.", error);
+    scheduleReconnect();
     return false;
   } finally {
     clearTimeout(timeout);
@@ -39,7 +49,9 @@ async function synchronizeNativeHost() {
 }
 
 function initializeNativeHostSync() {
-  chrome.alarms.create(NATIVE_HOST_SYNC_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.create(NATIVE_HOST_SYNC_ALARM, {
+    periodInMinutes: NATIVE_HOST_SYNC_INTERVAL_MINUTES,
+  });
   return synchronizeNativeHost();
 }
 
@@ -121,6 +133,10 @@ function connectNativeHost() {
     port = chrome.runtime.connectNative(NATIVE_HOST);
     nativePort = port;
     syncedNativePort = null;
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     port.onMessage.addListener((message) => {
       if (nativePort !== port) return;
       nativeCommandQueue = nativeCommandQueue
@@ -161,12 +177,10 @@ function handleNativePortDisconnect(port, error) {
 
 function scheduleReconnect() {
   if (reconnectTimer !== null) return;
-  const delay = reconnectDelay;
-  reconnectDelay = Math.min(reconnectDelay * 2, 10000);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connectNativeHost();
-  }, delay);
+    return synchronizeNativeHost();
+  }, NATIVE_HOST_RETRY_DELAY_MS);
 }
 
 function sendNative(message) {

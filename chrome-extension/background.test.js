@@ -29,6 +29,9 @@ async function createExtension({
   extensionVersion = "0.3.6",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
+  connectNativeImpl = null,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 } = {}) {
   const tabsById = new Map();
   const windowsById = new Map([[17, { id: 17, focused: true, state: "normal", type: "normal" }]]);
@@ -249,7 +252,7 @@ async function createExtension({
       },
       connectNative() {
         calls.nativeConnections += 1;
-        return port;
+        return connectNativeImpl ? connectNativeImpl(port) : port;
       },
     },
     alarms: {
@@ -261,8 +264,8 @@ async function createExtension({
   };
   const context = vm.createContext({
     chrome,
-    setTimeout,
-    clearTimeout,
+    setTimeout: setTimeoutImpl,
+    clearTimeout: clearTimeoutImpl,
     URL,
     AbortController,
     fetch(url, options) {
@@ -385,10 +388,18 @@ test("manifest key derives the trusted Chrome extension ID", () => {
   assert.equal(extensionId, trustedExtensionId);
 });
 
-test("retries local synchronization until the native host is ready", async () => {
+test("retries registration every five seconds until native host connects", async () => {
   let appReady = false;
+  const scheduledTimers = [];
+  const clearedTimers = new Set();
   const extension = await createExtension({
     fetchImpl: async () => ({ status: appReady ? 204 : 503 }),
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay };
+      scheduledTimers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => clearedTimers.add(timer),
   });
   const registrationUrl =
     `http://127.0.0.1:43128/register?id=${trustedExtensionId}`;
@@ -405,15 +416,21 @@ test("retries local synchronization until the native host is ready", async () =>
     },
   ]);
   assert.equal(extension.calls.nativeConnections, 0);
+  assert.equal(extension.isNativeConnected(), false);
   assert.deepEqual(extension.calls.alarms, [
     {
       name: "twitch-streak-saver-native-host-sync",
-      options: { periodInMinutes: 1 },
+      options: { periodInMinutes: 0.5 },
     },
   ]);
+  const retryTimer = scheduledTimers.find(
+    (timer) => !clearedTimers.has(timer) && timer.delay === 5000,
+  );
+  assert.ok(retryTimer);
 
   appReady = true;
-  assert.equal(await extension.syncOnAlarm(), true);
+  assert.equal(await retryTimer.callback(), true);
+  assert.equal(extension.calls.registrationRequests.length, 2);
   assert.equal(extension.calls.nativeConnections, 1);
   assert.equal(extension.isNativeConnected(), true);
 });
@@ -649,8 +666,17 @@ test("queued repeated opens reuse the same dedicated tab", async () => {
   assert.equal([...extension.tabsById.values()][0].active, true);
   assert.equal(extension.windowsById.size, 2);
 });
-test("native host disconnect consumes runtime.lastError and schedules reconnection", async () => {
-  const extension = await createExtension();
+test("native host disconnect retries its registration after five seconds", async () => {
+  const scheduledTimers = [];
+  const clearedTimers = new Set();
+  const extension = await createExtension({
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay };
+      scheduledTimers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => clearedTimers.add(timer),
+  });
   extension.disconnectHost({ message: "Native host has exited" });
 
   assert.equal(extension.lastErrorReads(), 1);
@@ -658,7 +684,13 @@ test("native host disconnect consumes runtime.lastError and schedules reconnecti
   assert.ok(extension.calls.logs.some(
     (entry) => entry.level === "debug" && entry.message.includes("Native host has exited"),
   ));
-  extension.cancelReconnect();
+  const retryTimer = scheduledTimers.find(
+    (timer) => !clearedTimers.has(timer) && timer.delay === 5000,
+  );
+  assert.ok(retryTimer);
+  assert.equal(await retryTimer.callback(), true);
+  assert.equal(extension.calls.nativeConnections, 2);
+  assert.equal(extension.isNativeConnected(), true);
 });
 test("sync after extension reload restores persisted managed tabs", async () => {
   const original = await createExtension();
