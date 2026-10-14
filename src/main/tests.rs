@@ -22,13 +22,19 @@ fn followed_search_matches_case_insensitive_fuzzy_subsequences() {
 }
 
 #[test]
-fn empty_followed_search_keeps_original_order() {
+fn followed_channels_are_sorted_alphabetically_for_all_searches() {
     let channels = vec![
-        FollowedChannel::new("1", "First"),
-        FollowedChannel::new("2", "Second"),
+        FollowedChannel::new("z", "Zeta"),
+        FollowedChannel::new("b", "Beta"),
+        FollowedChannel::new("a", "alpha"),
+        FollowedChannel::new("g", "Gamma"),
     ];
 
-    assert_eq!(followed_channel_search_indices(&channels, "  "), vec![0, 1]);
+    assert_eq!(
+        followed_channel_search_indices(&channels, "  "),
+        vec![2, 1, 3, 0]
+    );
+    assert_eq!(followed_channel_search_indices(&channels, "et"), vec![1, 0]);
 }
 
 #[test]

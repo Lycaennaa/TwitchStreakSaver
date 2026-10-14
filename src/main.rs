@@ -267,19 +267,33 @@ fn record_claim_available_once(
 
 fn followed_channel_search_indices(channels: &[FollowedChannel], query: &str) -> Vec<usize> {
     let query = query.trim();
-    if query.is_empty() {
-        return (0..channels.len()).collect();
-    }
-    channels
-        .iter()
-        .enumerate()
-        .filter_map(|(index, channel)| {
-            (fuzzy_contains(&channel.display_name, query)
-                || fuzzy_contains(&channel.login, query)
-                || fuzzy_contains(&channel.id, query))
-            .then_some(index)
-        })
-        .collect()
+    let mut indices: Vec<usize> = if query.is_empty() {
+        (0..channels.len()).collect()
+    } else {
+        channels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, channel)| {
+                (fuzzy_contains(&channel.display_name, query)
+                    || fuzzy_contains(&channel.login, query)
+                    || fuzzy_contains(&channel.id, query))
+                .then_some(index)
+            })
+            .collect()
+    };
+    indices.sort_by(|left, right| {
+        channels[*left]
+            .display_name
+            .chars()
+            .flat_map(char::to_lowercase)
+            .cmp(
+                channels[*right]
+                    .display_name
+                    .chars()
+                    .flat_map(char::to_lowercase),
+            )
+    });
+    indices
 }
 
 fn fuzzy_contains(candidate: &str, query: &str) -> bool {
