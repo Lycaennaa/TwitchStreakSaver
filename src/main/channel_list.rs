@@ -41,7 +41,7 @@ impl Dashboard {
                     });
                 });
                 ui.add_space(8.0);
-                ui.add(egui::TextEdit::singleline(search).hint_text("Fuzzy search channels"));
+                ui.add(egui::TextEdit::singleline(search).hint_text("Search channels"));
                 ui.horizontal_wrapped(|ui| {
                     open_selected = ui.button("Open selected channels").clicked();
                     ui.label(if browser_connected && external_inventory_received {
@@ -85,18 +85,20 @@ impl Dashboard {
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.vertical(|ui| {
-                                        ui.strong(&channel.display_name);
-                                        let live_status = if live_channel_ids.contains(&channel.id)
-                                        {
-                                            "LIVE"
-                                        } else if connected {
-                                            "Offline"
-                                        } else if channel.id.starts_with("sample-") {
-                                            "Sample channel"
-                                        } else {
-                                            "Not connected"
-                                        };
-                                        ui.label(egui::RichText::new(live_status).small().weak());
+                                        ui.horizontal(|ui| {
+                                            ui.strong(&channel.display_name);
+                                            let live_status = if live_channel_ids.contains(&channel.id)
+                                            {
+                                                "- live"
+                                            } else if connected {
+                                                "- offline"
+                                            } else if channel.id.starts_with("sample-") {
+                                                "- sample channel"
+                                            } else {
+                                                "- not connected"
+                                            };
+                                            ui.label(live_status);
+                                        });
                                         if let Some(points) = streak_completed.get(&channel.id) {
                                             ui.colored_label(
                                                 egui::Color32::from_rgb(80, 210, 140),
@@ -163,15 +165,11 @@ impl Dashboard {
                                                 .small()
                                                 .weak(),
                                             );
-                                        } else {
+                                        } else if browser_connected {
                                             ui.label(
-                                                egui::RichText::new(if browser_connected {
-                                                    "No app-managed tabs"
-                                                } else {
-                                                    "Browser status unavailable"
-                                                })
-                                                .small()
-                                                .weak(),
+                                                egui::RichText::new("No app-managed tabs")
+                                                    .small()
+                                                    .weak(),
                                             );
                                         }
                                     });

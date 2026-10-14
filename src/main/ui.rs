@@ -109,11 +109,6 @@ impl Dashboard {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.heading("Activity log");
-                ui.label(
-                    egui::RichText::new("Local time · newest first")
-                        .small()
-                        .weak(),
-                );
             });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -143,25 +138,17 @@ impl Dashboard {
     }
 
     fn watch_settings(&mut self, ui: &mut egui::Ui) {
-        ui.group(|ui| {
-            ui.strong("Watch strategy");
-            ui.add_space(6.0);
-            ui.label("Prioritize Streak channels and rotate eligible Streak and Points turns.");
-            ui.label(format!("App-managed stream limit: {APP_STREAM_LIMIT}"));
-        });
-
         let browser_notice = self.browser_notice.clone();
         let detected_browsers = browser_setup::detected_setup_browsers();
         let port_check_in_flight = self.browser_port_check_in_flight;
         let mut connect_browser = false;
         let mut setup_browser = None;
-        ui.add_space(8.0);
         ui.group(|ui| {
             ui.strong("Browser integration");
             ui.label(if self.browser_connected {
                 "Native host connected."
             } else {
-                "Load the unpacked extension once; the browser must be running with it enabled for tabs to open."
+                "Click setup browser extension once. This app auto connects to browser when twitch connected."
             });
             let button_label = if port_check_in_flight {
                 "Checking browser port…"
@@ -201,7 +188,7 @@ impl Dashboard {
         ui.group(|ui| {
             ui.strong("Twitch tab opening");
             ui.label(
-                "Each stream opens as a combined Twitch page in its own window. Its tab is selected without focusing the window.",
+                "Each stream opens as a combined Twitch page in its own window.",
             );
             ui.checkbox(
                 &mut self.wake_browser_on_open,
@@ -261,13 +248,6 @@ impl Dashboard {
                     .add_enabled(self.automation_enabled, egui::Button::new("Stop All"))
                     .clicked();
             });
-            ui.label(
-                egui::RichText::new(
-                    "Stop All closes tabs opened by this app. External browser tabs are unaffected.",
-                )
-                .small()
-                .weak(),
-            );
         });
         if start {
             self.start_automation();
