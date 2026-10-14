@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
+const trustedExtensionId = fs.readFileSync(path.join(__dirname, "trusted-extension-id"), "utf8");
 const test = require("node:test");
 const vm = require("node:vm");
 
@@ -24,7 +26,9 @@ async function createExtension({
   pauseFirstNavigation = false,
   storedManagedTabs = [],
   initialTabs = [],
-  extensionVersion = "0.3.4",
+  extensionVersion = "0.3.6",
+  runtimeId = trustedExtensionId,
+  fetchImpl = async () => ({ status: 204 }),
 } = {}) {
   const tabsById = new Map();
   const windowsById = new Map([[17, { id: 17, focused: true, state: "normal", type: "normal" }]]);
@@ -34,6 +38,9 @@ async function createExtension({
     tabUpdates: [],
     nativeMessages: [],
     contentMessages: [],
+    registrationRequests: [],
+    nativeConnections: 0,
+    alarms: [],
     logs: [],
   };
   let nextTabId = 1;
@@ -229,6 +236,7 @@ async function createExtension({
       },
     },
     runtime: {
+      id: runtimeId,
       onStartup: event(),
       onInstalled: event(),
       onMessage: event(),
@@ -240,7 +248,14 @@ async function createExtension({
         return { version: extensionVersion };
       },
       connectNative() {
+        calls.nativeConnections += 1;
         return port;
+      },
+    },
+    alarms: {
+      onAlarm: event(),
+      create(name, options) {
+        calls.alarms.push({ name, options: { ...options } });
       },
     },
   };
@@ -249,6 +264,19 @@ async function createExtension({
     setTimeout,
     clearTimeout,
     URL,
+    AbortController,
+    fetch(url, options) {
+      calls.registrationRequests.push({
+        url: String(url),
+        options: {
+          method: options.method,
+          cache: options.cache,
+          credentials: options.credentials,
+          hasAbortSignal: options.signal !== undefined,
+        },
+      });
+      return fetchImpl(url, options);
+    },
     console: {
       debug(...args) {
         calls.logs.push({ level: "debug", message: args.map(String).join(" ") });
@@ -267,6 +295,7 @@ async function createExtension({
   const source = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
   vm.runInContext(source, context, { filename: "background.js" });
   await vm.runInContext("restorePromise", context);
+  await vm.runInContext("initialNativeHostSync", context);
   return {
     calls,
     tabsById,
@@ -294,6 +323,12 @@ async function createExtension({
     },
     isNativeConnected() {
       return vm.runInContext("nativePort !== null", context);
+    },
+    async syncOnAlarm() {
+      return vm.runInContext(
+        "handleNativeHostSyncAlarm({ name: NATIVE_HOST_SYNC_ALARM })",
+        context,
+      );
     },
     cancelReconnect() {
       vm.runInContext(
@@ -335,6 +370,53 @@ async function createExtension({
     },
   };
 }
+
+test("manifest key derives the trusted Chrome extension ID", () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "manifest.json"), "utf8"),
+  );
+  const publicKey = Buffer.from(manifest.key, "base64");
+  const digest = crypto.createHash("sha256").update(publicKey).digest().subarray(0, 16);
+  const extensionId = Array.from(
+    digest,
+    (byte) => String.fromCharCode(97 + (byte >> 4)) + String.fromCharCode(97 + (byte & 15)),
+  ).join("");
+
+  assert.equal(extensionId, trustedExtensionId);
+});
+
+test("retries local synchronization until the native host is ready", async () => {
+  let appReady = false;
+  const extension = await createExtension({
+    fetchImpl: async () => ({ status: appReady ? 204 : 503 }),
+  });
+  const registrationUrl =
+    `http://127.0.0.1:43128/register?id=${trustedExtensionId}`;
+
+  assert.deepEqual(extension.calls.registrationRequests, [
+    {
+      url: registrationUrl,
+      options: {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        hasAbortSignal: true,
+      },
+    },
+  ]);
+  assert.equal(extension.calls.nativeConnections, 0);
+  assert.deepEqual(extension.calls.alarms, [
+    {
+      name: "twitch-streak-saver-native-host-sync",
+      options: { periodInMinutes: 1 },
+    },
+  ]);
+
+  appReady = true;
+  assert.equal(await extension.syncOnAlarm(), true);
+  assert.equal(extension.calls.nativeConnections, 1);
+  assert.equal(extension.isNativeConnected(), true);
+});
 
 test("opens each channel in its own active, unfocused combined Twitch window", async () => {
   const extension = await createExtension();

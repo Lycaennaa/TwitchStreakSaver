@@ -3,7 +3,6 @@ use super::*;
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PREFERENCES_KEY, &self.preferences());
-        eframe::set_value(storage, EXTENSION_ID_KEY, &self.extension_id);
     }
 
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
@@ -154,30 +153,34 @@ impl Dashboard {
             ui.label(format!("App-managed stream limit: {APP_STREAM_LIMIT}"));
         });
 
-        let browser_connected = self.browser_connected;
         let browser_notice = self.browser_notice.clone();
-        let mut install_native_host = false;
+        let mut setup_browser = None;
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.strong("Chrome / Brave integration");
-            ui.label(if browser_connected {
+            ui.strong("Browser integration");
+            ui.label(if self.browser_connected {
                 "Native host connected."
             } else {
-                "Load chrome-extension/ unpacked in Chrome or Brave, then install its native host."
+                "Load the unpacked extension once; native-host pairing is automatic."
             });
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.extension_id)
-                        .hint_text("Browser extension ID"),
-                );
-                install_native_host = ui.button("Install host").clicked();
+            ui.menu_button("Set up browser extension", |ui| {
+                let browsers = browser_setup::detected_setup_browsers();
+                if browsers.is_empty() {
+                    ui.label("No supported browsers detected.");
+                }
+                for browser in browsers {
+                    if ui.button(browser.name()).clicked() {
+                        setup_browser = Some(browser);
+                        ui.close_menu();
+                    }
+                }
             });
             if let Some(notice) = &browser_notice {
                 ui.label(egui::RichText::new(notice).small().weak());
             }
         });
-        if install_native_host {
-            self.install_chrome_native_host();
+        if let Some(target) = setup_browser {
+            self.open_extension_setup(target);
         }
         ui.group(|ui| {
             ui.strong("Twitch tab opening");

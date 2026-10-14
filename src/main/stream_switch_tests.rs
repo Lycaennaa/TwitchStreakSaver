@@ -30,7 +30,6 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         browser_connected: true,
         browser_error: None,
         browser_notice: None,
-        extension_id: String::new(),
         browser_states: if source_state_available {
             HashMap::from([(
                 "old".to_owned(),

@@ -16,7 +16,6 @@ impl Dashboard {
         let filtered_indices =
             followed_channel_search_indices(&self.channels, &self.followed_search);
         let browser_error = self.browser_error.clone();
-        let browser_notice = self.browser_notice.clone();
         let pubsub_connected = self.pubsub_connected;
         let pubsub_error = self.pubsub_error.clone();
         let streak_completed = &self.streak_completed;
@@ -67,9 +66,6 @@ impl Dashboard {
                 }
                 if let Some(error) = &pubsub_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("Points events: {error}"));
-                }
-                if let Some(notice) = &browser_notice {
-                    ui.label(egui::RichText::new(notice).small().weak());
                 }
                 if has_no_channels {
                     ui.label(if connected {

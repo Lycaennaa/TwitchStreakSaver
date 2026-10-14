@@ -1,4 +1,6 @@
 const NATIVE_HOST = "com.twitchstreaksaver.bridge";
+const NATIVE_HOST_SYNC_ALARM = "twitch-streak-saver-native-host-sync";
+const NATIVE_HOST_REGISTRATION_URL = "http://127.0.0.1:43128/register";
 importScripts("twitch_tabs.js");
 
 let nativePort = null;
@@ -13,6 +15,38 @@ let externalScanGeneration = 0;
 let nativeCommandQueue = Promise.resolve();
 
 const restorePromise = restoreManagedTabs();
+async function synchronizeNativeHost() {
+  const url = new URL(NATIVE_HOST_REGISTRATION_URL);
+  url.searchParams.set("id", chrome.runtime.id);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const response = await fetch(url.href, {
+      method: "GET",
+      cache: "no-store",
+      credentials: "omit",
+      signal: controller.signal,
+    });
+    if (response.status !== 204) return false;
+    connectNativeHost();
+    return true;
+  } catch (error) {
+    console.debug("Twitch Streak Saver app registration is unavailable.", error);
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function initializeNativeHostSync() {
+  chrome.alarms.create(NATIVE_HOST_SYNC_ALARM, { periodInMinutes: 1 });
+  return synchronizeNativeHost();
+}
+
+function handleNativeHostSyncAlarm(alarm) {
+  if (alarm?.name !== NATIVE_HOST_SYNC_ALARM) return Promise.resolve(false);
+  return synchronizeNativeHost();
+}
 
 async function restoreManagedTabs() {
   const stored = await chrome.storage.local.get("managedTabs");
@@ -563,6 +597,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
-chrome.runtime.onStartup.addListener(connectNativeHost);
-chrome.runtime.onInstalled.addListener(connectNativeHost);
-connectNativeHost();
+chrome.alarms.onAlarm.addListener((alarm) => {
+  void handleNativeHostSyncAlarm(alarm);
+});
+chrome.runtime.onStartup.addListener(() => {
+  void initializeNativeHostSync();
+});
+chrome.runtime.onInstalled.addListener(() => {
+  void initializeNativeHostSync();
+});
+const initialNativeHostSync = initializeNativeHostSync();

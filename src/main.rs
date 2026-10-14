@@ -22,6 +22,8 @@ use twitch_streak_saver::twitch::TwitchUpdate;
 mod automation;
 #[path = "main/browser.rs"]
 mod browser;
+#[path = "main/browser_setup.rs"]
+mod browser_setup;
 #[path = "main/channel_list.rs"]
 mod channel_list;
 #[path = "main/twitch.rs"]
@@ -325,7 +327,6 @@ fn selected_channel_indices(channels: &[FollowedChannel], limit: usize) -> Vec<u
         .collect()
 }
 const PREFERENCES_KEY: &str = "preferences";
-const EXTENSION_ID_KEY: &str = "chrome_extension_id";
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -360,7 +361,6 @@ struct Dashboard {
     browser_connected: bool,
     browser_error: Option<String>,
     browser_notice: Option<String>,
-    extension_id: String,
     browser_states: HashMap<String, BrowserChannelState>,
     external_stream_counts: HashMap<String, usize>,
     external_unmatched_streams: usize,
@@ -387,10 +387,6 @@ impl Dashboard {
             .storage
             .and_then(|storage| eframe::get_value::<AppPreferences>(storage, PREFERENCES_KEY))
             .unwrap_or_default();
-        let extension_id = creation_context
-            .storage
-            .and_then(|storage| eframe::get_value::<String>(storage, EXTENSION_ID_KEY))
-            .unwrap_or_default();
         let (browser_bridge, browser_error) = match BrowserBridge::start() {
             Ok(bridge) => (Some(bridge), None),
             Err(error) => (None, Some(error)),
@@ -415,7 +411,6 @@ impl Dashboard {
             browser_connected: false,
             browser_error,
             browser_notice: None,
-            extension_id,
             browser_states: HashMap::new(),
             external_stream_counts: HashMap::new(),
             external_unmatched_streams: 0,

@@ -342,16 +342,4 @@ impl Dashboard {
             });
         }
     }
-
-    pub(super) fn install_chrome_native_host(&mut self) {
-        match twitch_streak_saver::browser_bridge::install_native_host(&self.extension_id) {
-            Ok(path) => {
-                self.browser_error = None;
-                self.browser_notice = Some(format!(
-                    "Native host installed for Chrome and Brave. Reload the extension. Manifests: {path}"
-                ));
-            }
-            Err(error) => self.browser_error = Some(error),
-        }
-    }
 }

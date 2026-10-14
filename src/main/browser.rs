@@ -8,7 +8,7 @@ enum BrowserTabUpdate {
     },
 }
 const STREAM_LIMIT_EXTENSION_ERROR: &str =
-    "Reload the Chrome/Brave extension (version 0.3.4 or newer) to enforce the two-stream limit.";
+    "Reload the browser extension (version 0.3.6 or newer) to enforce the two-stream limit.";
 
 impl Dashboard {
     pub(super) fn poll_browser_bridge(&mut self) {
