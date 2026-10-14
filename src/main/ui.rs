@@ -30,45 +30,45 @@ impl eframe::App for Dashboard {
         }
         context.set_visuals(visuals);
 
-        egui::TopBottomPanel::top("app_header").show(context, |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
+        egui::TopBottomPanel::top("app_header")
+            .show_separator_line(false)
+            .show(context, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
                     ui.heading("Twitch Streak Saver");
-                    ui.label("A quieter way to manage the channels you follow");
-                });
-                let status = match &self.connection_status {
-                    TwitchConnectionStatus::Disconnected => "NOT CONNECTED".to_owned(),
-                    TwitchConnectionStatus::Connecting => "CONNECTING TO TWITCH…".to_owned(),
-                    TwitchConnectionStatus::Connected(login) => format!("CONNECTED · {login}"),
-                };
-                let connecting =
-                    matches!(&self.connection_status, TwitchConnectionStatus::Connecting);
-                let connected = matches!(
-                    &self.connection_status,
-                    TwitchConnectionStatus::Connected(_)
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(status).strong());
-                    if connecting {
-                        if ui.button("Cancel").clicked() {
-                            if let Some(cancel) = self.twitch_cancel.take() {
-                                cancel.store(true, Ordering::Release);
+                    let status = match &self.connection_status {
+                        TwitchConnectionStatus::Disconnected => "NOT CONNECTED".to_owned(),
+                        TwitchConnectionStatus::Connecting => "CONNECTING TO TWITCH…".to_owned(),
+                        TwitchConnectionStatus::Connected(login) => format!("CONNECTED · {login}"),
+                    };
+                    let connecting =
+                        matches!(&self.connection_status, TwitchConnectionStatus::Connecting);
+                    let connected = matches!(
+                        &self.connection_status,
+                        TwitchConnectionStatus::Connected(_)
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(status).strong());
+                        if connecting {
+                            if ui.button("Cancel").clicked() {
+                                if let Some(cancel) = self.twitch_cancel.take() {
+                                    cancel.store(true, Ordering::Release);
+                                }
+                                self.connection_generation =
+                                    self.connection_generation.wrapping_add(1);
+                                self.connection_status = TwitchConnectionStatus::Disconnected;
                             }
-                            self.connection_generation = self.connection_generation.wrapping_add(1);
-                            self.connection_status = TwitchConnectionStatus::Disconnected;
+                        } else if connected {
+                            if ui.button("Disconnect").clicked() {
+                                self.disconnect_twitch();
+                            }
+                        } else if ui.button("Connect Twitch").clicked() {
+                            self.start_twitch_connection();
                         }
-                    } else if connected {
-                        if ui.button("Disconnect").clicked() {
-                            self.disconnect_twitch();
-                        }
-                    } else if ui.button("Connect Twitch").clicked() {
-                        self.start_twitch_connection();
-                    }
+                    });
                 });
+                ui.add_space(8.0);
             });
-            ui.add_space(8.0);
-        });
 
         egui::CentralPanel::default().show(context, |ui| {
             let content_max_height = dashboard_content_max_height(ui.available_height());
@@ -76,10 +76,6 @@ impl eframe::App for Dashboard {
                 .max_height(content_max_height)
                 .show(ui, |ui| {
                     ui.add_space(8.0);
-                    ui.heading("Your watch list");
-                    ui.label("Choose Streaks, Channel Points, or both for each followed channel.");
-                    ui.add_space(12.0);
-
                     ui.columns(2, |columns| {
                         self.channel_list(&mut columns[0]);
                         self.watch_settings(&mut columns[1]);
