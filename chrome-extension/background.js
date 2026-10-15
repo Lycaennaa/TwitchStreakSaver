@@ -3,6 +3,7 @@ const NATIVE_HOST_SYNC_ALARM = "twitch-streak-saver-native-host-sync";
 // MV3 alarms wake suspended workers; active workers retry failed native connections after 5 seconds.
 const NATIVE_HOST_SYNC_INTERVAL_MINUTES = 0.5;
 const NATIVE_HOST_RETRY_DELAY_MS = 5000;
+const MANAGED_TAB_IDENTITY_POLICY_VERSION = 1;
 importScripts("twitch_tabs.js");
 
 let nativePort = null;
@@ -144,6 +145,7 @@ async function restoreManagedTabs() {
         : null;
       const identityUnsafe = Number.isInteger(tab?.openerTabId);
       const identityMatches = !identityUnsafe
+        && record.identityPolicyVersion === MANAGED_TAB_IDENTITY_POLICY_VERSION
         && typeof record.identityToken === "string"
         && tabIdentity === record.identityToken;
       const identityUnavailable = tabIdentity === undefined
@@ -174,6 +176,7 @@ async function restoreManagedTabs() {
             browserStartupOwnershipInvalidated
             && (
               typeof record.identityToken !== "string"
+              || record.identityPolicyVersion !== MANAGED_TAB_IDENTITY_POLICY_VERSION
               || (record.identityPersisted !== true && identityUnavailable)
             )
           )
@@ -277,6 +280,7 @@ async function resolvePendingStartupIdentity(tabId, identity) {
     record.pendingRaidOwnershipVerification === true
     && (
       typeof record.identityToken !== "string"
+      || record.identityPolicyVersion !== MANAGED_TAB_IDENTITY_POLICY_VERSION
       || identityUnsafe
       || (record.identityPersisted !== true && identityUnavailable)
     )
@@ -291,7 +295,11 @@ async function resolvePendingStartupIdentity(tabId, identity) {
     record.login,
     ...(Array.isArray(record.previousLogins) ? record.previousLogins : []),
   ];
-  if (!identityUnsafe && identity === record.identityToken) {
+  if (
+    !identityUnsafe
+    && record.identityPolicyVersion === MANAGED_TAB_IDENTITY_POLICY_VERSION
+    && identity === record.identityToken
+  ) {
     if (
       closeOnRaidRedirect
       && route.surface === "player"
@@ -839,6 +847,11 @@ async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
   }
   await loadManagedTab(tabId, url, wakeBrowser, forceReload);
   record.identityPersisted = await setManagedTabIdentity(tabId, record.identityToken);
+  if (record.identityPersisted) {
+    record.identityPolicyVersion = MANAGED_TAB_IDENTITY_POLICY_VERSION;
+  } else {
+    delete record.identityPolicyVersion;
+  }
   delete record.pendingUrl;
   record.contentVersion = contentVersion;
   managedTabs.set(channelId, record);

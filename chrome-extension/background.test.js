@@ -31,7 +31,7 @@ async function createExtension({
   storedManagedTabOwners = [],
   browserStartup = false,
   initialTabs = [],
-  extensionVersion = "0.3.12",
+  extensionVersion = "0.3.13",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
   connectNativeImpl = null,
@@ -624,6 +624,7 @@ test("browser startup does not trust an opener-copied tab identity", async () =>
         playerWindowId: 17,
         identityToken: "copied-tab-session",
         identityPersisted: true,
+        identityPolicyVersion: 1,
       }],
     ],
     storedManagedTabOwners: [[53, "channel-opener"]],
@@ -648,6 +649,44 @@ test("browser startup does not trust an opener-copied tab identity", async () =>
   await extension.reportManagedTabIdentity(53, "copied-tab-session");
 
   assert.equal(extension.tabsById.has(53), true);
+  assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), []);
+});
+test("startup quarantines an old token when opener metadata is gone", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-old-policy", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 55,
+        chatTabId: 55,
+        playerWindowId: 17,
+        identityToken: "old-tab-session",
+        identityPersisted: true,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    storedManagedTabOwners: [[55, "channel-old-policy"]],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 55,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      managedTabIdentity: "old-tab-session",
+    }],
+  });
+
+  assert.equal(extension.tabsById.has(55), true);
+  assert.equal(extension.snapshotManagedTabs()[0][1].pendingRaidOwnershipVerification, true);
+  await extension.send({
+    type: "sync_channels",
+    close_on_raid_redirect: true,
+    channels: [{ id: "channel-old-policy", login: "streamer" }],
+  });
+  await extension.reportManagedTabIdentity(55, "old-tab-session");
+
+  assert.equal(extension.tabsById.has(55), true);
+  assert.equal(extension.snapshotManagedTabs()[0][1].pendingRaidOwnershipVerification, true);
   assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), []);
 });
 test("session storage failure does not block a managed stream opening", async () => {
@@ -1009,7 +1048,7 @@ test("enabled raid redirects close managed streams and survive worker restarts",
         layout: "combined_window",
         playerTabId: 21,
         chatTabId: 21,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     initialTabs: [
@@ -1060,7 +1099,7 @@ test("worker restoration closes a managed tab already redirected by a raid", asy
         layout: "combined_window",
         playerTabId: 41,
         chatTabId: 41,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1087,7 +1126,7 @@ test("managed redirect closes after a Twitch route change", async () => {
         layout: "combined_window",
         playerTabId: 71,
         chatTabId: 71,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1109,7 +1148,7 @@ test("extension reload closes a raid redirect in the recorded managed window", a
         playerTabId: 43,
         chatTabId: 43,
         playerWindowId: 17,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1129,7 +1168,7 @@ test("moved managed tabs retain verifiable ownership after extension reload", as
         playerTabId: 44,
         chatTabId: 44,
         playerWindowId: 17,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1156,7 +1195,7 @@ test("raid redirect markers survive native disconnects and extension restarts", 
         layout: "combined_window",
         playerTabId: 51,
         chatTabId: 51,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     initialTabs: [{ id: 51, url: "https://www.twitch.tv/streamer" }],
@@ -1198,7 +1237,7 @@ test("failed raid tab removals retain suppression and identify the close failure
         layout: "combined_window",
         playerTabId: 61,
         chatTabId: 61,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1240,7 +1279,7 @@ test("raid redirects leave managed stream tabs open when the setting is disabled
         layout: "combined_window",
         playerTabId: 31,
         chatTabId: 31,
-        contentVersion: "0.3.12",
+        contentVersion: "0.3.13",
       }],
     ],
     initialTabs: [
@@ -1494,6 +1533,7 @@ test("browser startup rejects a reused tab and window without its managed identi
         chatTabId: 42,
         playerWindowId: 17,
         identityToken: "prior-tab-session",
+        identityPolicyVersion: 1,
       }],
     ],
     storedManagedTabOwners: [[42, "channel-reused"]],
@@ -1520,6 +1560,7 @@ test("browser startup closes a restored managed raid tab by its session identity
         playerTabId: 52,
         chatTabId: 52,
         identityToken: "restored-tab-session",
+        identityPolicyVersion: 1,
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1598,6 +1639,7 @@ test("startup identity checks release tabs that leave Twitch", async () => {
         playerTabId: 72,
         chatTabId: 72,
         identityToken: "left-tab-session",
+        identityPolicyVersion: 1,
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1633,6 +1675,7 @@ test("browser startup waits for a restored tab's identity before deciding owners
         playerTabId: 62,
         chatTabId: 62,
         identityToken: "delayed-tab-session",
+        identityPolicyVersion: 1,
       }],
     ],
     storedCloseOnRaidRedirect: true,
@@ -1674,6 +1717,7 @@ test("startup identity rejection refreshes external inventory", async () => {
         playerTabId: 82,
         chatTabId: 82,
         identityToken: "expected-tab-session",
+        identityPolicyVersion: 1,
       }],
     ],
     storedCloseOnRaidRedirect: true,
