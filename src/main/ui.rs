@@ -236,6 +236,25 @@ impl Dashboard {
                 "Automation stopped."
             });
             ui.checkbox(&mut self.auto_start_on_launch, "Auto-start on app launch");
+            #[cfg(target_os = "windows")]
+            {
+                let changed = ui
+                    .checkbox(&mut self.start_with_windows, "Launch at Windows sign-in")
+                    .changed();
+                if changed {
+                    match windows_startup::set_enabled(self.start_with_windows) {
+                        Ok(()) => self.windows_startup_error = None,
+                        Err(error) => {
+                            self.start_with_windows = !self.start_with_windows;
+                            self.windows_startup_error = Some(error);
+                        }
+                    }
+                }
+                ui.label("Applies to the current Windows user.");
+                if let Some(error) = &self.windows_startup_error {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
+            }
             ui.label("Twitch and browser connections are required for automatic opening.");
             ui.horizontal(|ui| {
                 start = ui

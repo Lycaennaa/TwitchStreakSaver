@@ -11,6 +11,10 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
     let (twitch_sender, twitch_updates) = std::sync::mpsc::channel();
     let (browser_port_check_sender, browser_port_check_receiver) = std::sync::mpsc::channel();
     let mut dashboard = Dashboard {
+        #[cfg(target_os = "windows")]
+        start_with_windows: false,
+        #[cfg(target_os = "windows")]
+        windows_startup_error: None,
         auto_start_on_launch: false,
         wake_browser_on_open: false,
         automation_enabled: true,

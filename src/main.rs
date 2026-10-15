@@ -34,6 +34,8 @@ mod channel_list;
 mod twitch;
 #[path = "main/ui.rs"]
 mod ui;
+#[path = "main/windows_startup.rs"]
+mod windows_startup;
 const AUTO_TAB_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 enum TwitchConnectionStatus {
@@ -350,6 +352,10 @@ fn main() -> eframe::Result<()> {
 }
 
 struct Dashboard {
+    #[cfg(target_os = "windows")]
+    start_with_windows: bool,
+    #[cfg(target_os = "windows")]
+    windows_startup_error: Option<String>,
     auto_start_on_launch: bool,
     wake_browser_on_open: bool,
     automation_enabled: bool,
@@ -397,6 +403,8 @@ impl Dashboard {
             .storage
             .and_then(|storage| eframe::get_value::<AppPreferences>(storage, PREFERENCES_KEY))
             .unwrap_or_default();
+        #[cfg(target_os = "windows")]
+        let (start_with_windows, windows_startup_error) = windows_startup::initialize();
         let (browser_bridge, browser_error) = match BrowserBridge::start() {
             Ok(bridge) => (Some(bridge), None),
             Err(error) => (None, Some(error)),
@@ -411,6 +419,10 @@ impl Dashboard {
         let (browser_port_check_sender, browser_port_check_receiver) = mpsc::channel();
 
         Self {
+            #[cfg(target_os = "windows")]
+            start_with_windows,
+            #[cfg(target_os = "windows")]
+            windows_startup_error,
             auto_start_on_launch: preferences.auto_start_on_launch,
             wake_browser_on_open: preferences.wake_browser_on_open,
             automation_enabled: preferences.auto_start_on_launch,
