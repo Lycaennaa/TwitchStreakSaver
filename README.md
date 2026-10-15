@@ -30,3 +30,7 @@ Run Rust tests with:
 ```sh
 buildproj cargo test
 ```
+
+## macOS app bundle
+
+On Apple Silicon, run `just package-macos` to build `dist/macos/Twitch Streak Saver.app` and install/overwrite `/Applications/Twitch Streak Saver.app`. It stages the replacement before removing the existing app. The bundle includes the Chromium extension in `Contents/Resources/chrome-extension` and the native-host sidecar in `Contents/MacOS`. In Chromium, use Developer mode and **Load unpacked** on the extension folder. The bundle is unsigned; direct distribution requires Developer ID signing and notarization.
