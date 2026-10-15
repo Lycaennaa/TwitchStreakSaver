@@ -42,6 +42,7 @@ impl Dashboard {
                 });
                 ui.add_space(8.0);
                 ui.add(egui::TextEdit::singleline(search).hint_text("Search channels"));
+                let _ = selection_bulk_controls(ui, channels);
                 ui.horizontal_wrapped(|ui| {
                     open_selected = ui.button("Open selected channels").clicked();
                     ui.label(if browser_connected && external_inventory_received {
@@ -87,16 +88,16 @@ impl Dashboard {
                                     ui.vertical(|ui| {
                                         ui.horizontal(|ui| {
                                             ui.strong(&channel.display_name);
-                                            let live_status = if live_channel_ids.contains(&channel.id)
-                                            {
-                                                "- live"
-                                            } else if connected {
-                                                "- offline"
-                                            } else if channel.id.starts_with("sample-") {
-                                                "- sample channel"
-                                            } else {
-                                                "- not connected"
-                                            };
+                                            let live_status =
+                                                if live_channel_ids.contains(&channel.id) {
+                                                    "- live"
+                                                } else if connected {
+                                                    "- offline"
+                                                } else if channel.id.starts_with("sample-") {
+                                                    "- sample channel"
+                                                } else {
+                                                    "- not connected"
+                                                };
                                             ui.label(live_status);
                                         });
                                         if let Some(points) = streak_completed.get(&channel.id) {
@@ -190,5 +191,141 @@ impl Dashboard {
         if open_selected {
             self.open_selected_twitch_channels();
         }
+    }
+}
+
+fn selection_bulk_controls(
+    ui: &mut egui::Ui,
+    channels: &mut [FollowedChannel],
+) -> (egui::Response, egui::Response) {
+    let enabled = !channels.is_empty();
+    let all_points_selected =
+        !channels.is_empty() && channels.iter().all(|channel| channel.selection.points);
+    let all_streaks_selected =
+        !channels.is_empty() && channels.iter().all(|channel| channel.selection.streak);
+    let (points, streaks) = ui
+        .horizontal_wrapped(|ui| {
+            let points_label = if all_points_selected {
+                "Unselect all Points"
+            } else {
+                "Select all Points"
+            };
+            let points = ui.add_enabled(enabled, egui::Button::new(points_label));
+            let select_points = points.clicked();
+            let points = points.on_hover_text(if all_points_selected {
+                "Clear Points selection for all followed channels, regardless of the current search."
+            } else {
+                "Select Points for all followed channels, regardless of the current search."
+            });
+            if select_points {
+                for channel in channels.iter_mut() {
+                    channel.selection.points = !all_points_selected;
+                }
+            }
+
+            let streaks_label = if all_streaks_selected {
+                "Unselect all Streaks"
+            } else {
+                "Select all Streaks"
+            };
+            let streaks = ui.add_enabled(enabled, egui::Button::new(streaks_label));
+            let select_streaks = streaks.clicked();
+            let streaks = streaks.on_hover_text(if all_streaks_selected {
+                "Clear Streak selection for all followed channels, regardless of the current search."
+            } else {
+                "Select Streaks for all followed channels, regardless of the current search."
+            });
+            if select_streaks {
+                for channel in channels.iter_mut() {
+                    channel.selection.streak = !all_streaks_selected;
+                }
+            }
+
+            (points, streaks)
+        })
+        .inner;
+    (points, streaks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn show_selection_controls(
+        context: &egui::Context,
+        channels: &mut [FollowedChannel],
+        events: Vec<egui::Event>,
+    ) -> [egui::Rect; 2] {
+        let mut button_rects = None;
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    let (points, streaks) = selection_bulk_controls(ui, channels);
+                    button_rects = Some([points.rect, streaks.rect]);
+                });
+            },
+        );
+        button_rects.expect("selection controls were not rendered")
+    }
+
+    fn click_button(context: &egui::Context, channels: &mut [FollowedChannel], index: usize) {
+        let rect = show_selection_controls(context, channels, Vec::new())[index];
+        let position = rect.center();
+        for pressed in [true, false] {
+            let _ = show_selection_controls(
+                context,
+                channels,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn bulk_buttons_toggle_all_followed_channels_independently() {
+        let mut first = FollowedChannel::new("first", "First");
+        first.selection.streak = true;
+        let hidden = FollowedChannel::new("hidden", "Hidden");
+        let mut third = FollowedChannel::new("third", "Third");
+        third.selection.points = true;
+        let mut channels = vec![first, hidden, third];
+        let context = egui::Context::default();
+
+        click_button(&context, &mut channels, 0);
+
+        assert!(channels.iter().all(|channel| channel.selection.points));
+        assert!(channels[0].selection.streak);
+        assert!(!channels[1].selection.streak);
+        assert!(!channels[2].selection.streak);
+
+        click_button(&context, &mut channels, 1);
+
+        assert!(channels.iter().all(|channel| channel.selection.points));
+        assert!(channels.iter().all(|channel| channel.selection.streak));
+
+        click_button(&context, &mut channels, 0);
+
+        assert!(channels.iter().all(|channel| !channel.selection.points));
+        assert!(channels.iter().all(|channel| channel.selection.streak));
+
+        click_button(&context, &mut channels, 1);
+
+        assert!(channels.iter().all(|channel| !channel.selection.points));
+        assert!(channels.iter().all(|channel| !channel.selection.streak));
     }
 }
