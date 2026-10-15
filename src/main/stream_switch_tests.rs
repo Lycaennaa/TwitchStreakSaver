@@ -28,6 +28,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         twitch_sender: twitch_sender.clone(),
         twitch_updates,
         browser_bridge: None,
+        browser_bridge_retry_after: None,
         browser_connected: true,
         browser_error: None,
         browser_notice: None,

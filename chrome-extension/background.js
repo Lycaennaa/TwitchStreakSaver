@@ -1,13 +1,14 @@
 const NATIVE_HOST = "com.twitchstreaksaver.bridge";
 const NATIVE_HOST_SYNC_ALARM = "twitch-streak-saver-native-host-sync";
-// MV3 alarms wake suspended workers; active workers retry failed checks after 5 seconds.
+// MV3 alarms wake suspended workers; active workers retry failed native connections after 5 seconds.
 const NATIVE_HOST_SYNC_INTERVAL_MINUTES = 0.5;
 const NATIVE_HOST_RETRY_DELAY_MS = 5000;
-const NATIVE_HOST_REGISTRATION_URL = "http://127.0.0.1:43128/register";
 importScripts("twitch_tabs.js");
 
 let nativePort = null;
 let syncedNativePort = null;
+let nativeBridgeReadyPort = null;
+let nativeHostError = null;
 let reconnectTimer = null;
 let managedTabs = new Map();
 const closingManagedTabIds = new Set();
@@ -15,37 +16,25 @@ let channelsByLogin = new Map();
 let externalScanTimer = null;
 let externalScanGeneration = 0;
 let nativeCommandQueue = Promise.resolve();
+const MAX_CONCURRENT_CHANNEL_OPENS = 2;
+let managedTabsSaveQueue = Promise.resolve();
+let nativeSyncPromise = null;
 
 const restorePromise = restoreManagedTabs();
-async function synchronizeNativeHost() {
-  if (nativePort) return true;
-  const url = new URL(NATIVE_HOST_REGISTRATION_URL);
-  url.searchParams.set("id", chrome.runtime.id);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
-  try {
-    const response = await fetch(url.href, {
-      method: "GET",
-      cache: "no-store",
-      credentials: "omit",
-      signal: controller.signal,
+function synchronizeNativeHost() {
+  if (nativePort) return Promise.resolve(true);
+  if (nativeSyncPromise === null) {
+    nativeSyncPromise = synchronizeNativeHostOnce().finally(() => {
+      nativeSyncPromise = null;
     });
-    if (response.status !== 204) {
-      console.debug(
-        `Twitch Streak Saver app registration returned HTTP ${response.status}.`,
-      );
-      scheduleReconnect();
-      return false;
-    }
-    connectNativeHost();
-    return true;
-  } catch (error) {
-    console.debug("Twitch Streak Saver app registration is unavailable.", error);
-    scheduleReconnect();
-    return false;
-  } finally {
-    clearTimeout(timeout);
   }
+  return nativeSyncPromise;
+}
+
+async function synchronizeNativeHostOnce() {
+  if (nativePort) return true;
+  connectNativeHost();
+  return nativePort !== null;
 }
 
 function initializeNativeHostSync() {
@@ -57,7 +46,42 @@ function initializeNativeHostSync() {
 
 function handleNativeHostSyncAlarm(alarm) {
   if (alarm?.name !== NATIVE_HOST_SYNC_ALARM) return Promise.resolve(false);
+  resetPendingNativeHost();
   return synchronizeNativeHost();
+}
+
+function nativeHostStatus() {
+  return {
+    nativeConnected: nativePort !== null,
+    bridgeReady: nativePort !== null && nativeBridgeReadyPort === nativePort,
+    error: nativeHostError,
+  };
+}
+
+function resetPendingNativeHost() {
+  const port = nativePort;
+  if (!port || nativeBridgeReadyPort === port) return;
+  handleNativePortDisconnect(port);
+  try {
+    port.disconnect();
+  } catch (error) {
+    console.debug("Could not close a stalled native host connection.", error);
+  }
+}
+
+function handleNativeHostWakeRequest(forceReconnect, sendResponse) {
+  if (forceReconnect) resetPendingNativeHost();
+  Promise.resolve()
+    .then(initializeNativeHostSync)
+    .then(
+      () => sendResponse(nativeHostStatus()),
+      (error) => {
+        nativeHostError = error?.message || String(error);
+        console.debug("Could not wake the Twitch Streak Saver native host.", error);
+        sendResponse(nativeHostStatus());
+      },
+    );
+  return true;
 }
 
 async function restoreManagedTabs() {
@@ -89,8 +113,13 @@ async function restoreManagedTabs() {
   await saveManagedTabs();
 }
 
-async function saveManagedTabs() {
-  await chrome.storage.local.set({ managedTabs: Array.from(managedTabs.entries()) });
+function saveManagedTabs() {
+  const snapshot = Array.from(managedTabs.entries());
+  const saving = managedTabsSaveQueue.then(() =>
+    chrome.storage.local.set({ managedTabs: snapshot }),
+  );
+  managedTabsSaveQueue = saving.catch(() => {});
+  return saving;
 }
 
 async function reportExternalStreams() {
@@ -133,6 +162,8 @@ function connectNativeHost() {
     port = chrome.runtime.connectNative(NATIVE_HOST);
     nativePort = port;
     syncedNativePort = null;
+    nativeBridgeReadyPort = null;
+    nativeHostError = null;
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -154,6 +185,7 @@ function connectNativeHost() {
       if (nativePort === port) handleNativePortDisconnect(port, error);
       return;
     }
+    nativeHostError = error?.message || String(error);
     console.warn("Twitch Streak Saver native host is unavailable.", error);
     scheduleReconnect();
   }
@@ -163,6 +195,8 @@ function handleNativePortDisconnect(port, error) {
   if (nativePort !== port) return;
   nativePort = null;
   syncedNativePort = null;
+  nativeBridgeReadyPort = null;
+  nativeHostError = error?.message || "Native host disconnected.";
   channelsByLogin = new Map();
   for (const record of managedTabs.values()) {
     for (const [, tabId] of managedSurfaceTabs(record)) {
@@ -219,7 +253,8 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
   if (nativePort !== sourcePort) return;
   switch (message?.type) {
     case "bridge_ready":
-      reconnectDelay = 1000;
+      nativeBridgeReadyPort = sourcePort;
+      nativeHostError = null;
       break;
     case "sync_channels": {
       const channels = (message.channels || []).filter((channel) => isValidChannel(channel));
@@ -267,74 +302,109 @@ function isValidChannel(channel) {
 }
 
 async function openChannels(channels, wakeBrowser, sourcePort) {
-  for (const channel of channels) {
-    if (!isValidChannel(channel)) continue;
-    const login = channel.login.toLowerCase();
-    let record = managedTabs.get(channel.id);
-    if (
-      record?.layout === "regular_website"
-      && Number.isInteger(record.playerTabId)
-      && record.playerTabId === record.chatTabId
-    ) {
-      record.layout = "combined_window";
-      managedTabs.set(channel.id, record);
-      await saveManagedTabs();
-    }
-    if (
-      record
-      && (record.layout !== "combined_window" || record.chatTabId !== record.playerTabId)
-    ) {
+  let nextChannel = 0;
+  const workerCount = Math.min(MAX_CONCURRENT_CHANNEL_OPENS, channels.length);
+  const openedTabIds = new Array(channels.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextChannel < channels.length) {
+      const channelIndex = nextChannel++;
+      const channel = channels[channelIndex];
+      if (!isValidChannel(channel)) continue;
       try {
-        await closeChannels([channel.id]);
+        openedTabIds[channelIndex] = await openChannel(
+          channel,
+          wakeBrowser,
+          sourcePort,
+        );
       } catch (error) {
         sendNative({
           type: "error",
           channel_id: channel.id,
-          message: `Could not migrate Twitch tabs for ${login}: ${String(error).slice(0, 160)}`,
+          message: `Could not open Twitch tabs for ${channel.login.toLowerCase()}: ${String(error).slice(0, 160)}`,
         });
-        continue;
       }
-      record = managedTabs.get(channel.id) || null;
-      if (record) continue;
     }
-    record = record || {
-      login,
-      layout: "combined_window",
-      playerTabId: null,
-      chatTabId: null,
-    };
-    if (record.login !== login) {
-      const previousLogins = new Set(
-        Array.isArray(record.previousLogins) ? record.previousLogins : [],
-      );
-      previousLogins.add(record.login);
-      record.previousLogins = Array.from(previousLogins);
+  }));
+  if (wakeBrowser && workerCount > 1) {
+    for (let index = openedTabIds.length - 1; index >= 0; index -= 1) {
+      const tabId = openedTabIds[index];
+      if (!Number.isInteger(tabId)) continue;
+      try {
+        await activateManagedTab(tabId, true);
+        break;
+      } catch (error) {
+        if (index === 0) throw error;
+      }
     }
-    record.login = login;
+  }
+  scheduleExternalStreamReport();
+}
+
+async function openChannel(channel, wakeBrowser, sourcePort) {
+  const login = channel.login.toLowerCase();
+  let record = managedTabs.get(channel.id);
+  if (
+    record?.layout === "regular_website"
+    && Number.isInteger(record.playerTabId)
+    && record.playerTabId === record.chatTabId
+  ) {
     record.layout = "combined_window";
     managedTabs.set(channel.id, record);
+    await saveManagedTabs();
+  }
+  if (
+    record
+    && (record.layout !== "combined_window" || record.chatTabId !== record.playerTabId)
+  ) {
     try {
-      const url = `https://www.twitch.tv/${encodeURIComponent(login)}`;
-      await openManagedTab(channel.id, record, url, wakeBrowser, sourcePort);
-      delete record.previousLogins;
-      record.chatTabId = record.playerTabId;
-      managedTabs.set(channel.id, record);
-      await saveManagedTabs();
-      sendNative({
-        type: "tab_opened",
-        channel_id: channel.id,
-        tab_id: record.chatTabId,
-        surface: "chat",
-      });
+      await closeChannels([channel.id]);
     } catch (error) {
       sendNative({
         type: "error",
         channel_id: channel.id,
-        message: `Could not open Twitch tabs for ${login}: ${String(error).slice(0, 160)}`,
+        message: `Could not migrate Twitch tabs for ${login}: ${String(error).slice(0, 160)}`,
       });
+      return;
     }
+    record = managedTabs.get(channel.id) || null;
+    if (record) return;
   }
-  scheduleExternalStreamReport();
+  record = record || {
+    login,
+    playerTabId: null,
+    chatTabId: null,
+  };
+  if (record.login !== login) {
+    const previousLogins = new Set(
+      Array.isArray(record.previousLogins) ? record.previousLogins : [],
+    );
+    previousLogins.add(record.login);
+    record.previousLogins = Array.from(previousLogins);
+  }
+  record.login = login;
+  record.layout = "combined_window";
+  managedTabs.set(channel.id, record);
+  try {
+    const url = `https://www.twitch.tv/${encodeURIComponent(login)}`;
+    await openManagedTab(channel.id, record, url, wakeBrowser, sourcePort);
+    delete record.previousLogins;
+    record.chatTabId = record.playerTabId;
+    managedTabs.set(channel.id, record);
+    await saveManagedTabs();
+    sendNative({
+      type: "tab_opened",
+      channel_id: channel.id,
+      tab_id: record.chatTabId,
+      surface: "chat",
+    });
+    return record.playerTabId;
+  } catch (error) {
+    sendNative({
+      type: "error",
+      channel_id: channel.id,
+      message: `Could not open Twitch tabs for ${login}: ${String(error).slice(0, 160)}`,
+    });
+  }
 }
 
 async function ensureDedicatedTabWindow(tabId) {
@@ -546,7 +616,14 @@ function forwardChannelState(message, sender) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "wake_native_host") {
+    return handleNativeHostWakeRequest(message.forceReconnect === true, sendResponse);
+  }
+  if (message?.type === "native_host_status") {
+    sendResponse(nativeHostStatus());
+    return false;
+  }
   if (message?.type === "channel_status") {
     forwardChannelState(message, sender);
   }

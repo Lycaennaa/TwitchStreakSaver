@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Twitch Streak Saver connection</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; margin: 14px; min-width: 260px; }
+      h1 { font-size: 16px; margin: 0 0 10px; }
+      p { min-height: 36px; }
+      button { width: 100%; padding: 7px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Browser connection</h1>
+      <p id="status" role="status" aria-live="polite">Waking the extension worker…</p>
+      <button id="wake" type="button">Wake / reconnect</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

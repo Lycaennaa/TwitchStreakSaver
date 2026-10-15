@@ -332,6 +332,7 @@ fn selected_channel_indices(channels: &[FollowedChannel], limit: usize) -> Vec<u
 }
 const PREFERENCES_KEY: &str = "preferences";
 const BROWSER_EXTENSION_ID: &str = include_str!("../chrome-extension/trusted-extension-id");
+const BROWSER_BRIDGE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -366,6 +367,7 @@ struct Dashboard {
     browser_port_check_receiver: Receiver<Result<(), String>>,
     browser_port_check_in_flight: bool,
     browser_bridge: Option<BrowserBridge>,
+    browser_bridge_retry_after: Option<Instant>,
     browser_connected: bool,
     browser_error: Option<String>,
     browser_notice: Option<String>,
@@ -399,6 +401,12 @@ impl Dashboard {
             Ok(bridge) => (Some(bridge), None),
             Err(error) => (None, Some(error)),
         };
+        let browser_bridge_retry_after = browser_bridge
+            .is_none()
+            .then(|| Instant::now() + BROWSER_BRIDGE_RETRY_DELAY);
+        let browser_notice = browser_error
+            .as_ref()
+            .map(|error| format!("Browser bridge unavailable; retrying automatically: {error}"));
         let (twitch_sender, twitch_updates) = mpsc::channel();
         let (browser_port_check_sender, browser_port_check_receiver) = mpsc::channel();
 
@@ -417,12 +425,13 @@ impl Dashboard {
             twitch_sender,
             twitch_updates,
             browser_bridge,
+            browser_bridge_retry_after,
             browser_connected: false,
             browser_error,
             browser_port_check_sender,
             browser_port_check_receiver,
             browser_port_check_in_flight: false,
-            browser_notice: None,
+            browser_notice,
             browser_states: HashMap::new(),
             external_stream_counts: HashMap::new(),
             external_unmatched_streams: 0,

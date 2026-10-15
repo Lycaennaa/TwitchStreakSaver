@@ -10,8 +10,33 @@ enum BrowserTabUpdate {
 const STREAM_LIMIT_EXTENSION_ERROR: &str =
     "Reload the browser extension (version 0.3.6 or newer) to enforce the two-stream limit.";
 
+fn browser_bridge_retry_due(retry_after: Option<Instant>, now: Instant) -> bool {
+    retry_after.is_some_and(|retry_after| now >= retry_after)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::browser_bridge_retry_due;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn browser_bridge_retries_only_after_the_scheduled_deadline() {
+        let now = Instant::now();
+        let retry_after = now + Duration::from_secs(5);
+
+        assert!(!browser_bridge_retry_due(Some(retry_after), now));
+        assert!(browser_bridge_retry_due(Some(retry_after), retry_after));
+        assert!(!browser_bridge_retry_due(None, now));
+    }
+}
 impl Dashboard {
     pub(super) fn poll_browser_bridge(&mut self) {
+        let now = Instant::now();
+        if self.browser_bridge.is_none()
+            && browser_bridge_retry_due(self.browser_bridge_retry_after, now)
+        {
+            self.retry_browser_bridge();
+        }
         let mut events = Vec::new();
         if let Some(bridge) = &self.browser_bridge {
             while let Ok(event) = bridge.try_recv() {
@@ -30,7 +55,6 @@ impl Dashboard {
                     self.browser_error = None;
                     self.browser_notice = None;
                     self.send_bridge_command(BrowserCommand::BridgeReady);
-                    self.sync_extension_channels();
                 }
                 BridgeEvent::Disconnected => {
                     self.pending_stream_switch = None;
@@ -53,6 +77,31 @@ impl Dashboard {
                     self.pending_stream_switch = None;
                     self.browser_error = Some(message);
                 }
+            }
+        }
+    }
+
+    pub(super) fn retry_browser_bridge(&mut self) -> bool {
+        if self.browser_bridge.is_some() {
+            return true;
+        }
+        match BrowserBridge::start() {
+            Ok(bridge) => {
+                self.browser_bridge = Some(bridge);
+                self.browser_bridge_retry_after = None;
+                self.browser_error = None;
+                self.browser_notice = Some(
+                    "App bridge is ready; waiting for the browser extension to pair.".to_owned(),
+                );
+                true
+            }
+            Err(error) => {
+                self.browser_bridge_retry_after = Some(Instant::now() + BROWSER_BRIDGE_RETRY_DELAY);
+                self.browser_error = Some(error.clone());
+                self.browser_notice = Some(format!(
+                    "Browser bridge could not start; it will retry automatically: {error}"
+                ));
+                false
             }
         }
     }

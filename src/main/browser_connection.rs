@@ -40,11 +40,14 @@ fn check_browser_connection_port_at(address: SocketAddr) -> Result<(), String> {
 
 impl Dashboard {
     pub(super) fn connect_to_browser(&mut self) {
+        if self.browser_bridge.is_none() && !self.retry_browser_bridge() {
+            return;
+        }
         if self.browser_port_check_in_flight {
             return;
         }
         self.browser_port_check_in_flight = true;
-        self.browser_notice = Some("Checking the browser connection port.".to_owned());
+        self.browser_notice = Some("Checking app bridge and registration endpoint.".to_owned());
         let sender = self.browser_port_check_sender.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("browser-port-check".to_owned())
@@ -66,12 +69,10 @@ impl Dashboard {
             Ok(()) => {
                 self.browser_notice = Some(if self.browser_connected {
                     format!(
-                        "Browser connected; port {EXTENSION_REGISTRATION_ADDRESS} responds. Click Open selected channels to load tabs."
+                        "Browser native messaging is connected; app endpoint {EXTENSION_REGISTRATION_ADDRESS} responds."
                     )
                 } else {
-                    format!(
-                        "Port {EXTENSION_REGISTRATION_ADDRESS} responds, but Browser not connected. This check does not open tabs."
-                    )
+                    "App endpoint is reachable, but the extension handshake is not complete. Click the extension toolbar icon to wake and retry its worker.".to_owned()
                 });
             }
             Err(error) => {

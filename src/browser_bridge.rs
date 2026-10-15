@@ -1,4 +1,4 @@
-use crate::browser_protocol::{BrowserCommand, BrowserMessage};
+use crate::browser_protocol::{BrowserCommand, BrowserMessage, KnownBrowserMessage};
 use directories::BaseDirs;
 use serde::{de::DeserializeOwned, Serialize};
 use std::fs;
@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+const BRIDGE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 mod registration;
 
 pub const NATIVE_HOST_NAME: &str = "com.twitchstreaksaver.bridge";
@@ -35,7 +36,6 @@ pub struct BrowserBridge {
 
 impl BrowserBridge {
     pub fn start() -> Result<Self, String> {
-        install_native_host()?;
         let listener = TcpListener::bind(BRIDGE_ADDRESS).map_err(|error| {
             format!("Could not start browser bridge on {BRIDGE_ADDRESS}: {error}")
         })?;
@@ -51,6 +51,7 @@ impl BrowserBridge {
         registration_listener
             .set_nonblocking(true)
             .map_err(|error| format!("Could not configure extension registration: {error}"))?;
+        install_native_host()?;
 
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
@@ -182,7 +183,32 @@ fn handle_connection(
         }
         reader_active.store(false, Ordering::Release);
     });
-    let _ = events.send(BridgeEvent::Connected);
+    let ready = match incoming_rx.recv_timeout(BRIDGE_HANDSHAKE_TIMEOUT) {
+        Ok(message @ BrowserMessage::Known(KnownBrowserMessage::Ready)) => {
+            let _ = events.send(BridgeEvent::Connected);
+            let _ = events.send(BridgeEvent::Message(message));
+            true
+        }
+        Ok(_) => {
+            let _ = events.send(BridgeEvent::Failed(
+                "Browser bridge did not start with a ready message.".to_owned(),
+            ));
+            false
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            let _ = events.send(BridgeEvent::Failed(
+                "Browser bridge did not complete its handshake.".to_owned(),
+            ));
+            false
+        }
+        Err(RecvTimeoutError::Disconnected) => false,
+    };
+    if !ready {
+        let _ = stream.shutdown(Shutdown::Both);
+        let _ = reader.join();
+        let _ = events.send(BridgeEvent::Disconnected);
+        return;
+    }
 
     while !stop.load(Ordering::Acquire) && active.load(Ordering::Acquire) {
         while let Ok(message) = incoming_rx.try_recv() {
@@ -414,6 +440,88 @@ mod tests {
             read_message::<Value>(&mut Cursor::new(bytes)).unwrap(),
             Some(message)
         );
+    }
+
+    #[test]
+    fn bridge_rejects_connections_without_the_extension_ready_message() {
+        use super::{handle_connection, BridgeEvent};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            handle_connection(
+                server_stream,
+                &command_rx,
+                &event_tx,
+                &Arc::new(AtomicBool::new(false)),
+            )
+        });
+
+        write_message(&mut client, &json!({"type": "unexpected"})).unwrap();
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            BridgeEvent::Failed(_)
+        ));
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            BridgeEvent::Disconnected
+        ));
+        drop(command_tx);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn bridge_reports_connected_after_the_extension_ready_message() {
+        use super::{handle_connection, BridgeEvent};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            handle_connection(
+                server_stream,
+                &command_rx,
+                &event_tx,
+                &Arc::new(AtomicBool::new(false)),
+            )
+        });
+
+        write_message(&mut client, &json!({"type": "ready"})).unwrap();
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            BridgeEvent::Connected
+        ));
+        let ready = event_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            ready,
+            BridgeEvent::Message(crate::browser_protocol::BrowserMessage::Known(
+                crate::browser_protocol::KnownBrowserMessage::Ready
+            ))
+        ));
+        drop(client);
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            BridgeEvent::Disconnected
+        ));
+        drop(command_tx);
+        server.join().unwrap();
     }
 
     #[test]

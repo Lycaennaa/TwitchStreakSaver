@@ -16,7 +16,7 @@ function event() {
       listeners.delete(listener);
     },
     dispatch(...args) {
-      for (const listener of [...listeners]) listener(...args);
+      return [...listeners].map((listener) => listener(...args));
     },
   };
 }
@@ -26,7 +26,7 @@ async function createExtension({
   pauseFirstNavigation = false,
   storedManagedTabs = [],
   initialTabs = [],
-  extensionVersion = "0.3.6",
+  extensionVersion = "0.3.9",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
   connectNativeImpl = null,
@@ -99,6 +99,9 @@ async function createExtension({
     onDisconnect: event(),
     postMessage(message) {
       calls.nativeMessages.push(message);
+    },
+    disconnect() {
+      this.onDisconnect.dispatch();
     },
   });
   let port = createPort();
@@ -252,7 +255,14 @@ async function createExtension({
       },
       connectNative() {
         calls.nativeConnections += 1;
+        port = createPort();
         return connectNativeImpl ? connectNativeImpl(port) : port;
+      },
+      sendMessage(message) {
+        return new Promise((resolve) => {
+          const results = chrome.runtime.onMessage.dispatch(message, {}, resolve);
+          if (!results.includes(true)) resolve(undefined);
+        });
       },
     },
     alarms: {
@@ -327,6 +337,52 @@ async function createExtension({
     isNativeConnected() {
       return vm.runInContext("nativePort !== null", context);
     },
+    status() {
+      return vm.runInContext("nativeHostStatus()", context);
+    },
+    synchronize() {
+      return vm.runInContext("synchronizeNativeHost()", context);
+    },
+    openPopup() {
+      const statusWaiters = [];
+      const status = {
+        value: "Waking the extension worker…",
+        get textContent() {
+          return this.value;
+        },
+        set textContent(value) {
+          const changed = value !== this.value;
+          this.value = value;
+          if (changed && !value.startsWith("Waking")) statusWaiters.shift()?.(value);
+        },
+      };
+      const wakeButton = {
+        disabled: false,
+        onClick: null,
+        addEventListener(_name, listener) {
+          this.onClick = listener;
+        },
+        click() {
+          if (!this.disabled) this.onClick?.();
+        },
+      };
+      context.document = {
+        querySelector(selector) {
+          return selector === "#status" ? status : wakeButton;
+        },
+      };
+      const popupSource = fs.readFileSync(path.join(__dirname, "popup.js"), "utf8");
+      const firstStatus = new Promise((resolve) => statusWaiters.push(resolve));
+      vm.runInContext(popupSource, context, { filename: "popup.js" });
+      return {
+        status,
+        wakeButton,
+        firstStatus,
+        nextStatus() {
+          return new Promise((resolve) => statusWaiters.push(resolve));
+        },
+      };
+    },
     async syncOnAlarm() {
       return vm.runInContext(
         "handleNativeHostSyncAlarm({ name: NATIVE_HOST_SYNC_ALARM })",
@@ -388,51 +444,70 @@ test("manifest key derives the trusted Chrome extension ID", () => {
   assert.equal(extensionId, trustedExtensionId);
 });
 
-test("retries registration every five seconds until native host connects", async () => {
-  let appReady = false;
-  const scheduledTimers = [];
-  const clearedTimers = new Set();
+test("pairs through native messaging without the localhost registration request", async () => {
+  let registrationRequests = 0;
   const extension = await createExtension({
-    fetchImpl: async () => ({ status: appReady ? 204 : 503 }),
-    setTimeoutImpl: (callback, delay) => {
-      const timer = { callback, delay };
-      scheduledTimers.push(timer);
-      return timer;
+    fetchImpl: async () => {
+      registrationRequests += 1;
+      return { status: 403 };
     },
-    clearTimeoutImpl: (timer) => clearedTimers.add(timer),
   });
-  const registrationUrl =
-    `http://127.0.0.1:43128/register?id=${trustedExtensionId}`;
 
-  assert.deepEqual(extension.calls.registrationRequests, [
-    {
-      url: registrationUrl,
-      options: {
-        method: "GET",
-        cache: "no-store",
-        credentials: "omit",
-        hasAbortSignal: true,
-      },
-    },
-  ]);
-  assert.equal(extension.calls.nativeConnections, 0);
-  assert.equal(extension.isNativeConnected(), false);
-  assert.deepEqual(extension.calls.alarms, [
-    {
-      name: "twitch-streak-saver-native-host-sync",
-      options: { periodInMinutes: 0.5 },
-    },
-  ]);
-  const retryTimer = scheduledTimers.find(
-    (timer) => !clearedTimers.has(timer) && timer.delay === 5000,
-  );
-  assert.ok(retryTimer);
-
-  appReady = true;
-  assert.equal(await retryTimer.callback(), true);
-  assert.equal(extension.calls.registrationRequests.length, 2);
   assert.equal(extension.calls.nativeConnections, 1);
   assert.equal(extension.isNativeConnected(), true);
+  assert.equal(extension.calls.registrationRequests.length, 0);
+  assert.equal(registrationRequests, 0);
+  await extension.send({ type: "bridge_ready" });
+  assert.equal(extension.status().bridgeReady, true);
+});
+test("coalesces concurrent native-host pairing checks", async () => {
+  const extension = await createExtension({
+    setTimeoutImpl: (callback, delay) => ({ callback, delay }),
+    clearTimeoutImpl: () => {},
+  });
+  extension.disconnectHost();
+  const connectionCount = extension.calls.nativeConnections;
+
+  const results = await Promise.all([
+    extension.synchronize(),
+    extension.synchronize(),
+  ]);
+
+  assert.deepEqual(results, [true, true]);
+  assert.equal(extension.calls.registrationRequests.length, 0);
+  assert.equal(extension.calls.nativeConnections, connectionCount + 1);
+  assert.equal(extension.isNativeConnected(), true);
+});
+
+test("toolbar popup wakes, restarts a stalled host, and follows the app handshake", async () => {
+  const extension = await createExtension({
+    fetchImpl: async () => ({ status: 403 }),
+    setTimeoutImpl: setTimeout,
+    clearTimeoutImpl: clearTimeout,
+  });
+  assert.equal(extension.calls.nativeConnections, 1);
+  assert.equal(extension.calls.registrationRequests.length, 0);
+
+  const popup = extension.openPopup();
+  assert.equal(
+    await popup.firstStatus,
+    "Native host started; waiting for the app handshake.",
+  );
+
+  const restarting = popup.nextStatus();
+  popup.wakeButton.click();
+  assert.equal(await restarting, "Restarting the pending native-host connection…");
+  assert.equal(
+    await popup.nextStatus(),
+    "Native host started; waiting for the app handshake.",
+  );
+  assert.equal(extension.calls.nativeConnections, 2);
+
+  const connected = popup.nextStatus();
+  await extension.send({ type: "bridge_ready" });
+  assert.equal(await connected, "Connected to Twitch Streak Saver.");
+  assert.equal(extension.calls.registrationRequests.length, 0);
+  assert.equal(extension.calls.nativeConnections, 2);
 });
 
 test("opens each channel in its own active, unfocused combined Twitch window", async () => {
@@ -474,6 +549,32 @@ test("opens each channel in its own active, unfocused combined Twitch window", a
       .filter((message) => message.type === "tab_opened")
       .map((message) => message.surface),
     ["player", "chat", "player", "chat"],
+  );
+});
+test("opens subsequent stream windows while an earlier Twitch page is still loading", async () => {
+  const extension = await createExtension({ pauseFirstNavigation: true });
+  const opening = extension.open({
+    type: "open_selected",
+    wake_browser: false,
+    channels: [
+      { id: "channel-slow", login: "slow_streamer" },
+      { id: "channel-fast", login: "fast_streamer" },
+    ],
+  });
+
+  await extension.waitForFirstNavigation();
+  const windowsOpenedWhileLoading = extension.calls.windowCreates.length;
+  extension.releaseFirstNavigation();
+  await opening;
+
+  assert.equal(windowsOpenedWhileLoading, 2);
+  assert.equal(extension.tabsById.size, 2);
+  assert.deepEqual(
+    [...extension.tabsById.values()].map((tab) => tab.url).sort(),
+    [
+      "https://www.twitch.tv/fast_streamer",
+      "https://www.twitch.tv/slow_streamer",
+    ],
   );
 });
 
@@ -528,6 +629,29 @@ test("wake mode focuses the dedicated window and waits for the combined page to 
   assert.deepEqual(JSON.parse(JSON.stringify(extension.calls.windowUpdates)), [
     { windowId: tab.windowId, options: { state: "normal", focused: true } },
   ]);
+});
+test("wake mode leaves the last requested stream window focused", async () => {
+  const extension = await createExtension({ pauseFirstWindow: true });
+  const opening = extension.open({
+    type: "open_selected",
+    wake_browser: true,
+    channels: [
+      { id: "channel-first", login: "first_streamer" },
+      { id: "channel-last", login: "last_streamer" },
+    ],
+  });
+  await extension.waitForFirstWindow();
+  extension.releaseFirstWindow();
+  await opening;
+
+  const lastTab = [...extension.tabsById.values()]
+    .find((tab) => tab.url.endsWith("/last_streamer"));
+  assert.equal(extension.windowsById.get(lastTab.windowId).focused, true);
+  assert.equal(
+    [...extension.tabsById.values()]
+      .some((tab) => extension.windowsById.get(tab.windowId).focused && tab.id !== lastTab.id),
+    false,
+  );
 });
 
 test("reopening a discarded managed tab reloads it before monitoring resumes", async () => {
@@ -666,7 +790,7 @@ test("queued repeated opens reuse the same dedicated tab", async () => {
   assert.equal([...extension.tabsById.values()][0].active, true);
   assert.equal(extension.windowsById.size, 2);
 });
-test("native host disconnect retries its registration after five seconds", async () => {
+test("native host disconnect retries its connection after five seconds", async () => {
   const scheduledTimers = [];
   const clearedTimers = new Set();
   const extension = await createExtension({
@@ -689,6 +813,7 @@ test("native host disconnect retries its registration after five seconds", async
   );
   assert.ok(retryTimer);
   assert.equal(await retryTimer.callback(), true);
+  assert.equal(extension.calls.registrationRequests.length, 0);
   assert.equal(extension.calls.nativeConnections, 2);
   assert.equal(extension.isNativeConnected(), true);
 });

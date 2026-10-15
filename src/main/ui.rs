@@ -148,18 +148,15 @@ impl Dashboard {
             ui.label(if self.browser_connected {
                 "Native host connected."
             } else {
-                "Click setup browser extension once. This app auto connects to browser when twitch connected."
+                "Pairing is automatic. Click the extension toolbar icon to wake and retry its worker."
             });
             let button_label = if port_check_in_flight {
-                "Checking browser port…"
+                "Checking browser connection…"
             } else {
-                "Connect to browser"
+                "Check app bridge"
             };
             if ui
-                .add_enabled(
-                    !port_check_in_flight,
-                    egui::Button::new(button_label),
-                )
+                .add_enabled(!port_check_in_flight, egui::Button::new(button_label))
                 .clicked()
             {
                 connect_browser = true;
