@@ -1,9 +1,21 @@
 (() => {
+  const MANAGED_TAB_IDENTITY_KEY = "__twitch_streak_saver_managed_tab_identity__";
   let previousState = "";
   let lastSentAt = 0;
   let monitoring = false;
   let timer = null;
 
+  function readManagedTabIdentity() {
+    try {
+      if (window.opener) {
+        window.sessionStorage.removeItem(MANAGED_TAB_IDENTITY_KEY);
+        return null;
+      }
+      return window.sessionStorage.getItem(MANAGED_TAB_IDENTITY_KEY);
+    } catch {
+      return null;
+    }
+  }
   function channelRoute() {
     return globalThis.TwitchTabUtils.channelRoute(location.href);
   }
@@ -69,7 +81,21 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((message) => {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === "get_managed_tab_identity") {
+      sendResponse({ identity: readManagedTabIdentity() });
+      return false;
+    }
+    if (
+      message?.type === "set_managed_tab_identity"
+      && typeof message.identity === "string"
+    ) {
+      try {
+        window.sessionStorage.setItem(MANAGED_TAB_IDENTITY_KEY, message.identity);
+      } catch {}
+      sendResponse({ identity: readManagedTabIdentity() });
+      return false;
+    }
     if (message?.type === "start_monitoring" && !monitoring) {
       monitoring = true;
       report();
@@ -78,4 +104,10 @@
       stopMonitoring();
     }
   });
+  try {
+    chrome.runtime.sendMessage({
+      type: "managed_tab_identity_ready",
+      identity: readManagedTabIdentity(),
+    }).catch(() => {});
+  } catch {}
 })();

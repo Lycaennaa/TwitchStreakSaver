@@ -26,7 +26,6 @@ impl Dashboard {
             self.connection_error = Some(format!("Could not start Twitch connection: {error}"));
         }
     }
-
     pub(super) fn disconnect_twitch(&mut self) {
         if let Some(cancel) = self.twitch_cancel.take() {
             cancel.store(true, Ordering::Release);
@@ -98,6 +97,7 @@ impl Dashboard {
                     self.live_channel_ids = live_channel_ids;
                     self.connection_status = TwitchConnectionStatus::Connected(login);
                     self.connection_error = None;
+                    self.clear_offline_raid_redirects();
                     self.sync_extension_channels();
                 }
                 TwitchUpdate::Refreshed {
@@ -112,6 +112,7 @@ impl Dashboard {
                         .retain(|channel_id| live_channel_ids.contains(channel_id));
                     self.live_channel_ids = live_channel_ids;
                     self.connection_error = None;
+                    self.clear_offline_raid_redirects();
                     self.sync_extension_channels();
                 }
                 TwitchUpdate::LiveStatus {
@@ -124,6 +125,7 @@ impl Dashboard {
                         .retain(|channel_id| live_channel_ids.contains(channel_id));
                     self.live_channel_ids = live_channel_ids;
                     self.connection_error = None;
+                    self.clear_offline_raid_redirects();
                 }
                 TwitchUpdate::PubSubStatus {
                     generation,

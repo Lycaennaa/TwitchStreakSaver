@@ -9,6 +9,10 @@ pub enum BrowserCommand {
     BridgeReady,
     SyncChannels {
         channels: Vec<BrowserChannel>,
+        close_on_raid_redirect: bool,
+    },
+    ClearRaidRedirectedChannels {
+        channel_ids: Vec<String>,
     },
     OpenSelected {
         wake_browser: bool,
@@ -52,6 +56,8 @@ pub enum KnownBrowserMessage {
         unmatched_count: usize,
         #[serde(default)]
         managed_channel_ids: Option<Vec<String>>,
+        #[serde(default)]
+        raid_redirected_channel_ids: Option<Vec<String>>,
     },
     TabOpened {
         channel_id: String,
@@ -71,12 +77,16 @@ pub enum KnownBrowserMessage {
         channel_id: String,
         tab_id: i64,
         surface: BrowserSurface,
+        #[serde(default)]
+        close_reason: Option<BrowserTabCloseReason>,
     },
     Error {
         #[serde(default)]
         channel_id: Option<String>,
         #[serde(default)]
         message: Option<String>,
+        #[serde(default)]
+        close_reason: Option<BrowserTabCloseReason>,
     },
 }
 
@@ -85,6 +95,11 @@ pub enum KnownBrowserMessage {
 pub enum BrowserSurface {
     Player,
     Chat,
+}
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTabCloseReason {
+    RaidRedirect,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -174,8 +189,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, ChatState,
-        KnownBrowserMessage, PlayerState,
+        BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, BrowserTabCloseReason,
+        ChatState, KnownBrowserMessage, PlayerState,
     };
     use crate::model::FollowedChannel;
     use serde_json::json;
@@ -196,6 +211,107 @@ mod tests {
                 "type": "open_selected",
                 "wake_browser": true,
                 "channels": [{"id": "123", "login": "streamer"}],
+            }),
+        );
+    }
+    #[test]
+    fn channel_sync_includes_raid_redirect_setting() {
+        let command = BrowserCommand::SyncChannels {
+            channels: vec![],
+            close_on_raid_redirect: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(command).unwrap(),
+            json!({
+                "type": "sync_channels",
+                "channels": [],
+                "close_on_raid_redirect": true,
+            }),
+        );
+    }
+
+    #[test]
+    fn raid_redirect_clear_command_matches_extension_wire_contract() {
+        let command = BrowserCommand::ClearRaidRedirectedChannels {
+            channel_ids: vec!["123".to_owned()],
+        };
+
+        assert_eq!(
+            serde_json::to_value(command).unwrap(),
+            json!({
+                "type": "clear_raid_redirected_channels",
+                "channel_ids": ["123"],
+            }),
+        );
+    }
+    #[test]
+    fn tab_close_reason_decodes_raid_and_defaults_for_legacy_messages() {
+        let raid = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "tab_closed",
+            "channel_id": "123",
+            "tab_id": 7,
+            "surface": "player",
+            "close_reason": "raid_redirect",
+        }))
+        .unwrap();
+        assert_eq!(
+            raid,
+            BrowserMessage::Known(KnownBrowserMessage::TabClosed {
+                channel_id: "123".to_owned(),
+                tab_id: 7,
+                surface: BrowserSurface::Player,
+                close_reason: Some(BrowserTabCloseReason::RaidRedirect),
+            }),
+        );
+
+        let legacy = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "tab_closed",
+            "channel_id": "123",
+            "tab_id": 7,
+            "surface": "player",
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy,
+            BrowserMessage::Known(KnownBrowserMessage::TabClosed {
+                channel_id: "123".to_owned(),
+                tab_id: 7,
+                surface: BrowserSurface::Player,
+                close_reason: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn raid_close_error_decodes_and_legacy_error_defaults() {
+        let raid_error = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "error",
+            "channel_id": "123",
+            "message": "Could not close managed tab",
+            "close_reason": "raid_redirect",
+        }))
+        .unwrap();
+        assert_eq!(
+            raid_error,
+            BrowserMessage::Known(KnownBrowserMessage::Error {
+                channel_id: Some("123".to_owned()),
+                message: Some("Could not close managed tab".to_owned()),
+                close_reason: Some(BrowserTabCloseReason::RaidRedirect),
+            }),
+        );
+
+        let legacy_error = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "error",
+            "message": "legacy error",
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy_error,
+            BrowserMessage::Known(KnownBrowserMessage::Error {
+                channel_id: None,
+                message: Some("legacy error".to_owned()),
+                close_reason: None,
             }),
         );
     }
@@ -254,6 +370,7 @@ mod tests {
             "channel_counts": {"live": 2, "invalid": "many", "zero": 0},
             "unmatched_count": 3,
             "managed_channel_ids": ["managed-channel"],
+            "raid_redirected_channel_ids": ["raid-channel"],
         }))
         .unwrap();
 
@@ -261,6 +378,7 @@ mod tests {
             channel_counts,
             unmatched_count,
             managed_channel_ids,
+            raid_redirected_channel_ids,
         }) = message
         else {
             panic!("expected external stream inventory");
@@ -274,6 +392,10 @@ mod tests {
             managed_channel_ids,
             Some(vec!["managed-channel".to_owned()])
         );
+        assert_eq!(
+            raid_redirected_channel_ids,
+            Some(vec!["raid-channel".to_owned()]),
+        );
         let legacy = serde_json::from_value::<BrowserMessage>(json!({
             "type": "external_streams",
             "channel_counts": {},
@@ -284,6 +406,7 @@ mod tests {
             legacy,
             BrowserMessage::Known(KnownBrowserMessage::ExternalStreams {
                 managed_channel_ids: None,
+                raid_redirected_channel_ids: None,
                 ..
             })
         ));

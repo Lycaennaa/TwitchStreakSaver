@@ -182,6 +182,7 @@ impl Dashboard {
         if let Some(target) = setup_browser {
             self.open_extension_setup(target);
         }
+        let mut close_on_raid_redirect_changed = false;
         ui.group(|ui| {
             ui.strong("Twitch tab opening");
             ui.label(
@@ -194,7 +195,17 @@ impl Dashboard {
             ui.label(
                 "Enabling this brings each stream window to the foreground as it opens and may interrupt other work. Twitch and the browser can still throttle or freeze background pages.",
             );
+            close_on_raid_redirect_changed = ui
+                .checkbox(
+                    &mut self.close_on_raid_redirect,
+                    "Close app-opened stream tabs on Twitch raid redirects",
+                )
+                .changed();
+            ui.label("Closes a managed stream when its URL includes referrer=raid.");
         });
+        if close_on_raid_redirect_changed {
+            self.sync_extension_channels();
+        }
 
         ui.add_space(8.0);
         self.automation_settings(ui);

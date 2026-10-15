@@ -54,6 +54,7 @@ pub fn merge_followed_channels(
 pub struct AppPreferences {
     pub auto_start_on_launch: bool,
     pub wake_browser_on_open: bool,
+    pub close_on_raid_redirect: bool,
     pub channels: Vec<FollowedChannel>,
 }
 
@@ -62,6 +63,7 @@ impl Default for AppPreferences {
         Self {
             auto_start_on_launch: true,
             wake_browser_on_open: false,
+            close_on_raid_redirect: false,
             channels: vec![
                 FollowedChannel::new("sample-01", "Sample channel one"),
                 FollowedChannel::new("sample-02", "Sample channel two"),
@@ -110,6 +112,7 @@ mod tests {
         };
         preferences.auto_start_on_launch = false;
         preferences.wake_browser_on_open = true;
+        preferences.close_on_raid_redirect = true;
 
         let encoded = ron::to_string(&preferences).unwrap();
         let decoded: AppPreferences = ron::from_str(&encoded).unwrap();
@@ -126,6 +129,7 @@ mod tests {
 
         assert!(!preferences.auto_start_on_launch);
         assert!(preferences.wake_browser_on_open);
+        assert!(!preferences.close_on_raid_redirect);
         assert!(preferences.channels.is_empty());
     }
 

@@ -112,6 +112,7 @@ impl Dashboard {
                 channel_counts,
                 unmatched_count,
                 managed_channel_ids,
+                raid_redirected_channel_ids,
             } => {
                 let known_channel_ids = self
                     .channels
@@ -125,6 +126,9 @@ impl Dashboard {
                     })
                     .collect();
                 self.external_unmatched_streams = unmatched_count;
+                if let Some(channel_ids) = raid_redirected_channel_ids {
+                    self.raid_redirected_channels = channel_ids.into_iter().collect();
+                }
                 if let Some(managed_channel_ids) = managed_channel_ids {
                     if !self.external_inventory_received {
                         restore_managed_channel_ownership(
@@ -144,6 +148,7 @@ impl Dashboard {
                     self.external_inventory_received = false;
                     self.browser_error = Some(STREAM_LIMIT_EXTENSION_ERROR.to_owned());
                 }
+                self.clear_offline_raid_redirects();
             }
             KnownBrowserMessage::Ready => {
                 self.sync_extension_channels();
@@ -193,6 +198,7 @@ impl Dashboard {
                 channel_id,
                 tab_id,
                 surface,
+                close_reason,
             } => {
                 let player_tab_closed = surface == BrowserSurface::Player
                     && !channel_id.is_empty()
@@ -205,7 +211,14 @@ impl Dashboard {
                         .browser_states
                         .get(&channel_id)
                         .map_or(true, |state| state.player_tab_id == Some(tab_id));
-                handle_closed_browser_tab(
+                let pending_tab_open = surface == BrowserSurface::Player
+                    && !channel_id.is_empty()
+                    && tab_id > 0
+                    && self
+                        .pending_stream_switch
+                        .as_ref()
+                        .is_some_and(|pending| pending.is_awaiting_open(&channel_id));
+                let closed = handle_closed_browser_tab(
                     channel_id.clone(),
                     tab_id,
                     surface,
@@ -214,18 +227,67 @@ impl Dashboard {
                     &mut self.auto_open_channels,
                     &mut self.auto_open_retry_after,
                 );
+                let raid_redirected = closed
+                    && surface == BrowserSurface::Player
+                    && close_reason == Some(BrowserTabCloseReason::RaidRedirect);
+                if raid_redirected {
+                    self.raid_redirected_channels.insert(channel_id.clone());
+                    if pending_tab_open {
+                        if let Some(pending) = &mut self.pending_stream_switch {
+                            pending.abandon_open(&channel_id);
+                            pending.desired_channels.remove(&channel_id);
+                        }
+                    }
+                    self.clear_offline_raid_redirects();
+                }
                 if player_tab_closed {
                     if let Some(pending) = &mut self.pending_stream_switch {
                         pending.confirm_closed(&channel_id);
                     }
+                }
+                if player_tab_closed || (raid_redirected && pending_tab_open) {
                     self.finish_pending_stream_switch();
                 }
             }
             KnownBrowserMessage::Error {
                 channel_id,
                 message,
+                close_reason,
             } => {
-                if let Some(channel_id) = channel_id {
+                if close_reason == Some(BrowserTabCloseReason::RaidRedirect) {
+                    let pending_state = channel_id.as_ref().and_then(|channel_id| {
+                        self.pending_stream_switch
+                            .as_ref()
+                            .and_then(|pending| pending.channels.get(channel_id).copied())
+                    });
+                    let pending_tab_open =
+                        matches!(pending_state, Some(PendingStreamChannelState::Opening));
+                    let pending_tab_closing =
+                        matches!(pending_state, Some(PendingStreamChannelState::Closing));
+                    if let Some(channel_id) = channel_id {
+                        self.raid_redirected_channels.insert(channel_id.clone());
+                        if pending_tab_closing {
+                            schedule_auto_open_retry(
+                                &self.auto_open_channels,
+                                &mut self.auto_open_retry_after,
+                                &channel_id,
+                                Instant::now(),
+                            );
+                        } else {
+                            self.auto_open_retry_after.remove(&channel_id);
+                            if pending_tab_open {
+                                if let Some(pending) = &mut self.pending_stream_switch {
+                                    pending.abandon_open(&channel_id);
+                                    pending.desired_channels.remove(&channel_id);
+                                }
+                            }
+                        }
+                    }
+                    if pending_tab_open {
+                        self.finish_pending_stream_switch();
+                    }
+                    self.clear_offline_raid_redirects();
+                } else if let Some(channel_id) = channel_id {
                     schedule_auto_open_retry(
                         &self.auto_open_channels,
                         &mut self.auto_open_retry_after,
@@ -358,7 +420,30 @@ impl Dashboard {
             .filter(|channel| !channel.login.is_empty())
             .map(BrowserChannel::from)
             .collect();
-        self.send_bridge_command(BrowserCommand::SyncChannels { channels });
+        self.send_bridge_command(BrowserCommand::SyncChannels {
+            channels,
+            close_on_raid_redirect: self.close_on_raid_redirect,
+        });
+    }
+
+    pub(super) fn clear_offline_raid_redirects(&mut self) {
+        if !self.browser_connected
+            || !matches!(
+                &self.connection_status,
+                TwitchConnectionStatus::Connected(_)
+            )
+        {
+            return;
+        }
+        let channel_ids = self
+            .raid_redirected_channels
+            .iter()
+            .filter(|channel_id| !self.live_channel_ids.contains(*channel_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !channel_ids.is_empty() {
+            self.send_bridge_command(BrowserCommand::ClearRaidRedirectedChannels { channel_ids });
+        }
     }
 
     pub(super) fn open_selected_twitch_channels(&mut self) {
@@ -450,9 +535,9 @@ fn handle_closed_browser_tab(
     manual_open_channels: &mut HashSet<String>,
     auto_open_channels: &mut HashSet<String>,
     auto_open_retry_after: &mut HashMap<String, Instant>,
-) {
+) -> bool {
     if channel_id.is_empty() || tab_id <= 0 {
-        return;
+        return false;
     }
     let remove_state = if let Some(state) = browser_states.get_mut(&channel_id) {
         match surface {
@@ -466,7 +551,7 @@ fn handle_closed_browser_tab(
                 state.chat_state = None;
                 state.chat_last_seen = None;
             }
-            _ => return,
+            _ => return false,
         }
         state.player_tab_id.is_none() && state.chat_tab_id.is_none()
     } else {
@@ -480,6 +565,7 @@ fn handle_closed_browser_tab(
     }
     auto_open_channels.remove(&channel_id);
     auto_open_retry_after.remove(&channel_id);
+    true
 }
 
 #[cfg(test)]

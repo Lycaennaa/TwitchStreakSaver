@@ -10,8 +10,8 @@ use twitch_streak_saver::browser_bridge::{
     BridgeEvent, BrowserBridge, EXTENSION_REGISTRATION_ADDRESS,
 };
 use twitch_streak_saver::browser_protocol::{
-    BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, ChatState, KnownBrowserMessage,
-    PlayerState,
+    BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, BrowserTabCloseReason,
+    ChatState, KnownBrowserMessage, PlayerState,
 };
 use twitch_streak_saver::model::{AppPreferences, FollowedChannel};
 use twitch_streak_saver::scheduler::{
@@ -358,6 +358,7 @@ struct Dashboard {
     windows_startup_error: Option<String>,
     auto_start_on_launch: bool,
     wake_browser_on_open: bool,
+    close_on_raid_redirect: bool,
     automation_enabled: bool,
     channels: Vec<FollowedChannel>,
     followed_search: String,
@@ -393,6 +394,7 @@ struct Dashboard {
     streak_rotation: StreamRotation,
     manual_open_channels: HashSet<String>,
     auto_open_channels: HashSet<String>,
+    raid_redirected_channels: HashSet<String>,
     removed_auto_streamer_names: HashMap<String, String>,
     pending_stream_switch: Option<PendingStreamSwitch>,
     auto_open_retry_after: HashMap<String, Instant>,
@@ -425,6 +427,7 @@ impl Dashboard {
             windows_startup_error,
             auto_start_on_launch: preferences.auto_start_on_launch,
             wake_browser_on_open: preferences.wake_browser_on_open,
+            close_on_raid_redirect: preferences.close_on_raid_redirect,
             automation_enabled: preferences.auto_start_on_launch,
             channels: preferences.channels,
             followed_search: String::new(),
@@ -460,6 +463,7 @@ impl Dashboard {
             streak_rotation: StreamRotation::default(),
             manual_open_channels: HashSet::new(),
             auto_open_channels: HashSet::new(),
+            raid_redirected_channels: HashSet::new(),
             removed_auto_streamer_names: HashMap::new(),
             auto_open_retry_after: HashMap::new(),
             pending_stream_switch: None,
@@ -470,6 +474,7 @@ impl Dashboard {
         AppPreferences {
             auto_start_on_launch: self.auto_start_on_launch,
             wake_browser_on_open: self.wake_browser_on_open,
+            close_on_raid_redirect: self.close_on_raid_redirect,
             channels: self.channels.clone(),
         }
     }

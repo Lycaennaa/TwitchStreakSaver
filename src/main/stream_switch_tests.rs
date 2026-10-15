@@ -1,6 +1,6 @@
 use super::{
-    BrowserChannelState, BrowserSurface, Dashboard, FollowedChannel, KnownBrowserMessage,
-    QueuePlanner, TwitchConnectionStatus, TwitchUpdate,
+    BrowserChannelState, BrowserSurface, BrowserTabCloseReason, Dashboard, FollowedChannel,
+    KnownBrowserMessage, QueuePlanner, TwitchConnectionStatus, TwitchUpdate,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         windows_startup_error: None,
         auto_start_on_launch: false,
         wake_browser_on_open: false,
+        close_on_raid_redirect: false,
         automation_enabled: true,
         channels: vec![
             FollowedChannel::new("old", "Old Streamer"),
@@ -65,6 +66,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         streak_rotation: super::StreamRotation::default(),
         manual_open_channels: HashSet::new(),
         auto_open_channels: HashSet::from(["old".to_owned()]),
+        raid_redirected_channels: HashSet::new(),
         removed_auto_streamer_names: HashMap::new(),
         pending_stream_switch: None,
         auto_open_retry_after: HashMap::new(),
@@ -101,12 +103,14 @@ fn automatic_stream_switch_logs_only_after_both_player_tabs_confirm() {
         channel_id: "old".to_owned(),
         tab_id: 99,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     assert!(dashboard.activity_log.is_empty());
     dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     let entry = dashboard.activity_log.front().unwrap();
     assert_eq!(entry.streamer, "Old Streamer");
@@ -117,6 +121,7 @@ fn automatic_stream_switch_logs_only_after_both_player_tabs_confirm() {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     assert!(dashboard.activity_log.is_empty());
     dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
@@ -129,6 +134,80 @@ fn automatic_stream_switch_logs_only_after_both_player_tabs_confirm() {
         "Switched from Old Streamer to New Streamer."
     );
 }
+#[test]
+fn raid_redirect_retires_a_live_auto_channel_until_extension_confirms_offline() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.channels[0].selection.streak = true;
+    dashboard.live_channel_ids = HashSet::from(["new".to_owned()]);
+    dashboard.browser_states = HashMap::from([(
+        "new".to_owned(),
+        BrowserChannelState {
+            player_tab_id: Some(2),
+            ..BrowserChannelState::default()
+        },
+    )]);
+    dashboard.auto_open_channels = HashSet::from(["new".to_owned()]);
+    dashboard.pending_stream_switch = None;
+    dashboard.queue_planner = QueuePlanner::default();
+    dashboard.points_rotation = super::StreamRotation::default();
+    dashboard.streak_rotation = super::StreamRotation::default();
+    dashboard.streak_completed.clear();
+    dashboard.auto_open_retry_after.clear();
+    dashboard.browser_error = None;
+
+    dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
+        channel_id: "new".to_owned(),
+        tab_id: 2,
+        surface: BrowserSurface::Player,
+        close_reason: Some(BrowserTabCloseReason::RaidRedirect),
+    });
+    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+
+    assert!(dashboard.live_channel_ids.contains("new"));
+    assert!(dashboard.raid_redirected_channels.contains("new"));
+    assert!(!dashboard.auto_open_channels.contains("new"));
+    assert!(dashboard.browser_error.is_none());
+
+    dashboard.connection_status = TwitchConnectionStatus::Disconnected;
+    dashboard.live_channel_ids.clear();
+    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    assert!(dashboard.raid_redirected_channels.contains("new"));
+
+    dashboard.connection_status = TwitchConnectionStatus::Connected("test".to_owned());
+    dashboard.clear_offline_raid_redirects();
+    assert!(dashboard.raid_redirected_channels.contains("new"));
+    dashboard.handle_browser_message(KnownBrowserMessage::ExternalStreams {
+        channel_counts: HashMap::new(),
+        unmatched_count: 0,
+        managed_channel_ids: Some(Vec::new()),
+        raid_redirected_channel_ids: Some(Vec::new()),
+    });
+    assert!(!dashboard.raid_redirected_channels.contains("new"));
+
+    dashboard.live_channel_ids.insert("new".to_owned());
+    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    assert!(dashboard.auto_open_channels.contains("new"));
+}
+
+#[test]
+fn external_inventory_restores_raid_suppression_before_reconciliation() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.pending_stream_switch = None;
+    dashboard.auto_open_channels.clear();
+    dashboard.raid_redirected_channels.clear();
+    dashboard.browser_error = None;
+    dashboard.handle_browser_message(KnownBrowserMessage::ExternalStreams {
+        channel_counts: HashMap::new(),
+        unmatched_count: 0,
+        managed_channel_ids: Some(Vec::new()),
+        raid_redirected_channel_ids: Some(vec!["new".to_owned()]),
+    });
+
+    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+
+    assert!(dashboard.raid_redirected_channels.contains("new"));
+    assert!(!dashboard.auto_open_channels.contains("new"));
+}
 
 #[test]
 fn unfollowed_source_close_ack_without_cached_state_completes_switch() {
@@ -137,6 +216,7 @@ fn unfollowed_source_close_ack_without_cached_state_completes_switch() {
         channel_id: "old".to_owned(),
         tab_id: 7,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     assert!(dashboard.activity_log.is_empty());
     dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
@@ -157,6 +237,7 @@ fn browser_errors_wait_for_confirmations() {
         dashboard.handle_browser_message(KnownBrowserMessage::Error {
             channel_id: failed_channel_id.map(str::to_owned),
             message: Some("tab operation failed".to_owned()),
+            close_reason: None,
         });
         assert!(dashboard.activity_log.is_empty());
         assert!(dashboard.pending_stream_switch.is_some());
@@ -169,6 +250,7 @@ fn destination_open_retry_preserves_switch_context() {
     dashboard.handle_browser_message(KnownBrowserMessage::Error {
         channel_id: Some("new".to_owned()),
         message: Some("tab open failed".to_owned()),
+        close_reason: None,
     });
     assert!(dashboard.pending_stream_switch.is_some());
 
@@ -176,6 +258,7 @@ fn destination_open_retry_preserves_switch_context() {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     assert!(dashboard.activity_log.is_empty());
 
@@ -211,6 +294,7 @@ fn source_close_retry_preserves_switch_context() {
     dashboard.handle_browser_message(KnownBrowserMessage::Error {
         channel_id: Some("old".to_owned()),
         message: Some("tab close failed".to_owned()),
+        close_reason: None,
     });
     assert!(dashboard.pending_stream_switch.is_some());
     assert!(dashboard.auto_open_channels.contains("old"));
@@ -228,6 +312,7 @@ fn source_close_retry_preserves_switch_context() {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     assert_eq!(
         dashboard.activity_log.front().unwrap().event,
@@ -241,11 +326,13 @@ fn unrelated_browser_error_does_not_cancel_pending_switch() {
     dashboard.handle_browser_message(KnownBrowserMessage::Error {
         channel_id: Some("unrelated".to_owned()),
         message: Some("unrelated tab operation failed".to_owned()),
+        close_reason: None,
     });
     dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
         channel_id: "new".to_owned(),
@@ -265,6 +352,7 @@ fn removed_retry_destination_keeps_source_close_retry_owned() {
         dashboard.handle_browser_message(KnownBrowserMessage::Error {
             channel_id: Some(channel_id.to_owned()),
             message: Some("tab operation failed".to_owned()),
+            close_reason: None,
         });
     }
 
@@ -298,10 +386,91 @@ fn removed_retry_destination_keeps_source_close_retry_owned() {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     assert!(dashboard.pending_stream_switch.is_none());
     assert!(dashboard.auto_open_channels.is_empty());
     assert!(dashboard.activity_log.is_empty());
+}
+
+#[test]
+fn failed_raid_close_cancels_a_pending_auto_open_retry() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.handle_browser_message(KnownBrowserMessage::Error {
+        channel_id: Some("new".to_owned()),
+        message: Some("tab open failed".to_owned()),
+        close_reason: None,
+    });
+    assert!(dashboard.auto_open_retry_after.contains_key("new"));
+    assert!(dashboard
+        .pending_stream_switch
+        .as_ref()
+        .is_some_and(|pending| pending.is_awaiting_open("new")));
+
+    dashboard.handle_browser_message(KnownBrowserMessage::Error {
+        channel_id: Some("new".to_owned()),
+        message: Some("Could not close managed Twitch tab".to_owned()),
+        close_reason: Some(BrowserTabCloseReason::RaidRedirect),
+    });
+
+    assert!(dashboard.raid_redirected_channels.contains("new"));
+    assert!(!dashboard.auto_open_retry_after.contains_key("new"));
+    assert!(!dashboard
+        .pending_stream_switch
+        .as_ref()
+        .is_some_and(|pending| pending.is_awaiting_open("new")));
+}
+
+#[test]
+fn failed_raid_close_preserves_pending_source_close_retry() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.handle_browser_message(KnownBrowserMessage::Error {
+        channel_id: Some("old".to_owned()),
+        message: Some("tab close failed".to_owned()),
+        close_reason: None,
+    });
+    assert!(dashboard.auto_open_retry_after.contains_key("old"));
+    assert!(dashboard
+        .pending_stream_switch
+        .as_ref()
+        .is_some_and(|pending| pending.is_awaiting_close("old")));
+
+    dashboard.handle_browser_message(KnownBrowserMessage::Error {
+        channel_id: Some("old".to_owned()),
+        message: Some("Could not close managed Twitch tab".to_owned()),
+        close_reason: Some(BrowserTabCloseReason::RaidRedirect),
+    });
+    assert!(dashboard.raid_redirected_channels.contains("old"));
+    assert!(dashboard.auto_open_retry_after.contains_key("old"));
+
+    dashboard
+        .auto_open_retry_after
+        .insert("old".to_owned(), Instant::now() - Duration::from_secs(1));
+    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+
+    assert!(!dashboard.auto_open_retry_after.contains_key("old"));
+    assert!(dashboard
+        .pending_stream_switch
+        .as_ref()
+        .is_some_and(|pending| pending.is_awaiting_close("old")));
+}
+
+#[test]
+fn raid_suppression_blocks_a_stale_pending_open_retry() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.raid_redirected_channels.insert("new".to_owned());
+    dashboard
+        .auto_open_retry_after
+        .insert("new".to_owned(), Instant::now() - Duration::from_secs(1));
+
+    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+
+    assert!(!dashboard.auto_open_channels.contains("new"));
+    assert!(!dashboard.auto_open_retry_after.contains_key("new"));
+    assert!(!dashboard
+        .pending_stream_switch
+        .as_ref()
+        .is_some_and(|pending| pending.is_awaiting_open("new")));
 }
 
 #[test]
@@ -334,6 +503,7 @@ fn latest_stream_plan_waits_for_in_flight_switch_confirmation() {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
         channel_id: "new".to_owned(),
@@ -383,6 +553,7 @@ fn unrelated_due_retry_waits_for_pending_switch() {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
         channel_id: "new".to_owned(),
@@ -429,6 +600,7 @@ fn unfollowed_destination_open_ack_completes_pending_switch() {
         channel_id: "old".to_owned(),
         tab_id: 1,
         surface: BrowserSurface::Player,
+        close_reason: None,
     });
     assert_eq!(
         dashboard.activity_log.front().unwrap().event,

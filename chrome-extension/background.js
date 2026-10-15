@@ -11,6 +11,8 @@ let nativeBridgeReadyPort = null;
 let nativeHostError = null;
 let reconnectTimer = null;
 let managedTabs = new Map();
+let closeOnRaidRedirect = false;
+let raidRedirectedChannelIds = new Set();
 const closingManagedTabIds = new Set();
 let channelsByLogin = new Map();
 let externalScanTimer = null;
@@ -18,9 +20,20 @@ let externalScanGeneration = 0;
 let nativeCommandQueue = Promise.resolve();
 const MAX_CONCURRENT_CHANNEL_OPENS = 2;
 let managedTabsSaveQueue = Promise.resolve();
+let raidRedirectedChannelIdsSaveQueue = Promise.resolve();
+let managedTabOwners = new Map();
+let managedTabOwnersSaveQueue = Promise.resolve();
+const pendingStartupIdentityChecks = new Map();
 let nativeSyncPromise = null;
-
-const restorePromise = restoreManagedTabs();
+const BROWSER_STARTUP_EVENT_GRACE_PERIOD_MS = 100;
+let browserStartupOwnershipReset = Promise.resolve();
+let browserStartupOwnershipInvalidated = false;
+chrome.runtime.onStartup.addListener(() => {
+  browserStartupOwnershipReset = invalidateManagedTabOwners();
+});
+const restorePromise = new Promise((resolve) =>
+  setTimeout(resolve, BROWSER_STARTUP_EVENT_GRACE_PERIOD_MS),
+).then(() => browserStartupOwnershipReset).then(restoreManagedTabs);
 function synchronizeNativeHost() {
   if (nativePort) return Promise.resolve(true);
   if (nativeSyncPromise === null) {
@@ -85,10 +98,29 @@ function handleNativeHostWakeRequest(forceReconnect, sendResponse) {
 }
 
 async function restoreManagedTabs() {
-  const stored = await chrome.storage.local.get("managedTabs");
+  const stored = await chrome.storage.local.get([
+    "managedTabs",
+    "closeOnRaidRedirect",
+    "raidRedirectedChannelIds",
+    "managedTabOwners",
+  ]);
   managedTabs = new Map(stored.managedTabs || []);
+  closeOnRaidRedirect = stored.closeOnRaidRedirect === true;
+  raidRedirectedChannelIds = new Set(
+    Array.isArray(stored.raidRedirectedChannelIds)
+      ? stored.raidRedirectedChannelIds.filter((channelId) => typeof channelId === "string")
+      : [],
+  );
+  managedTabOwners = browserStartupOwnershipInvalidated
+    ? new Map()
+    : new Map(stored.managedTabOwners || []);
+  if (browserStartupOwnershipInvalidated) {
+    for (const record of managedTabs.values()) delete record.playerWindowId;
+  }
   const tabs = await chrome.tabs.query({});
   const tabsById = new Map(tabs.map((tab) => [tab.id, tab]));
+  const raidRedirectedChannels = new Set();
+  const claimedTabIds = new Set();
   for (const [channelId, record] of managedTabs) {
     if (record.tabId && !record.playerTabId) {
       record.playerTabId = record.tabId;
@@ -97,20 +129,212 @@ async function restoreManagedTabs() {
     for (const surface of ["player", "chat"]) {
       const key = `${surface}TabId`;
       const tab = tabsById.get(record[key]);
+      const owner = tab && managedTabOwners.get(tab.id);
+      const raidPlayerRoute = surface === "player"
+        && closeOnRaidRedirect
+        && hasRaidReferrer(tab?.url || "")
+        && TwitchTabUtils.channelRoute(tab?.url || "").surface === "player";
+      if (
+        surface === "player"
+        && record.pendingRaidOwnershipVerification === true
+        && !raidPlayerRoute
+      ) delete record.pendingRaidOwnershipVerification;
+      const tabIdentity = raidPlayerRoute
+        ? await readManagedTabIdentity(tab.id)
+        : null;
+      const identityUnsafe = Number.isInteger(tab?.openerTabId);
+      const identityMatches = !identityUnsafe
+        && typeof record.identityToken === "string"
+        && tabIdentity === record.identityToken;
+      const identityUnavailable = tabIdentity === undefined
+        || tabIdentity === null
+        || identityUnsafe;
+      if (
+        raidPlayerRoute
+        && (
+          owner === channelId
+          || (
+            !browserStartupOwnershipInvalidated
+            && Number.isInteger(record.playerWindowId)
+            && record.playerWindowId === tab.windowId
+          )
+          || identityMatches
+        )
+      ) {
+        raidRedirectedChannels.add(channelId);
+        claimedTabIds.add(tab.id);
+        continue;
+      }
+      if (
+        raidPlayerRoute
+        && (
+          record.pendingRaidOwnershipVerification === true
+          || identityUnsafe
+          || (
+            browserStartupOwnershipInvalidated
+            && (
+              typeof record.identityToken !== "string"
+              || (record.identityPersisted !== true && identityUnavailable)
+            )
+          )
+          || (record.identityPersisted === false && identityUnavailable)
+        )
+      ) {
+        record.pendingRaidOwnershipVerification = true;
+        pendingStartupIdentityChecks.set(tab.id, channelId);
+        claimedTabIds.add(tab.id);
+        continue;
+      }
+      if (
+        raidPlayerRoute
+        && typeof record.identityToken === "string"
+        && tabIdentity === undefined
+      ) {
+        pendingStartupIdentityChecks.set(tab.id, channelId);
+        claimedTabIds.add(tab.id);
+        continue;
+      }
       const routeLogins = [
         record.login,
         ...(Array.isArray(record.previousLogins) ? record.previousLogins : []),
       ];
-      const currentPage = tab && routeLogins.some(
+      const ownershipMatches = tab && (
+        owner === channelId
+        || (owner === undefined && (
+          surface !== "player"
+          || !Number.isInteger(record.playerWindowId)
+          || record.playerWindowId === tab.windowId
+        ))
+      );
+      const currentPage = ownershipMatches && routeLogins.some(
         (login) => urlMatchesManagedSurface(tab.url, login, surface, record.layout),
       );
-      const pendingPage = tab?.url === "about:blank"
+      const pendingPage = ownershipMatches
+        && tab.url === "about:blank"
         && urlMatchesManagedSurface(record.pendingUrl, record.login, surface, record.layout);
-      if (!currentPage && !pendingPage) record[key] = null;
+      if ((currentPage || pendingPage) && tab) {
+        claimedTabIds.add(tab.id);
+        managedTabOwners.set(tab.id, channelId);
+        if (surface === "player") record.playerWindowId = tab.windowId;
+      } else {
+        if (
+          tab
+          && owner === channelId
+          && !raidRedirectedChannels.has(channelId)
+        ) managedTabOwners.delete(tab.id);
+        if (surface === "player") delete record.playerWindowId;
+        record[key] = null;
+      }
     }
     if (!record.playerTabId && !record.chatTabId) managedTabs.delete(channelId);
   }
+  for (const tabId of managedTabOwners.keys()) {
+    if (!claimedTabIds.has(tabId)) managedTabOwners.delete(tabId);
+  }
+  try {
+    await saveManagedTabOwners();
+  } catch (error) {
+    console.warn("Could not persist restored managed tab ownership.", error);
+  }
   await saveManagedTabs();
+  if (raidRedirectedChannels.size > 0) {
+    await closeChannels(Array.from(raidRedirectedChannels), "raid_redirect");
+  }
+}
+async function readManagedTabIdentity(tabId) {
+  try {
+    const result = await chrome.tabs.sendMessage(tabId, {
+      type: "get_managed_tab_identity",
+    });
+    return typeof result?.identity === "string" ? result.identity : null;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolvePendingStartupIdentity(tabId, identity) {
+  const channelId = pendingStartupIdentityChecks.get(tabId);
+  if (!channelId) return false;
+  pendingStartupIdentityChecks.delete(tabId);
+  const record = managedTabs.get(channelId);
+  if (!record || record.playerTabId !== tabId) return false;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    record.playerTabId = null;
+    if (record.chatTabId === tabId) record.chatTabId = null;
+    delete record.pendingRaidOwnershipVerification;
+    if (!record.playerTabId && !record.chatTabId) managedTabs.delete(channelId);
+    await saveManagedTabs();
+    scheduleExternalStreamReport();
+    return false;
+  }
+  const route = TwitchTabUtils.channelRoute(tab.url || "");
+  const identityUnsafe = Number.isInteger(tab.openerTabId);
+  const identityUnavailable = identity === undefined || identity === null || identityUnsafe;
+  if (
+    record.pendingRaidOwnershipVerification === true
+    && (
+      typeof record.identityToken !== "string"
+      || identityUnsafe
+      || (record.identityPersisted !== true && identityUnavailable)
+    )
+    && route.surface === "player"
+    && hasRaidReferrer(tab.url || "")
+  ) {
+    pendingStartupIdentityChecks.set(tabId, channelId);
+    return false;
+  }
+  delete record.pendingRaidOwnershipVerification;
+  const routeLogins = [
+    record.login,
+    ...(Array.isArray(record.previousLogins) ? record.previousLogins : []),
+  ];
+  if (!identityUnsafe && identity === record.identityToken) {
+    if (
+      closeOnRaidRedirect
+      && route.surface === "player"
+      && hasRaidReferrer(tab.url || "")
+    ) {
+      await closeChannels([channelId], "raid_redirect");
+      return true;
+    }
+    if (routeLogins.some(
+      (login) => urlMatchesManagedSurface(tab.url, login, "player", record.layout),
+    )) {
+      managedTabOwners.set(tabId, channelId);
+      record.playerWindowId = tab.windowId;
+      await saveManagedTabOwners();
+      await saveManagedTabs();
+      return true;
+    }
+  }
+  record.playerTabId = null;
+  if (record.chatTabId === tabId) record.chatTabId = null;
+  delete record.pendingRaidOwnershipVerification;
+  managedTabOwners.delete(tabId);
+  if (!record.playerTabId && !record.chatTabId) managedTabs.delete(channelId);
+  await saveManagedTabOwners();
+  await saveManagedTabs();
+  scheduleExternalStreamReport();
+  return false;
+}
+
+async function invalidateManagedTabOwners() {
+  browserStartupOwnershipInvalidated = true;
+  managedTabOwners = new Map();
+  try {
+    const stored = await chrome.storage.local.get("managedTabs");
+    const records = new Map(stored.managedTabs || []);
+    for (const record of records.values()) delete record.playerWindowId;
+    await chrome.storage.local.set({
+      managedTabs: Array.from(records.entries()),
+      managedTabOwners: [],
+    });
+  } catch (error) {
+    console.warn("Could not clear managed ownership from the prior browser session.", error);
+  }
 }
 
 function saveManagedTabs() {
@@ -120,6 +344,61 @@ function saveManagedTabs() {
   );
   managedTabsSaveQueue = saving.catch(() => {});
   return saving;
+}
+
+function saveManagedTabOwners() {
+  const saving = managedTabOwnersSaveQueue.then(() =>
+    chrome.storage.local.set({
+      managedTabOwners: Array.from(managedTabOwners.entries()),
+    }),
+  );
+  managedTabOwnersSaveQueue = saving.catch(() => {});
+  return saving;
+}
+
+async function rememberManagedTabOwner(tabId, channelId) {
+  if (managedTabOwners.get(tabId) === channelId) return;
+  managedTabOwners.set(tabId, channelId);
+  try {
+    await saveManagedTabOwners();
+  } catch (error) {
+    console.warn("Could not persist managed tab ownership.", error);
+  }
+}
+
+async function forgetManagedTabOwner(tabId) {
+  if (!managedTabOwners.delete(tabId)) return;
+  try {
+    await saveManagedTabOwners();
+  } catch (error) {
+    console.warn("Could not clear managed tab ownership.", error);
+  }
+}
+
+function saveRaidRedirectedChannelIds() {
+  const saving = raidRedirectedChannelIdsSaveQueue.then(() =>
+    chrome.storage.local.set({
+      raidRedirectedChannelIds: Array.from(raidRedirectedChannelIds).sort(),
+    }),
+  );
+  raidRedirectedChannelIdsSaveQueue = saving.catch(() => {});
+  return saving;
+}
+
+async function clearRaidRedirectedChannelIds(channelIds) {
+  const removedChannelIds = [];
+  for (const channelId of new Set(channelIds.filter((id) => typeof id === "string"))) {
+    if (raidRedirectedChannelIds.delete(channelId)) removedChannelIds.push(channelId);
+  }
+  if (removedChannelIds.length === 0) return;
+  try {
+    await saveRaidRedirectedChannelIds();
+  } catch (error) {
+    for (const channelId of removedChannelIds) raidRedirectedChannelIds.add(channelId);
+    console.warn("Could not persist cleared raid redirect channels.", error);
+    return;
+  }
+  scheduleExternalStreamReport();
 }
 
 async function reportExternalStreams() {
@@ -144,6 +423,7 @@ async function reportExternalStreams() {
     managed_channel_ids: Array.from(managedTabs.entries())
       .filter(([, record]) => Number.isInteger(record.playerTabId))
       .map(([channelId]) => channelId),
+    raid_redirected_channel_ids: Array.from(raidRedirectedChannelIds).sort(),
   });
 }
 
@@ -230,6 +510,19 @@ function sendNative(message) {
 function setMonitoring(tabId, type) {
   void chrome.tabs.sendMessage(tabId, { type }).catch(() => {});
 }
+async function setManagedTabIdentity(tabId, identity) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (Number.isInteger(tab.openerTabId)) return false;
+    const result = await chrome.tabs.sendMessage(tabId, {
+      type: "set_managed_tab_identity",
+      identity,
+    });
+    return result?.identity === identity;
+  } catch {
+    return false;
+  }
+}
 
 function managedSurfaceTabs(record) {
   return [
@@ -242,7 +535,14 @@ function detachManagedTab(channelId, record, surface, tabId) {
   const key = `${surface}TabId`;
   if (record[key] !== tabId) return;
   record[key] = null;
+  if (surface === "player") {
+    delete record.pendingRaidOwnershipVerification;
+    pendingStartupIdentityChecks.delete(tabId);
+  }
   setMonitoring(tabId, "stop_monitoring");
+  if (record.playerTabId !== tabId && record.chatTabId !== tabId) {
+    void forgetManagedTabOwner(tabId);
+  }
   if (!record.playerTabId && !record.chatTabId) managedTabs.delete(channelId);
   void saveManagedTabs();
   sendNative({ type: "tab_closed", channel_id: channelId, tab_id: tabId, surface });
@@ -257,6 +557,12 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
       nativeHostError = null;
       break;
     case "sync_channels": {
+      closeOnRaidRedirect = message.close_on_raid_redirect === true;
+      try {
+        await chrome.storage.local.set({ closeOnRaidRedirect });
+      } catch (error) {
+        console.warn("Could not persist the raid redirect setting.", error);
+      }
       const channels = (message.channels || []).filter((channel) => isValidChannel(channel));
       channelsByLogin = new Map(
         channels.map((channel) => [channel.login.toLowerCase(), channel.id]),
@@ -289,6 +595,9 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
       break;
     case "close_channels":
       await closeChannels(message.channel_ids || []);
+      break;
+    case "clear_raid_redirected_channels":
+      await clearRaidRedirectedChannelIds(message.channel_ids || []);
       break;
   }
 }
@@ -343,6 +652,13 @@ async function openChannels(channels, wakeBrowser, sourcePort) {
 async function openChannel(channel, wakeBrowser, sourcePort) {
   const login = channel.login.toLowerCase();
   let record = managedTabs.get(channel.id);
+  if (
+    record
+    && (
+      record.pendingRaidOwnershipVerification === true
+      || pendingStartupIdentityChecks.get(record.playerTabId) === channel.id
+    )
+  ) return;
   if (
     record?.layout === "regular_website"
     && Number.isInteger(record.playerTabId)
@@ -487,6 +803,7 @@ async function loadManagedTab(tabId, url, wakeBrowser, forceReload) {
 
 async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
   let tabId = record.playerTabId;
+  record.identityToken = record.identityToken || crypto.randomUUID();
   if (tabId !== null && tabId !== undefined) {
     try {
       await chrome.tabs.get(tabId);
@@ -507,8 +824,12 @@ async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
   } else {
     await ensureDedicatedTabWindow(tabId);
   }
+  await rememberManagedTabOwner(tabId, channelId);
   await chrome.tabs.update(tabId, { autoDiscardable: false, muted: true });
   const tab = await chrome.tabs.get(tabId);
+  record.playerWindowId = tab.windowId;
+  managedTabs.set(channelId, record);
+  await saveManagedTabs();
   const contentVersion = chrome.runtime.getManifest().version;
   const forceReload = record.contentVersion !== contentVersion;
   if (tab.url !== url || tab.discarded || tab.status !== "complete" || forceReload) {
@@ -517,6 +838,7 @@ async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
     await saveManagedTabs();
   }
   await loadManagedTab(tabId, url, wakeBrowser, forceReload);
+  record.identityPersisted = await setManagedTabIdentity(tabId, record.identityToken);
   delete record.pendingUrl;
   record.contentVersion = contentVersion;
   managedTabs.set(channelId, record);
@@ -530,7 +852,7 @@ async function closeAllChannels() {
   await closeChannels(Array.from(managedTabs.keys()));
 }
 
-async function closeChannels(channelIds) {
+async function closeChannels(channelIds, closeReason = null) {
   for (const channelId of new Set(channelIds.filter((id) => typeof id === "string"))) {
     const record = managedTabs.get(channelId);
     if (!record) continue;
@@ -542,6 +864,14 @@ async function closeChannels(channelIds) {
     if (tabSurfaces.size === 0) {
       managedTabs.delete(channelId);
       continue;
+    }
+    if (closeReason === "raid_redirect") {
+      raidRedirectedChannelIds.add(channelId);
+      try {
+        await saveRaidRedirectedChannelIds();
+      } catch (error) {
+        console.warn("Could not persist a raid-redirected channel.", error);
+      }
     }
     for (const [tabId, surfaces] of tabSurfaces) {
       closingManagedTabIds.add(tabId);
@@ -560,19 +890,29 @@ async function closeChannels(channelIds) {
             type: "error",
             channel_id: channelId,
             message: `Could not close managed Twitch tab ${tabId}: ${String(error).slice(0, 160)}`,
+            ...(closeReason ? { close_reason: closeReason } : {}),
           });
         }
       } finally {
         closingManagedTabIds.delete(tabId);
       }
       if (!removed) continue;
+      pendingStartupIdentityChecks.delete(tabId);
+      await forgetManagedTabOwner(tabId);
       const current = managedTabs.get(channelId);
       if (!current) continue;
       for (const surface of surfaces) {
         const key = `${surface}TabId`;
         if (current[key] !== tabId) continue;
         current[key] = null;
-        sendNative({ type: "tab_closed", channel_id: channelId, tab_id: tabId, surface });
+        if (surface === "player") delete current.pendingRaidOwnershipVerification;
+        sendNative({
+          type: "tab_closed",
+          channel_id: channelId,
+          tab_id: tabId,
+          surface,
+          ...(closeReason ? { close_reason: closeReason } : {}),
+        });
       }
       if (!current.playerTabId && !current.chatTabId) managedTabs.delete(channelId);
     }
@@ -627,14 +967,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "channel_status") {
     forwardChannelState(message, sender);
   }
+  if (message?.type === "managed_tab_identity_ready") {
+    const tabId = sender?.tab?.id;
+    if (!Number.isInteger(tabId)) return false;
+    Promise.resolve(restorePromise).then(
+      () => resolvePendingStartupIdentity(tabId, message.identity).then(sendResponse),
+      () => sendResponse(false),
+    );
+    return true;
+  }
 });
 
 chrome.tabs.onCreated.addListener(() => {
   scheduleExternalStreamReport();
 });
 
+chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
+  await restorePromise;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    return;
+  }
+  const route = TwitchTabUtils.channelRoute(tab.url || "");
+  if (route.surface !== "player") return;
+  for (const [channelId, record] of managedTabs) {
+    if (record.playerTabId !== tabId) continue;
+    const owner = managedTabOwners.get(tabId);
+    const routeLogins = [
+      record.login,
+      ...(Array.isArray(record.previousLogins) ? record.previousLogins : []),
+    ];
+    if (
+      owner !== channelId
+      && !routeLogins.some(
+        (login) => urlMatchesManagedSurface(tab.url, login, "player", record.layout),
+      )
+    ) continue;
+    record.playerWindowId = attachInfo.newWindowId;
+    managedTabs.set(channelId, record);
+    await saveManagedTabs();
+    break;
+  }
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
+  pendingStartupIdentityChecks.delete(tabId);
   if (closingManagedTabIds.has(tabId)) return;
+  void forgetManagedTabOwner(tabId);
   for (const [channelId, record] of managedTabs) {
     const removedSurfaces = managedSurfaceTabs(record)
       .filter(([, managedTabId]) => managedTabId === tabId)
@@ -657,7 +1038,33 @@ function urlMatchesManagedSurface(value, login, surface, layout) {
   return !route.website && route.surface === surface;
 }
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+function hasRaidReferrer(value) {
+  try {
+    return new URL(value).searchParams.getAll("referrer").includes("raid");
+  } catch {
+    return false;
+  }
+}
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+
+  await restorePromise;
+  if (changeInfo.status === "complete" && pendingStartupIdentityChecks.has(tabId)) {
+    const identity = await readManagedTabIdentity(tabId);
+    if (identity !== undefined) await resolvePendingStartupIdentity(tabId, identity);
+  }
+  if (pendingStartupIdentityChecks.has(tabId)) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const url = changeInfo.url || tab?.url || "";
+    if (
+      !tab
+      || !hasRaidReferrer(url)
+      || TwitchTabUtils.channelRoute(url).surface !== "player"
+    ) {
+      await resolvePendingStartupIdentity(tabId, null);
+    }
+  }
+  if (pendingStartupIdentityChecks.has(tabId)) return;
   if (nativePort && syncedNativePort === nativePort && changeInfo.status === "complete") {
     for (const record of managedTabs.values()) {
       if (managedSurfaceTabs(record).some(([, managedTabId]) => managedTabId === tabId)) {
@@ -673,6 +1080,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       .filter(([, managedTabId]) => managedTabId === tabId)
       .map(([surface]) => surface);
     if (updatedSurfaces.length === 0) continue;
+    if (
+      closeOnRaidRedirect
+      && updatedSurfaces.includes("player")
+      && hasRaidReferrer(changeInfo.url)
+      && managedTabOwners.get(tabId) === channelId
+      && TwitchTabUtils.channelRoute(changeInfo.url).surface === "player"
+    ) {
+      return closeChannels([channelId], "raid_redirect");
+    }
     for (const surface of updatedSurfaces) {
       const routeLogins = [
         record.login,

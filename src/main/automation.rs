@@ -71,6 +71,7 @@ impl Dashboard {
         let channels = &self.channels;
         let manual_open_channels = &self.manual_open_channels;
         let live_channel_ids = &self.live_channel_ids;
+        let raid_redirected_channels = &self.raid_redirected_channels;
         let streak_completed = &self.streak_completed;
         let external_channel_ids = &external_channel_ids;
         let candidates = || {
@@ -79,6 +80,7 @@ impl Dashboard {
                 .filter(|channel| {
                     !manual_open_channels.contains(&channel.id)
                         && !external_channel_ids.contains(&channel.id)
+                        && !raid_redirected_channels.contains(&channel.id)
                 })
                 .map(|channel| QueueCandidate {
                     channel_id: &channel.id,
@@ -211,6 +213,12 @@ impl Dashboard {
                     .as_ref()
                     .and_then(|pending| pending.channels.get(&channel_id))
                     .copied();
+                if matches!(state, Some(PendingStreamChannelState::Opening))
+                    && self.raid_redirected_channels.contains(&channel_id)
+                {
+                    abandoned_destination_ids.push(channel_id);
+                    continue;
+                }
                 match state {
                     Some(PendingStreamChannelState::Closing) => {
                         retry_close_ids.push(channel_id.clone());

@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const trustedExtensionId = fs.readFileSync(path.join(__dirname, "trusted-extension-id"), "utf8");
+const BROWSER_STARTUP_EVENT_GRACE_PERIOD_MS = 100;
 const test = require("node:test");
 const vm = require("node:vm");
 
@@ -25,11 +26,16 @@ async function createExtension({
   pauseFirstWindow = false,
   pauseFirstNavigation = false,
   storedManagedTabs = [],
+  storedCloseOnRaidRedirect = false,
+  storedRaidRedirectedChannelIds = [],
+  storedManagedTabOwners = [],
+  browserStartup = false,
   initialTabs = [],
-  extensionVersion = "0.3.9",
+  extensionVersion = "0.3.12",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
   connectNativeImpl = null,
+  failManagedIdentityWrites = false,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
 } = {}) {
@@ -49,6 +55,9 @@ async function createExtension({
   let nextTabId = 1;
   let nextWindowId = 18;
   let storedTabs = JSON.parse(JSON.stringify(storedManagedTabs));
+  let storedRaidSetting = storedCloseOnRaidRedirect;
+  let storedRaidRedirectedIds = JSON.parse(JSON.stringify(storedRaidRedirectedChannelIds));
+  let storedTabOwners = JSON.parse(JSON.stringify(storedManagedTabOwners));
   for (const initialTab of initialTabs) {
     const tab = {
       status: "complete",
@@ -90,6 +99,7 @@ async function createExtension({
   });
   let navigationCount = 0;
   const onUpdated = event();
+  const onAttached = event();
   const onCreated = event();
   const onRemoved = event();
   let runtimeLastError = null;
@@ -109,15 +119,32 @@ async function createExtension({
     storage: {
       local: {
         async get() {
-          return { managedTabs: storedTabs };
+          return {
+            managedTabs: storedTabs,
+            closeOnRaidRedirect: storedRaidSetting,
+            raidRedirectedChannelIds: storedRaidRedirectedIds,
+            managedTabOwners: storedTabOwners,
+          };
         },
         async set(value) {
-          storedTabs = JSON.parse(JSON.stringify(value.managedTabs));
+          if (Object.hasOwn(value, "managedTabs")) {
+            storedTabs = JSON.parse(JSON.stringify(value.managedTabs));
+          }
+          if (Object.hasOwn(value, "closeOnRaidRedirect")) {
+            storedRaidSetting = value.closeOnRaidRedirect;
+          }
+          if (Object.hasOwn(value, "raidRedirectedChannelIds")) {
+            storedRaidRedirectedIds = JSON.parse(JSON.stringify(value.raidRedirectedChannelIds));
+          }
+          if (Object.hasOwn(value, "managedTabOwners")) {
+            storedTabOwners = JSON.parse(JSON.stringify(value.managedTabOwners));
+          }
         },
       },
     },
     tabs: {
       onUpdated,
+      onAttached,
       onCreated,
       onRemoved,
       async query(query = {}) {
@@ -177,6 +204,22 @@ async function createExtension({
           status: tab?.status,
           discarded: tab?.discarded,
         });
+        if (message.type === "get_managed_tab_identity") {
+          if (!tab || tab.contentScriptReady === false) {
+            throw new Error("No content script is available");
+          }
+          return {
+            identity: typeof tab.managedTabIdentity === "string"
+              ? tab.managedTabIdentity
+              : null,
+          };
+        }
+        if (message.type === "set_managed_tab_identity") {
+          if (!tab) throw new Error("No such tab");
+          if (failManagedIdentityWrites) return { identity: null };
+          tab.managedTabIdentity = message.identity;
+          return { identity: tab.managedTabIdentity };
+        }
       },
     },
     windows: {
@@ -272,12 +315,23 @@ async function createExtension({
       },
     },
   };
+  let startupGraceTimerUsed = false;
   const context = vm.createContext({
     chrome,
-    setTimeout: setTimeoutImpl,
+    setTimeout: (callback, delay) => {
+      if (
+        !startupGraceTimerUsed
+        && delay === BROWSER_STARTUP_EVENT_GRACE_PERIOD_MS
+      ) {
+        startupGraceTimerUsed = true;
+        return setTimeout(callback, delay);
+      }
+      return setTimeoutImpl(callback, delay);
+    },
     clearTimeout: clearTimeoutImpl,
     URL,
     AbortController,
+    crypto,
     fetch(url, options) {
       calls.registrationRequests.push({
         url: String(url),
@@ -307,6 +361,7 @@ async function createExtension({
   };
   const source = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
   vm.runInContext(source, context, { filename: "background.js" });
+  if (browserStartup) chrome.runtime.onStartup.dispatch();
   await vm.runInContext("restorePromise", context);
   await vm.runInContext("initialNativeHostSync", context);
   return {
@@ -406,6 +461,42 @@ async function createExtension({
     snapshotManagedTabs() {
       return JSON.parse(JSON.stringify(storedTabs));
     },
+    snapshotRaidSetting() {
+      return storedRaidSetting;
+    },
+    snapshotManagedTabOwners() {
+      return JSON.parse(JSON.stringify(storedTabOwners));
+    },
+    snapshotRaidRedirectedChannelIds() {
+      return JSON.parse(JSON.stringify(storedRaidRedirectedIds));
+    },
+    async updateTabUrl(tabId, url) {
+      const tab = tabsById.get(tabId);
+      if (!tab) throw new Error("No such tab");
+      tab.url = url;
+      await Promise.all(onUpdated.dispatch(tabId, { url }, { ...tab }));
+    },
+    reportManagedTabIdentity(tabId, identity) {
+      const tab = tabsById.get(tabId);
+      if (tab) tab.managedTabIdentity = identity;
+      return new Promise((resolve) => {
+        const results = chrome.runtime.onMessage.dispatch(
+          { type: "managed_tab_identity_ready", identity },
+          { tab: tab ? { id: tabId } : undefined },
+          resolve,
+        );
+        if (!results.includes(true)) resolve(undefined);
+      });
+    },
+    attachTabToWindow(tabId, windowId) {
+      const tab = tabsById.get(tabId);
+      if (!tab) throw new Error("No such tab");
+      tab.windowId = windowId;
+      return Promise.all(onAttached.dispatch(tabId, {
+        newWindowId: windowId,
+        newPosition: 0,
+      }));
+    },
     reportState(tabId, message) {
       return vm.runInContext(
         `forwardChannelState(${JSON.stringify(message)}, { tab: { id: ${tabId} }, frameId: 0 })`,
@@ -430,6 +521,192 @@ async function createExtension({
   };
 }
 
+test("content script identity survives document reloads", () => {
+  const source = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
+  const values = new Map();
+  const messages = [];
+  const loadPage = () => {
+    const runtimeMessages = event();
+    const context = vm.createContext({
+      chrome: {
+        runtime: {
+          onMessage: runtimeMessages,
+          sendMessage(message) {
+            messages.push(JSON.parse(JSON.stringify(message)));
+            return Promise.resolve();
+          },
+        },
+      },
+      window: {
+        sessionStorage: {
+          getItem(key) {
+            return values.get(key) ?? null;
+          },
+          setItem(key, value) {
+            values.set(key, value);
+          },
+        },
+      },
+    });
+    vm.runInContext(source, context, { filename: "content.js" });
+    return runtimeMessages;
+  };
+
+  const firstPage = loadPage();
+  assert.deepEqual(messages.at(-1), {
+    type: "managed_tab_identity_ready",
+    identity: null,
+  });
+  let setResponse;
+  firstPage.dispatch(
+    { type: "set_managed_tab_identity", identity: "managed-tab-token" },
+    {},
+    (response) => { setResponse = response; },
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(setResponse)), { identity: "managed-tab-token" });
+
+  const restoredPage = loadPage();
+  assert.deepEqual(messages.at(-1), {
+    type: "managed_tab_identity_ready",
+    identity: "managed-tab-token",
+  });
+  let getResponse;
+  restoredPage.dispatch(
+    { type: "get_managed_tab_identity" },
+    {},
+    (response) => { getResponse = response; },
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(getResponse)), { identity: "managed-tab-token" });
+});
+test("content script removes an identity copied to an opener tab", () => {
+  const source = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
+  const key = "__twitch_streak_saver_managed_tab_identity__";
+  const values = new Map([[key, "copied-token"]]);
+  const messages = [];
+  const context = vm.createContext({
+    chrome: {
+      runtime: {
+        onMessage: event(),
+        sendMessage(message) {
+          messages.push(JSON.parse(JSON.stringify(message)));
+          return Promise.resolve();
+        },
+      },
+    },
+    window: {
+      opener: {},
+      sessionStorage: {
+        getItem(name) {
+          return values.get(name) ?? null;
+        },
+        removeItem(name) {
+          values.delete(name);
+        },
+      },
+    },
+  });
+  vm.runInContext(source, context, { filename: "content.js" });
+
+  assert.equal(values.has(key), false);
+  assert.deepEqual(messages.at(-1), {
+    type: "managed_tab_identity_ready",
+    identity: null,
+  });
+});
+test("browser startup does not trust an opener-copied tab identity", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-opener", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 53,
+        chatTabId: 53,
+        playerWindowId: 17,
+        identityToken: "copied-tab-session",
+        identityPersisted: true,
+      }],
+    ],
+    storedManagedTabOwners: [[53, "channel-opener"]],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 53,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      openerTabId: 54,
+      managedTabIdentity: "copied-tab-session",
+    }],
+  });
+
+  assert.equal(extension.tabsById.has(53), true);
+  assert.equal(extension.snapshotManagedTabs()[0][1].pendingRaidOwnershipVerification, true);
+  await extension.send({
+    type: "sync_channels",
+    close_on_raid_redirect: true,
+    channels: [{ id: "channel-opener", login: "streamer" }],
+  });
+  await extension.reportManagedTabIdentity(53, "copied-tab-session");
+
+  assert.equal(extension.tabsById.has(53), true);
+  assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), []);
+});
+test("session storage failure does not block a managed stream opening", async () => {
+  const extension = await createExtension({ failManagedIdentityWrites: true });
+  await extension.open({
+    type: "open_selected",
+    channels: [{ id: "channel-storage", login: "streamer" }],
+  });
+
+  const streamTab = [...extension.tabsById.values()].find(
+    (tab) => tab.url === "https://www.twitch.tv/streamer",
+  );
+  assert.ok(streamTab);
+  assert.equal(extension.snapshotManagedTabs()[0][1].identityPersisted, false);
+  assert.equal(extension.calls.nativeMessages.some(
+    (message) => message.type === "tab_opened" && message.channel_id === "channel-storage",
+  ), true);
+  assert.equal(extension.calls.nativeMessages.some(
+    (message) => message.type === "error" && message.channel_id === "channel-storage",
+  ), false);
+});
+test("unpersisted identity preserves startup raid quarantine", async () => {
+  const opened = await createExtension({ failManagedIdentityWrites: true });
+  const sync = {
+    type: "sync_channels",
+    close_on_raid_redirect: true,
+    channels: [{ id: "channel-storage", login: "streamer" }],
+  };
+  await opened.send(sync);
+  await opened.open({
+    type: "open_selected",
+    channels: [{ id: "channel-storage", login: "streamer" }],
+  });
+  const streamTab = [...opened.tabsById.values()].find(
+    (tab) => tab.url === "https://www.twitch.tv/streamer",
+  );
+  assert.ok(streamTab);
+
+  const restarted = await createExtension({
+    storedManagedTabs: opened.snapshotManagedTabs(),
+    storedManagedTabOwners: opened.snapshotManagedTabOwners(),
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: streamTab.id,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: streamTab.windowId,
+    }],
+  });
+  await restarted.send(sync);
+  await restarted.reportManagedTabIdentity(streamTab.id, null);
+
+  assert.equal(restarted.tabsById.has(streamTab.id), true);
+  assert.equal(restarted.snapshotManagedTabs()[0][1].pendingRaidOwnershipVerification, true);
+  assert.equal(
+    restarted.tabsById.get(streamTab.id).url,
+    "https://www.twitch.tv/another?referrer=raid",
+  );
+});
 test("manifest key derives the trusted Chrome extension ID", () => {
   const manifest = JSON.parse(
     fs.readFileSync(path.join(__dirname, "manifest.json"), "utf8"),
@@ -724,6 +1001,265 @@ test("legacy regular pages are moved into separate windows without moving user t
   assert.equal(extension.tabsById.size, 3);
   assert.deepEqual(extension.calls.windowUpdates, []);
 });
+test("enabled raid redirects close managed streams and survive worker restarts", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 21,
+        chatTabId: 21,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    initialTabs: [
+      { id: 21, url: "https://www.twitch.tv/streamer", active: true },
+      { id: 22, url: "https://www.twitch.tv/external" },
+    ],
+  });
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "channel-raid", login: "streamer" }],
+    close_on_raid_redirect: true,
+  });
+
+  await extension.updateTabUrl(22, "https://www.twitch.tv/external?referrer=raid");
+  await extension.updateTabUrl(21, "https://www.twitch.tv/streamer?referrer=not-raid");
+  assert.equal(extension.tabsById.has(21), true);
+  assert.equal(extension.tabsById.has(22), true);
+
+  const restarted = await createExtension({
+    storedManagedTabs: extension.snapshotManagedTabs(),
+    storedCloseOnRaidRedirect: extension.snapshotRaidSetting(),
+    storedManagedTabOwners: extension.snapshotManagedTabOwners(),
+    initialTabs: [
+      { id: 21, url: "https://www.twitch.tv/streamer?referrer=not-raid", active: true },
+      { id: 22, url: "https://www.twitch.tv/external?referrer=raid" },
+    ],
+  });
+  await restarted.updateTabUrl(
+    21,
+    "https://www.twitch.tv/streamer?source=raid&referrer=raid",
+  );
+
+  assert.equal(restarted.tabsById.has(21), false);
+  assert.equal(restarted.tabsById.has(22), true);
+  assert.ok(restarted.calls.nativeMessages.some(
+    (message) => message.type === "tab_closed"
+      && message.channel_id === "channel-raid"
+      && message.surface === "player"
+      && message.close_reason === "raid_redirect",
+  ));
+});
+
+test("worker restoration closes a managed tab already redirected by a raid", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 41,
+        chatTabId: 41,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    storedManagedTabOwners: [[41, "channel-raid"]],
+    initialTabs: [
+      { id: 41, url: "https://www.twitch.tv/another?source=raid&referrer=raid" },
+    ],
+  });
+
+  assert.equal(extension.tabsById.has(41), false);
+  assert.deepEqual(extension.snapshotRaidRedirectedChannelIds(), ["channel-raid"]);
+  await extension.reportExternalStreams();
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "external_streams"
+      && message.raid_redirected_channel_ids.includes("channel-raid"),
+  ));
+});
+
+test("managed redirect closes after a Twitch route change", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 71,
+        chatTabId: 71,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{ id: 71, url: "https://www.twitch.tv/streamer" }],
+  });
+
+  await extension.updateTabUrl(71, "https://www.twitch.tv/another?referrer=raid");
+
+  assert.equal(extension.tabsById.has(71), false);
+  assert.deepEqual(extension.snapshotRaidRedirectedChannelIds(), ["channel-raid"]);
+});
+
+test("extension reload closes a raid redirect in the recorded managed window", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 43,
+        chatTabId: 43,
+        playerWindowId: 17,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{ id: 43, url: "https://www.twitch.tv/another?referrer=raid" }],
+  });
+
+  assert.equal(extension.tabsById.has(43), false);
+  assert.deepEqual(extension.snapshotRaidRedirectedChannelIds(), ["channel-raid"]);
+});
+
+test("moved managed tabs retain verifiable ownership after extension reload", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 44,
+        chatTabId: 44,
+        playerWindowId: 17,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{ id: 44, url: "https://www.twitch.tv/streamer", windowId: 17 }],
+  });
+
+  await extension.attachTabToWindow(44, 18);
+  assert.equal(extension.snapshotManagedTabs()[0][1].playerWindowId, 18);
+
+  const restarted = await createExtension({
+    storedManagedTabs: extension.snapshotManagedTabs(),
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{ id: 44, url: "https://www.twitch.tv/another?referrer=raid", windowId: 18 }],
+  });
+
+  assert.equal(restarted.tabsById.has(44), false);
+});
+
+test("raid redirect markers survive native disconnects and extension restarts", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 51,
+        chatTabId: 51,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    initialTabs: [{ id: 51, url: "https://www.twitch.tv/streamer" }],
+  });
+  await extension.open({
+    type: "sync_channels",
+    channels: [{ id: "channel-raid", login: "streamer" }],
+    close_on_raid_redirect: true,
+  });
+  extension.disconnectHost();
+  await extension.updateTabUrl(51, "https://www.twitch.tv/streamer?referrer=raid");
+
+  assert.equal(extension.tabsById.has(51), false);
+  assert.deepEqual(extension.snapshotRaidRedirectedChannelIds(), ["channel-raid"]);
+  extension.reconnectHost();
+  await extension.reportExternalStreams();
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "external_streams"
+      && message.raid_redirected_channel_ids.includes("channel-raid"),
+  ));
+
+  const restarted = await createExtension({
+    storedManagedTabs: extension.snapshotManagedTabs(),
+    storedCloseOnRaidRedirect: extension.snapshotRaidSetting(),
+    storedRaidRedirectedChannelIds: extension.snapshotRaidRedirectedChannelIds(),
+  });
+  await restarted.reportExternalStreams();
+  assert.ok(restarted.calls.nativeMessages.some(
+    (message) => message.type === "external_streams"
+      && message.raid_redirected_channel_ids.includes("channel-raid"),
+  ));
+});
+
+test("failed raid tab removals retain suppression and identify the close failure", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 61,
+        chatTabId: 61,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{ id: 61, url: "https://www.twitch.tv/streamer" }],
+  });
+  extension.failRemoval(61);
+  await extension.updateTabUrl(61, "https://www.twitch.tv/streamer?referrer=raid");
+
+  assert.equal(extension.tabsById.has(61), true);
+  assert.deepEqual(extension.snapshotRaidRedirectedChannelIds(), ["channel-raid"]);
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "error"
+      && message.channel_id === "channel-raid"
+      && message.close_reason === "raid_redirect",
+  ));
+});
+
+test("offline confirmation clears persisted raid suppression", async () => {
+  const extension = await createExtension({
+    storedRaidRedirectedChannelIds: ["channel-raid"],
+  });
+  await extension.open({
+    type: "clear_raid_redirected_channels",
+    channel_ids: ["channel-raid"],
+  });
+  assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), []);
+
+  await extension.reportExternalStreams();
+  const inventory = extension.calls.nativeMessages.findLast(
+    (message) => message.type === "external_streams",
+  );
+  assert.deepEqual(Array.from(inventory.raid_redirected_channel_ids), []);
+});
+test("raid redirects leave managed stream tabs open when the setting is disabled", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-raid", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 31,
+        chatTabId: 31,
+        contentVersion: "0.3.12",
+      }],
+    ],
+    initialTabs: [
+      { id: 31, url: "https://www.twitch.tv/streamer", active: true },
+    ],
+  });
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "channel-raid", login: "streamer" }],
+    close_on_raid_redirect: false,
+  });
+
+  await extension.updateTabUrl(31, "https://www.twitch.tv/streamer?referrer=raid");
+
+  assert.equal(extension.tabsById.has(31), true);
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+  assert.equal(extension.snapshotRaidSetting(), false);
+});
+
 
 test("legacy split tabs migrate as one combined tab and preserve failed removals for retry", async () => {
   const extension = await createExtension({
@@ -872,6 +1408,7 @@ test("external inventory reports restored app-managed player channels separately
     channel_counts: {},
     unmatched_count: 1,
     managed_channel_ids: ["deselected-channel"],
+    raid_redirected_channel_ids: [],
   });
 });
 test("sync reloads managed pages when the extension version changes", async () => {
@@ -904,7 +1441,7 @@ test("sync reloads managed pages when the extension version changes", async () =
   assert.deepEqual(restarted.calls.windowUpdates, []);
 });
 
-test("restoration does not claim a reused tab ID with a different URL", async () => {
+test("restoration does not close a reused external tab ID on a raid URL", async () => {
   const extension = await createExtension({
     storedManagedTabs: [
       ["channel-reused", {
@@ -914,18 +1451,272 @@ test("restoration does not claim a reused tab ID with a different URL", async ()
         chatTabId: 41,
       }],
     ],
-    initialTabs: [{ id: 41, url: "https://example.com/" }],
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{ id: 41, url: "https://example.com/?referrer=raid" }],
   });
 
   await extension.send({
     type: "sync_channels",
     channels: [{ id: "channel-reused", login: "streamer" }],
+    close_on_raid_redirect: true,
   });
 
   assert.equal(extension.tabsById.size, 1);
-  assert.equal(extension.tabsById.get(41).url, "https://example.com/");
+  assert.equal(extension.tabsById.get(41).url, "https://example.com/?referrer=raid");
   assert.deepEqual(extension.calls.windowCreates, []);
   assert.deepEqual(extension.calls.windowUpdates, []);
+});
+test("restoration does not close a reused Twitch tab ID on a different raid route", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-reused", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 42,
+        chatTabId: 42,
+        playerWindowId: 17,
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{ id: 42, url: "https://www.twitch.tv/another?referrer=raid", windowId: 18 }],
+  });
+
+  assert.equal(extension.tabsById.has(42), true);
+  assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), []);
+});
+test("browser startup rejects a reused tab and window without its managed identity", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-reused", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 42,
+        chatTabId: 42,
+        playerWindowId: 17,
+        identityToken: "prior-tab-session",
+      }],
+    ],
+    storedManagedTabOwners: [[42, "channel-reused"]],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 42,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      managedTabIdentity: "different-tab-session",
+    }],
+  });
+
+  assert.equal(extension.tabsById.has(42), true);
+  assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), []);
+  assert.deepEqual(Array.from(extension.snapshotManagedTabOwners()), []);
+});
+test("browser startup closes a restored managed raid tab by its session identity", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-restored", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 52,
+        chatTabId: 52,
+        identityToken: "restored-tab-session",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 52,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      managedTabIdentity: "restored-tab-session",
+    }],
+  });
+
+  assert.equal(extension.tabsById.has(52), false);
+  assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), ["channel-restored"]);
+});
+test("legacy raid records quarantine unverified IDs across startup and worker restore", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-legacy", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 92,
+        chatTabId: 92,
+        playerWindowId: 17,
+      }],
+    ],
+    storedManagedTabOwners: [[92, "channel-legacy"]],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 92,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      contentScriptReady: false,
+    }],
+  });
+  const sync = {
+    type: "sync_channels",
+    close_on_raid_redirect: true,
+    channels: [{ id: "channel-legacy", login: "streamer" }],
+  };
+  assert.equal(extension.tabsById.has(92), true);
+  assert.equal(extension.snapshotManagedTabs()[0][1].pendingRaidOwnershipVerification, true);
+  await extension.send(sync);
+  assert.equal(
+    extension.tabsById.get(92).url,
+    "https://www.twitch.tv/another?referrer=raid",
+  );
+
+  const restarted = await createExtension({
+    storedManagedTabs: extension.snapshotManagedTabs(),
+    storedManagedTabOwners: extension.snapshotManagedTabOwners(),
+    storedCloseOnRaidRedirect: true,
+    initialTabs: [{
+      id: 92,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      contentScriptReady: false,
+    }],
+  });
+  await restarted.send(sync);
+  await restarted.reportManagedTabIdentity(92, null);
+
+  assert.equal(restarted.tabsById.has(92), true);
+  assert.equal(restarted.snapshotManagedTabs()[0][1].pendingRaidOwnershipVerification, true);
+  await restarted.updateTabUrl(92, "https://example.com/");
+  assert.equal(restarted.tabsById.has(92), true);
+  assert.deepEqual(restarted.snapshotManagedTabs(), []);
+});
+test("startup identity checks release tabs that leave Twitch", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-left", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 72,
+        chatTabId: 72,
+        identityToken: "left-tab-session",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 72,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      contentScriptReady: false,
+    }],
+  });
+
+  await extension.updateTabUrl(72, "https://example.com/");
+
+  assert.equal(extension.tabsById.get(72).url, "https://example.com/");
+  assert.deepEqual(extension.snapshotManagedTabs(), []);
+  assert.equal(extension.calls.nativeMessages.some((message) => message.type === "tab_closed"), false);
+  await extension.open({
+    type: "open_selected",
+    channels: [{ id: "channel-left", login: "streamer" }],
+  });
+  assert.equal(
+    [...extension.tabsById.values()].some((tab) => tab.url === "https://www.twitch.tv/streamer"),
+    true,
+  );
+});
+test("browser startup waits for a restored tab's identity before deciding ownership", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-delayed", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 62,
+        chatTabId: 62,
+        identityToken: "delayed-tab-session",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 62,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      contentScriptReady: false,
+    }],
+  });
+
+  await extension.send({
+    type: "sync_channels",
+    close_on_raid_redirect: true,
+    channels: [{ id: "channel-delayed", login: "streamer" }],
+  });
+  await extension.updateTabUrl(62, "https://www.twitch.tv/another?referrer=raid");
+  assert.equal(extension.snapshotManagedTabs()[0][1].playerTabId, 62);
+  assert.equal(extension.calls.nativeMessages.some((message) => message.type === "tab_closed"), false);
+  assert.equal(
+    extension.tabsById.get(62).url,
+    "https://www.twitch.tv/another?referrer=raid",
+  );
+  assert.equal(extension.tabsById.has(62), true);
+  assert.equal(extension.snapshotManagedTabs()[0][1].playerTabId, 62);
+  await extension.reportManagedTabIdentity(62, "delayed-tab-session");
+
+  assert.equal(extension.tabsById.has(62), false);
+  assert.deepEqual(Array.from(extension.snapshotRaidRedirectedChannelIds()), ["channel-delayed"]);
+});
+test("startup identity rejection refreshes external inventory", async () => {
+  const scheduled = [];
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-stale", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 82,
+        chatTabId: 82,
+        identityToken: "expected-tab-session",
+      }],
+    ],
+    storedCloseOnRaidRedirect: true,
+    browserStartup: true,
+    initialTabs: [{
+      id: 82,
+      url: "https://www.twitch.tv/another?referrer=raid",
+      windowId: 17,
+      contentScriptReady: false,
+    }],
+    setTimeoutImpl(callback, delay) {
+      const timer = { callback, delay, cancelled: false };
+      scheduled.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl(timer) {
+      if (timer) timer.cancelled = true;
+    },
+  });
+  await extension.send({
+    type: "sync_channels",
+    close_on_raid_redirect: true,
+    channels: [{ id: "channel-stale", login: "streamer" }],
+  });
+
+  async function flushInventory() {
+    const timer = scheduled.find((candidate) => !candidate.cancelled && candidate.delay === 100);
+    assert.ok(timer);
+    timer.cancelled = true;
+    timer.callback();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await flushInventory();
+  const priorReportCount = extension.calls.nativeMessages
+    .filter((message) => message.type === "external_streams").length;
+  assert.equal(priorReportCount, 1);
+  await extension.reportManagedTabIdentity(82, "different-tab-session");
+  await flushInventory();
+
+  const reports = extension.calls.nativeMessages
+    .filter((message) => message.type === "external_streams");
+  assert.equal(reports.length, priorReportCount + 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(reports.at(-1).managed_channel_ids)), []);
 });
 test("sync resumes a saved blank tab after an interrupted navigation", async () => {
   const extension = await createExtension({
