@@ -3,3 +3,5 @@
 /tmp/chrome-test-profile/
 /Twitch-Channel-Points-Miner-v2/
 /streamlink-twitch-gui/
+/.build/
+/dist
