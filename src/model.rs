@@ -9,6 +9,57 @@ impl ChannelSelection {
         self.streak || self.points
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PreferredQuality {
+    #[default]
+    #[serde(rename = "160p")]
+    P160,
+    #[serde(rename = "360p")]
+    P360,
+    #[serde(rename = "480p")]
+    P480,
+    #[serde(rename = "720p")]
+    P720,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "source")]
+    Source,
+    #[serde(rename = "auto")]
+    Auto,
+}
+
+impl PreferredQuality {
+    pub const ALL: [Self; 7] = [
+        Self::P160,
+        Self::P360,
+        Self::P480,
+        Self::P720,
+        Self::P1080,
+        Self::Source,
+        Self::Auto,
+    ];
+
+    pub const fn value(self) -> &'static str {
+        match self {
+            Self::P160 => "160p",
+            Self::P360 => "360p",
+            Self::P480 => "480p",
+            Self::P720 => "720p",
+            Self::P1080 => "1080p",
+            Self::Source => "source",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Source => "Source",
+            Self::Auto => "Twitch Auto",
+            _ => self.value(),
+        }
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FollowedChannel {
@@ -55,8 +106,10 @@ pub struct AppPreferences {
     pub auto_start_on_launch: bool,
     pub wake_browser_on_open: bool,
     pub close_on_raid_redirect: bool,
+    pub preferred_quality: PreferredQuality,
     pub channels: Vec<FollowedChannel>,
 }
+
 
 impl Default for AppPreferences {
     fn default() -> Self {
@@ -64,6 +117,7 @@ impl Default for AppPreferences {
             auto_start_on_launch: true,
             wake_browser_on_open: false,
             close_on_raid_redirect: false,
+            preferred_quality: PreferredQuality::default(),
             channels: vec![
                 FollowedChannel::new("sample-01", "Sample channel one"),
                 FollowedChannel::new("sample-02", "Sample channel two"),
@@ -73,9 +127,11 @@ impl Default for AppPreferences {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
-    use super::{AppPreferences, ChannelSelection};
+    use super::{AppPreferences, ChannelSelection, PreferredQuality};
+
 
     #[test]
     fn followed_channel_refresh_keeps_selections_for_matching_ids() {
@@ -113,6 +169,8 @@ mod tests {
         preferences.auto_start_on_launch = false;
         preferences.wake_browser_on_open = true;
         preferences.close_on_raid_redirect = true;
+        preferences.preferred_quality = PreferredQuality::P720;
+
 
         let encoded = ron::to_string(&preferences).unwrap();
         let decoded: AppPreferences = ron::from_str(&encoded).unwrap();
@@ -131,6 +189,7 @@ mod tests {
         assert!(preferences.wake_browser_on_open);
         assert!(!preferences.close_on_raid_redirect);
         assert!(preferences.channels.is_empty());
+        assert_eq!(preferences.preferred_quality, PreferredQuality::P160);
     }
 
     #[test]

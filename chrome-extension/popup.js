@@ -6,6 +6,7 @@ const STATUS_POLL_TIMEOUT_MS = 10000;
 let statusPollTimer = null;
 let wakeGeneration = 0;
 
+
 function showStatus(result) {
   if (result?.bridgeReady) {
     status.textContent = "Connected to Twitch Streak Saver.";

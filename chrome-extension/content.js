@@ -4,6 +4,24 @@
   let lastSentAt = 0;
   let monitoring = false;
   let timer = null;
+  const QUALITY_CHECK_INTERVAL_MS = 1000;
+  const QUALITY_MENU_SETTLE_MS = 250;
+  const QUALITY_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+  const QUALITY_STORAGE_KEY = "preferredQuality";
+  let preferredQuality = TwitchQuality.DEFAULT_QUALITY;
+  let qualityPreferenceReady = false;
+  let qualityPreferenceChangedWhileLoading = false;
+  let qualityPreferenceRevision = 0;
+  let qualityApplyInProgress = false;
+  let qualityWatcher = null;
+  let observedQualityRoute = location.href;
+  let observedQualityVideo = null;
+  let appliedQualityRoute = "";
+  let appliedQualityVideo = null;
+  let appliedQualityPreference = "";
+  let qualityRetryCount = 0;
+  let qualityRetryAfter = 0;
+
 
   function readManagedTabIdentity() {
     try {
@@ -20,14 +38,18 @@
     return globalThis.TwitchTabUtils.channelRoute(location.href);
   }
 
-  function playerState() {
-    const video = Array.from(document.querySelectorAll("video"))
+  function visiblePlayerVideo() {
+    return Array.from(document.querySelectorAll("video"))
       .filter((item) => item.getClientRects().length > 0)
       .sort((left, right) => {
         const leftRect = left.getBoundingClientRect();
         const rightRect = right.getBoundingClientRect();
         return rightRect.width * rightRect.height - leftRect.width * leftRect.height;
-      })[0];
+      })[0] || null;
+  }
+
+  function playerState() {
+    const video = visiblePlayerVideo();
     return !video
       ? "missing"
       : video.ended
@@ -39,6 +61,7 @@
             : "playing";
   }
 
+
   function chatState() {
     const ready = document.querySelector(
       '[data-a-target="chat-input"], [data-test-selector="chat-scrollable-area__message-container"], [data-a-target="chat-message-list"]',
@@ -49,6 +72,185 @@
     );
     return loading ? "loading" : "missing";
   }
+  function visibleElement(selector) {
+    return Array.from(document.querySelectorAll(selector))
+      .find((element) => element.getClientRects().length > 0) || null;
+  }
+
+  function qualityMenuIsOpen() {
+    return visibleElement('[role="menu"]') !== null;
+  }
+
+  function closeQualityMenu() {
+    const menu = visibleElement('[role="menu"]');
+    if (!menu) return;
+    const closeButton = Array.from(menu.querySelectorAll("button,[role=\"menuitem\"]"))
+      .find((element) => {
+        const label = (element.getAttribute("aria-label") || "").trim().toLowerCase();
+        const target = (element.getAttribute("data-a-target") || "").toLowerCase();
+        const text = (element.innerText || "").trim().toLowerCase();
+        return label === "close" || target.includes("close") || text === "close";
+      });
+    if (closeButton) {
+      closeButton.click();
+      return;
+    }
+    const eventOptions = {
+      key: "Escape",
+      code: "Escape",
+      keyCode: 27,
+      which: 27,
+      bubbles: true,
+    };
+    menu.dispatchEvent(new KeyboardEvent("keydown", eventOptions));
+    menu.dispatchEvent(new KeyboardEvent("keyup", eventOptions));
+  }
+
+  function qualityRequestIsCurrent(video, route, quality, revision) {
+    return qualityPreferenceReady
+      && preferredQuality === quality
+      && qualityPreferenceRevision === revision
+      && location.href === route
+      && visiblePlayerVideo() === video;
+  }
+
+  function resetQualityRetry() {
+    qualityRetryCount = 0;
+    qualityRetryAfter = 0;
+  }
+
+  function deferQualityRetry(video, route, quality, revision) {
+    if (!qualityRequestIsCurrent(video, route, quality, revision)) return;
+    if (qualityRetryCount >= QUALITY_RETRY_DELAYS_MS.length) {
+      qualityRetryCount += 1;
+      return;
+    }
+    qualityRetryAfter = Date.now() + QUALITY_RETRY_DELAYS_MS[qualityRetryCount];
+    qualityRetryCount += 1;
+  }
+
+
+
+  async function applyPreferredQuality(video, route, quality, revision) {
+    qualityApplyInProgress = true;
+    let openedSettings = false;
+    try {
+      if (qualityMenuIsOpen()) return;
+      const settingsButton = visibleElement('button[data-a-target="player-settings-button"]');
+      if (!settingsButton) {
+        deferQualityRetry(video, route, quality, revision);
+        return;
+      }
+      settingsButton.click();
+      openedSettings = true;
+      await new Promise((resolve) => window.setTimeout(resolve, QUALITY_MENU_SETTLE_MS));
+      if (!qualityRequestIsCurrent(video, route, quality, revision)) return;
+
+      const qualityButton = visibleElement('[data-a-target="player-settings-menu-item-quality"]');
+      if (!qualityButton) {
+        deferQualityRetry(video, route, quality, revision);
+        return;
+      }
+      qualityButton.click();
+      await new Promise((resolve) => window.setTimeout(resolve, QUALITY_MENU_SETTLE_MS));
+      if (!qualityRequestIsCurrent(video, route, quality, revision)) return;
+
+      const options = Array.from(document.querySelectorAll('[role="menuitemradio"]'))
+        .filter((item) => item.getClientRects().length > 0);
+      const option = TwitchQuality.findOption(options, quality);
+      if (!option) {
+        deferQualityRetry(video, route, quality, revision);
+        return;
+      }
+      option.click();
+      await new Promise((resolve) => window.setTimeout(resolve, QUALITY_MENU_SETTLE_MS));
+      if (!qualityRequestIsCurrent(video, route, quality, revision)) return;
+
+      appliedQualityVideo = video;
+      appliedQualityRoute = route;
+      appliedQualityPreference = quality;
+      resetQualityRetry();
+    } catch (error) {
+      if (String(error).toLowerCase().includes("extension context invalidated")) {
+        stopQualityAutomation();
+      } else {
+        if (openedSettings) deferQualityRetry(video, route, quality, revision);
+        console.debug("Could not apply the preferred Twitch quality.", error);
+      }
+    } finally {
+      if (openedSettings) closeQualityMenu();
+      qualityApplyInProgress = false;
+    }
+  }
+
+  function checkPreferredQuality() {
+    const route = location.href;
+    const video = visiblePlayerVideo();
+    if (route !== observedQualityRoute || video !== observedQualityVideo) {
+      observedQualityRoute = route;
+      observedQualityVideo = video;
+      qualityPreferenceRevision += 1;
+      appliedQualityRoute = "";
+      appliedQualityVideo = null;
+      appliedQualityPreference = "";
+      resetQualityRetry();
+    }
+    if (!qualityPreferenceReady || !video || qualityApplyInProgress) return;
+    if (
+      appliedQualityVideo === video
+      && appliedQualityRoute === route
+      && appliedQualityPreference === preferredQuality
+    ) return;
+    if (qualityMenuIsOpen()) {
+      resetQualityRetry();
+      return;
+    }
+    if (
+      qualityRetryCount > QUALITY_RETRY_DELAYS_MS.length
+      || Date.now() < qualityRetryAfter
+    ) return;
+    void applyPreferredQuality(video, route, preferredQuality, qualityPreferenceRevision);
+  }
+
+  function stopQualityAutomation() {
+    if (qualityWatcher !== null) window.clearInterval(qualityWatcher);
+    qualityWatcher = null;
+    qualityPreferenceRevision += 1;
+  }
+
+  async function loadPreferredQuality() {
+    try {
+      const stored = await chrome.storage.local.get({
+        [QUALITY_STORAGE_KEY]: TwitchQuality.DEFAULT_QUALITY,
+      });
+      if (!qualityPreferenceChangedWhileLoading) {
+        preferredQuality = TwitchQuality.normalizeQuality(stored[QUALITY_STORAGE_KEY]);
+      }
+    } catch {
+      if (!qualityPreferenceChangedWhileLoading) {
+        preferredQuality = TwitchQuality.DEFAULT_QUALITY;
+      }
+    }
+    if (qualityPreferenceChangedWhileLoading) return;
+    qualityPreferenceReady = true;
+    qualityPreferenceRevision += 1;
+    checkPreferredQuality();
+  }
+
+  function qualityPreferenceChanged(changes, areaName) {
+    const change = changes[QUALITY_STORAGE_KEY];
+    if (areaName !== "local" || !change) return;
+    qualityPreferenceChangedWhileLoading = true;
+    preferredQuality = TwitchQuality.normalizeQuality(change.newValue);
+    qualityPreferenceReady = true;
+    qualityPreferenceRevision += 1;
+    appliedQualityRoute = "";
+    appliedQualityVideo = null;
+    appliedQualityPreference = "";
+    resetQualityRetry();
+    checkPreferredQuality();
+  }
+
 
   function stopMonitoring() {
     monitoring = false;
@@ -78,6 +280,7 @@
     } catch (error) {
       if (!String(error).toLowerCase().includes("extension context invalidated")) throw error;
       stopMonitoring();
+      stopQualityAutomation();
     }
   }
 
@@ -110,4 +313,7 @@
       identity: readManagedTabIdentity(),
     }).catch(() => {});
   } catch {}
+  chrome.storage.onChanged.addListener(qualityPreferenceChanged);
+  qualityWatcher = window.setInterval(checkPreferredQuality, QUALITY_CHECK_INTERVAL_MS);
+  void loadPreferredQuality();
 })();

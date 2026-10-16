@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Twitch Streak Saver",
-  "version": "0.3.13",
+  "version": "0.3.15",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu8bf/Bp/4gYtEAkqmYAZrRTjoEXUE1f8axNhLT3sPoEL5m8eIlMzwPl6CDf9UyKPltMONlmxS0S5MLVHK4icRwaAakOajP5bLCHwYAxfivuGPrC4P+nPEByc0q/J+A/fZ7pAwe8qJfQjSUyfwLVFqa5X29dciibQXS7W5Iv7tpaNwDeEXiGqM8Zil5SqRRaqprnxWzUobwn1QdiB3A700Aj8bA52LXJcWq6fOXa+8ySOnNCxe0vvowKkxCmaXBbs+v03F+kCy/xfFn0nmPRu0gh66qE08Ajlh5ONkl3ruejSiUSYBm5tivqKSHFJpz0ORTWPeq1BiX6LLgfg1krbCQIDAQAB",
-  "description": "Open active Twitch channel pages in dedicated windows and report stream availability to Twitch Streak Saver.",
+  "description": "Open Twitch channels, apply the preferred video quality configured in Twitch Streak Saver, and report stream availability to the app.",
   "permissions": ["alarms", "nativeMessaging", "storage", "tabs"],
   "host_permissions": ["https://www.twitch.tv/*", "https://player.twitch.tv/*"],
   "action": {
@@ -16,7 +16,7 @@
   "content_scripts": [
     {
       "matches": ["https://www.twitch.tv/*", "https://player.twitch.tv/*"],
-      "js": ["twitch_tabs.js", "content.js"],
+      "js": ["twitch_tabs.js", "quality.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

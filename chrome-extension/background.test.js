@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const trustedExtensionId = fs.readFileSync(path.join(__dirname, "trusted-extension-id"), "utf8");
+const qualitySource = fs.readFileSync(path.join(__dirname, "quality.js"), "utf8");
 const BROWSER_STARTUP_EVENT_GRACE_PERIOD_MS = 100;
 const test = require("node:test");
 const vm = require("node:vm");
@@ -31,7 +32,7 @@ async function createExtension({
   storedManagedTabOwners = [],
   browserStartup = false,
   initialTabs = [],
-  extensionVersion = "0.3.13",
+  extensionVersion = "0.3.15",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
   connectNativeImpl = null,
@@ -58,6 +59,7 @@ async function createExtension({
   let storedRaidSetting = storedCloseOnRaidRedirect;
   let storedRaidRedirectedIds = JSON.parse(JSON.stringify(storedRaidRedirectedChannelIds));
   let storedTabOwners = JSON.parse(JSON.stringify(storedManagedTabOwners));
+  let storedPreferredQuality;
   for (const initialTab of initialTabs) {
     const tab = {
       status: "complete",
@@ -118,13 +120,19 @@ async function createExtension({
   const chrome = {
     storage: {
       local: {
-        async get() {
-          return {
+        async get(keys) {
+          const values = {
             managedTabs: storedTabs,
             closeOnRaidRedirect: storedRaidSetting,
             raidRedirectedChannelIds: storedRaidRedirectedIds,
             managedTabOwners: storedTabOwners,
           };
+          if (storedPreferredQuality !== undefined) {
+            values.preferredQuality = storedPreferredQuality;
+          } else if (keys && !Array.isArray(keys) && Object.hasOwn(keys, "preferredQuality")) {
+            values.preferredQuality = keys.preferredQuality;
+          }
+          return values;
         },
         async set(value) {
           if (Object.hasOwn(value, "managedTabs")) {
@@ -138,6 +146,9 @@ async function createExtension({
           }
           if (Object.hasOwn(value, "managedTabOwners")) {
             storedTabOwners = JSON.parse(JSON.stringify(value.managedTabOwners));
+          }
+          if (Object.hasOwn(value, "preferredQuality")) {
+            storedPreferredQuality = value.preferredQuality;
           }
         },
       },
@@ -353,6 +364,7 @@ async function createExtension({
       },
     },
   });
+  vm.runInContext(qualitySource, context, { filename: "quality.js" });
   context.importScripts = (...files) => {
     for (const file of files) {
       const source = fs.readFileSync(path.join(__dirname, file), "utf8");
@@ -368,6 +380,9 @@ async function createExtension({
     calls,
     tabsById,
     windowsById,
+    preferredQuality() {
+      return storedPreferredQuality;
+    },
     open(message) {
       return vm.runInContext(`handleNativeCommand(${JSON.stringify(message)})`, context);
     },
@@ -423,7 +438,9 @@ async function createExtension({
       };
       context.document = {
         querySelector(selector) {
-          return selector === "#status" ? status : wakeButton;
+          if (selector === "#status") return status;
+          if (selector === "#wake") return wakeButton;
+          return null;
         },
       };
       const popupSource = fs.readFileSync(path.join(__dirname, "popup.js"), "utf8");
@@ -536,7 +553,17 @@ test("content script identity survives document reloads", () => {
             return Promise.resolve();
           },
         },
+        storage: {
+          local: { get: () => Promise.resolve({}) },
+          onChanged: event(),
+        },
       },
+      document: {
+        querySelectorAll: () => [],
+        querySelector: () => null,
+      },
+      location: { href: "https://www.twitch.tv/streamer" },
+      TwitchTabUtils: { channelRoute: () => ({ login: "streamer", surface: "player" }) },
       window: {
         sessionStorage: {
           getItem(key) {
@@ -546,8 +573,12 @@ test("content script identity survives document reloads", () => {
             values.set(key, value);
           },
         },
+        setInterval: () => 1,
+        clearInterval() {},
+        setTimeout: () => 1,
       },
     });
+    vm.runInContext(qualitySource, context, { filename: "quality.js" });
     vm.runInContext(source, context, { filename: "content.js" });
     return runtimeMessages;
   };
@@ -592,6 +623,10 @@ test("content script removes an identity copied to an opener tab", () => {
           return Promise.resolve();
         },
       },
+      storage: {
+        local: { get: () => Promise.resolve({}) },
+        onChanged: event(),
+      },
     },
     window: {
       opener: {},
@@ -603,8 +638,18 @@ test("content script removes an identity copied to an opener tab", () => {
           values.delete(name);
         },
       },
+        setInterval: () => 1,
+        clearInterval() {},
+        setTimeout: () => 1,
     },
+    document: {
+      querySelectorAll: () => [],
+      querySelector: () => null,
+    },
+    location: { href: "https://www.twitch.tv/streamer" },
+    TwitchTabUtils: { channelRoute: () => ({ login: "streamer", surface: "player" }) },
   });
+  vm.runInContext(qualitySource, context, { filename: "quality.js" });
   vm.runInContext(source, context, { filename: "content.js" });
 
   assert.equal(values.has(key), false);
@@ -793,6 +838,16 @@ test("coalesces concurrent native-host pairing checks", async () => {
   assert.equal(extension.calls.registrationRequests.length, 0);
   assert.equal(extension.calls.nativeConnections, connectionCount + 1);
   assert.equal(extension.isNativeConnected(), true);
+});
+
+test("native host quality settings reach Twitch content preferences", async () => {
+  const extension = await createExtension();
+
+  await extension.open({ type: "set_preferred_quality", preferred_quality: "720p" });
+  assert.equal(extension.preferredQuality(), "720p");
+
+  await extension.open({ type: "set_preferred_quality", preferred_quality: "invalid" });
+  assert.equal(extension.preferredQuality(), "160p");
 });
 
 test("toolbar popup wakes, restarts a stalled host, and follows the app handshake", async () => {

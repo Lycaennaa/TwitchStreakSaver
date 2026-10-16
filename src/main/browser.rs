@@ -152,6 +152,7 @@ impl Dashboard {
             }
             KnownBrowserMessage::Ready => {
                 self.sync_extension_channels();
+                self.set_extension_preferred_quality();
             }
             KnownBrowserMessage::TabOpened {
                 channel_id,
@@ -423,6 +424,12 @@ impl Dashboard {
         self.send_bridge_command(BrowserCommand::SyncChannels {
             channels,
             close_on_raid_redirect: self.close_on_raid_redirect,
+        });
+    }
+
+    pub(super) fn set_extension_preferred_quality(&mut self) {
+        self.send_bridge_command(BrowserCommand::SetPreferredQuality {
+            preferred_quality: self.preferred_quality,
         });
     }
 

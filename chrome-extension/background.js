@@ -4,7 +4,7 @@ const NATIVE_HOST_SYNC_ALARM = "twitch-streak-saver-native-host-sync";
 const NATIVE_HOST_SYNC_INTERVAL_MINUTES = 0.5;
 const NATIVE_HOST_RETRY_DELAY_MS = 5000;
 const MANAGED_TAB_IDENTITY_POLICY_VERSION = 1;
-importScripts("twitch_tabs.js");
+importScripts("twitch_tabs.js", "quality.js");
 
 let nativePort = null;
 let syncedNativePort = null;
@@ -607,6 +607,15 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
     case "clear_raid_redirected_channels":
       await clearRaidRedirectedChannelIds(message.channel_ids || []);
       break;
+    case "set_preferred_quality": {
+      const preferredQuality = TwitchQuality.normalizeQuality(message.preferred_quality);
+      try {
+        await chrome.storage.local.set({ preferredQuality });
+      } catch (error) {
+        console.warn("Could not persist the preferred Twitch quality.", error);
+      }
+      break;
+    }
   }
 }
 

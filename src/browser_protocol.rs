@@ -1,4 +1,4 @@
-use crate::model::FollowedChannel;
+use crate::model::{FollowedChannel, PreferredQuality};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,6 +7,9 @@ use std::collections::HashMap;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserCommand {
     BridgeReady,
+    SetPreferredQuality {
+        preferred_quality: PreferredQuality,
+    },
     SyncChannels {
         channels: Vec<BrowserChannel>,
         close_on_raid_redirect: bool,
@@ -192,7 +195,7 @@ mod tests {
         BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, BrowserTabCloseReason,
         ChatState, KnownBrowserMessage, PlayerState,
     };
-    use crate::model::FollowedChannel;
+    use crate::model::{FollowedChannel, PreferredQuality};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -230,6 +233,21 @@ mod tests {
             }),
         );
     }
+    #[test]
+    fn preferred_quality_command_matches_extension_wire_contract() {
+        let command = BrowserCommand::SetPreferredQuality {
+            preferred_quality: PreferredQuality::P720,
+        };
+
+        assert_eq!(
+            serde_json::to_value(command).unwrap(),
+            json!({
+                "type": "set_preferred_quality",
+                "preferred_quality": "720p",
+            }),
+        );
+    }
+
 
     #[test]
     fn raid_redirect_clear_command_matches_extension_wire_contract() {

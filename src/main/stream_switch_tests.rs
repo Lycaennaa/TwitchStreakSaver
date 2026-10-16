@@ -1,6 +1,6 @@
 use super::{
     BrowserChannelState, BrowserSurface, BrowserTabCloseReason, Dashboard, FollowedChannel,
-    KnownBrowserMessage, QueuePlanner, TwitchConnectionStatus, TwitchUpdate,
+    KnownBrowserMessage, PreferredQuality, QueuePlanner, TwitchConnectionStatus, TwitchUpdate,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -18,6 +18,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         auto_start_on_launch: false,
         wake_browser_on_open: false,
         close_on_raid_redirect: false,
+        preferred_quality: PreferredQuality::default(),
         automation_enabled: true,
         channels: vec![
             FollowedChannel::new("old", "Old Streamer"),

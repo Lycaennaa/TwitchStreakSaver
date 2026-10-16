@@ -208,6 +208,8 @@ impl Dashboard {
         }
 
         ui.add_space(8.0);
+        self.quality_settings(ui);
+        ui.add_space(8.0);
         self.automation_settings(ui);
 
         let selected_streaks = self
@@ -233,6 +235,30 @@ impl Dashboard {
             ui.label(format!("{selected_streaks} Streak channels"));
             ui.label(format!("{selected_points} Points channels"));
         });
+    }
+    fn quality_settings(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.group(|ui| {
+            ui.strong("Stream quality");
+            ui.label("Automatically choose this quality on Twitch players.");
+            egui::ComboBox::from_id_salt("preferred_stream_quality")
+                .selected_text(self.preferred_quality.label())
+                .show_ui(ui, |ui| {
+                    for quality in PreferredQuality::ALL {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.preferred_quality,
+                                quality,
+                                quality.label(),
+                            )
+                            .changed();
+                    }
+                });
+            ui.label("Unavailable choices use the lowest available video quality.");
+        });
+        if changed && self.browser_connected {
+            self.set_extension_preferred_quality();
+        }
     }
 }
 impl Dashboard {
