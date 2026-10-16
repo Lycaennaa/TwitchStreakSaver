@@ -420,7 +420,7 @@ impl Dashboard {
         let (twitch_sender, twitch_updates) = mpsc::channel();
         let (browser_port_check_sender, browser_port_check_receiver) = mpsc::channel();
 
-        Self {
+        let mut dashboard = Self {
             #[cfg(target_os = "windows")]
             start_with_windows,
             #[cfg(target_os = "windows")]
@@ -467,7 +467,9 @@ impl Dashboard {
             removed_auto_streamer_names: HashMap::new(),
             auto_open_retry_after: HashMap::new(),
             pending_stream_switch: None,
-        }
+        };
+        dashboard.start_twitch_connection();
+        dashboard
     }
 
     fn preferences(&self) -> AppPreferences {
