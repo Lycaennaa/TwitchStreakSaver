@@ -820,6 +820,7 @@ async function loadManagedTab(tabId, url, wakeBrowser, forceReload) {
 
 async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
   let tabId = record.playerTabId;
+  let isNewTab = tabId === null || tabId === undefined;
   record.identityToken = record.identityToken || crypto.randomUUID();
   if (tabId !== null && tabId !== undefined) {
     try {
@@ -828,6 +829,7 @@ async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
       record.playerTabId = null;
       record.chatTabId = null;
       tabId = null;
+      isNewTab = true;
     }
   }
   if (tabId === null || tabId === undefined) {
@@ -837,12 +839,14 @@ async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
     record.chatTabId = tabId;
     record.pendingUrl = url;
     managedTabs.set(channelId, record);
-    await saveManagedTabs();
   } else {
     await ensureDedicatedTabWindow(tabId);
   }
+  const tabChanges = { autoDiscardable: false };
+  if (isNewTab) tabChanges.muted = true;
+  await chrome.tabs.update(tabId, tabChanges);
+  if (isNewTab) await saveManagedTabs();
   await rememberManagedTabOwner(tabId, channelId);
-  await chrome.tabs.update(tabId, { autoDiscardable: false, muted: true });
   const tab = await chrome.tabs.get(tabId);
   record.playerWindowId = tab.windowId;
   managedTabs.set(channelId, record);

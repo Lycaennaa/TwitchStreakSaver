@@ -60,6 +60,7 @@ async function createExtension({
   let storedRaidRedirectedIds = JSON.parse(JSON.stringify(storedRaidRedirectedChannelIds));
   let storedTabOwners = JSON.parse(JSON.stringify(storedManagedTabOwners));
   let storedPreferredQuality;
+  let managedTabSaveFailures = 0;
   for (const initialTab of initialTabs) {
     const tab = {
       status: "complete",
@@ -136,6 +137,10 @@ async function createExtension({
         },
         async set(value) {
           if (Object.hasOwn(value, "managedTabs")) {
+            if (managedTabSaveFailures > 0) {
+              managedTabSaveFailures -= 1;
+              throw new Error("Managed tab storage failed");
+            }
             storedTabs = JSON.parse(JSON.stringify(value.managedTabs));
           }
           if (Object.hasOwn(value, "closeOnRaidRedirect")) {
@@ -529,6 +534,9 @@ async function createExtension({
     releaseFirstWindow,
     waitForFirstNavigation: () => firstNavigationStarted,
     releaseFirstNavigation,
+    failNextManagedTabSave() {
+      managedTabSaveFailures += 1;
+    },
     failRemoval(tabId) {
       failedRemovals.add(tabId);
     },
@@ -753,6 +761,23 @@ test("session storage failure does not block a managed stream opening", async ()
     (message) => message.type === "error" && message.channel_id === "channel-storage",
   ), false);
 });
+test("new managed tabs stay muted when their first persistence attempt fails", async () => {
+  const extension = await createExtension();
+  extension.failNextManagedTabSave();
+  const command = {
+    type: "open_selected",
+    channels: [{ id: "channel-storage-retry", login: "streamer" }],
+  };
+  await extension.open(command);
+  const [tab] = [...extension.tabsById.values()];
+  assert.ok(tab);
+  assert.equal(tab.muted, true);
+
+  await extension.open(command);
+
+  assert.equal(tab.url, "https://www.twitch.tv/streamer");
+  assert.equal(tab.muted, true);
+});
 test("unpersisted identity preserves startup raid quarantine", async () => {
   const opened = await createExtension({ failManagedIdentityWrites: true });
   const sync = {
@@ -921,6 +946,22 @@ test("opens each channel in its own active, unfocused combined Twitch window", a
       .map((message) => message.surface),
     ["player", "chat", "player", "chat"],
   );
+});
+test("keeps a user's unmuted state when reopening a managed channel", async () => {
+  const extension = await createExtension();
+  const command = {
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "channel-unmuted", login: "streamer" }],
+  };
+  await extension.open(command);
+  const tab = [...extension.tabsById.values()][0];
+  assert.equal(tab.muted, true);
+
+  tab.muted = false;
+  await extension.open(command);
+
+  assert.equal(tab.muted, false);
 });
 test("opens subsequent stream windows while an earlier Twitch page is still loading", async () => {
   const extension = await createExtension({ pauseFirstNavigation: true });
