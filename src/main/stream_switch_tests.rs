@@ -60,6 +60,8 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         streak_completed: HashMap::new(),
         notified_streak_channels: HashSet::new(),
         activity_log: VecDeque::new(),
+        activity_log_kind_filter: None,
+        activity_log_search: String::new(),
         channel_points_balances: HashMap::new(),
         available_claim_channels: HashSet::new(),
         queue_planner: QueuePlanner::default(),

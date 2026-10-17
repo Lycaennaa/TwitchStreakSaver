@@ -8,6 +8,8 @@ The app signs in through Twitch’s browser OAuth flow, stores the token in the 
 
 The followed-channel list is sorted alphabetically by display name, ignoring letter case.
 
+The activity log can be filtered by event type and searched with case-insensitive fuzzy matching across event text, streamer names, and timestamps.
+
 Each button selects its option for every followed channel, regardless of the current search. Once all channels have an option selected, the button changes to **Unselect all** and clears that selection.
 
 ## Chromium browser extension setup

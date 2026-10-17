@@ -1,4 +1,3 @@
-use chrono::Local;
 use eframe::egui;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +19,11 @@ use twitch_streak_saver::scheduler::{
 };
 use twitch_streak_saver::twitch as twitch_api;
 use twitch_streak_saver::twitch::TwitchUpdate;
+#[path = "main/activity_log.rs"]
+mod activity_log;
+use activity_log::{
+    record_activity, record_claim_available_once, ActivityLogEntry, ActivityLogKind,
+};
 #[path = "main/automation.rs"]
 mod automation;
 #[path = "main/browser.rs"]
@@ -164,13 +168,6 @@ fn restore_managed_channel_ownership(
     manual_open_channels.extend(reported_channels.difference(auto_open_channels).cloned());
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ActivityLogEntry {
-    time: String,
-    streamer: String,
-    event: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingStreamChannelState {
     Closing,
@@ -238,41 +235,6 @@ impl PendingStreamSwitch {
     }
 }
 
-const MAX_ACTIVITY_LOG_ENTRIES: usize = 200;
-
-fn push_activity_log(log: &mut VecDeque<ActivityLogEntry>, entry: ActivityLogEntry) {
-    if log.len() >= MAX_ACTIVITY_LOG_ENTRIES {
-        log.pop_back();
-    }
-    log.push_front(entry);
-}
-
-fn record_activity(log: &mut VecDeque<ActivityLogEntry>, streamer: String, event: String) {
-    push_activity_log(
-        log,
-        ActivityLogEntry {
-            time: Local::now().format("%H:%M:%S").to_string(),
-            streamer,
-            event,
-        },
-    );
-}
-
-fn record_claim_available_once(
-    available_claim_channels: &mut HashSet<String>,
-    log: &mut VecDeque<ActivityLogEntry>,
-    channel_id: String,
-    streamer: String,
-) {
-    if available_claim_channels.insert(channel_id) {
-        record_activity(
-            log,
-            streamer,
-            "Bonus available to claim manually on Twitch.".to_owned(),
-        );
-    }
-}
-
 fn followed_channel_search_indices(channels: &[FollowedChannel], query: &str) -> Vec<usize> {
     let query = query.trim();
     let mut indices: Vec<usize> = if query.is_empty() {
@@ -305,9 +267,14 @@ fn followed_channel_search_indices(channels: &[FollowedChannel], query: &str) ->
 }
 
 fn fuzzy_contains(candidate: &str, query: &str) -> bool {
-    let query = query.to_lowercase();
-    let mut query_chars = query.chars().peekable();
-    for candidate_char in candidate.to_lowercase().chars() {
+    let mut query_chars = query
+        .chars()
+        .flat_map(|character| character.to_lowercase())
+        .peekable();
+    for candidate_char in candidate
+        .chars()
+        .flat_map(|character| character.to_lowercase())
+    {
         if query_chars.peek() == Some(&candidate_char) {
             query_chars.next();
         }
@@ -388,6 +355,8 @@ struct Dashboard {
     streak_completed: HashMap<String, u64>,
     notified_streak_channels: HashSet<String>,
     activity_log: VecDeque<ActivityLogEntry>,
+    activity_log_kind_filter: Option<ActivityLogKind>,
+    activity_log_search: String,
     channel_points_balances: HashMap<String, u64>,
     available_claim_channels: HashSet<String>,
     queue_planner: QueuePlanner,
@@ -458,6 +427,8 @@ impl Dashboard {
             streak_completed: HashMap::new(),
             notified_streak_channels: HashSet::new(),
             activity_log: VecDeque::new(),
+            activity_log_kind_filter: None,
+            activity_log_search: String::new(),
             channel_points_balances: HashMap::new(),
             available_claim_channels: HashSet::new(),
             queue_planner: QueuePlanner::default(),

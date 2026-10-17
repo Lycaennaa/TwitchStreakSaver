@@ -1,11 +1,10 @@
 use super::{
     active_app_stream_count, active_external_stream_count, followed_channel_search_indices,
-    push_activity_log, record_claim_available_once, restore_managed_channel_ownership,
-    resume_due_auto_open_retries, schedule_auto_open_retry, stream_turn_session_for,
-    ActivityLogEntry, BrowserChannelState, ChatState, FollowedChannel, PlayerState, QueueCandidate,
-    QueuePlanner, AUTO_TAB_RETRY_DELAY, BROWSER_STATE_STALE_AFTER, MAX_ACTIVITY_LOG_ENTRIES,
+    restore_managed_channel_ownership, resume_due_auto_open_retries, schedule_auto_open_retry,
+    stream_turn_session_for, BrowserChannelState, ChatState, FollowedChannel, PlayerState,
+    QueueCandidate, QueuePlanner, AUTO_TAB_RETRY_DELAY, BROWSER_STATE_STALE_AFTER,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use twitch_streak_saver::model::ChannelSelection;
 
@@ -59,62 +58,6 @@ fn selected_channels_prioritize_streaks_and_respect_limit_without_duplicates() {
 
     assert_eq!(super::selected_channel_indices(&channels, 2), vec![1, 2]);
     assert_eq!(super::selected_channel_indices(&channels, 4), vec![1, 2, 0]);
-}
-#[test]
-fn activity_log_keeps_timestamp_streamer_and_latest_events() {
-    let mut log = VecDeque::new();
-    let entry = ActivityLogEntry {
-        time: "21:15:09".to_owned(),
-        streamer: "First streamer".to_owned(),
-        event: "Watch Streak completed; reward: 400 points.".to_owned(),
-    };
-    push_activity_log(&mut log, entry.clone());
-    assert_eq!(log.front(), Some(&entry));
-
-    for index in 1..=MAX_ACTIVITY_LOG_ENTRIES {
-        push_activity_log(
-            &mut log,
-            ActivityLogEntry {
-                time: format!("00:00:{:02}", index % 60),
-                streamer: format!("streamer-{index}"),
-                event: format!("event-{index}"),
-            },
-        );
-    }
-
-    assert_eq!(log.len(), MAX_ACTIVITY_LOG_ENTRIES);
-    assert_eq!(log.front().unwrap().event, "event-200");
-    assert_eq!(log.back().unwrap().event, "event-1");
-}
-
-#[test]
-fn claim_availability_is_logged_once_per_available_bonus() {
-    let mut available = HashSet::new();
-    let mut log = VecDeque::new();
-
-    for _ in 0..2 {
-        record_claim_available_once(
-            &mut available,
-            &mut log,
-            "channel-1".to_owned(),
-            "Streamer One".to_owned(),
-        );
-    }
-    assert_eq!(log.len(), 1);
-    assert_eq!(log.front().unwrap().streamer, "Streamer One");
-    assert_eq!(
-        log.front().unwrap().event,
-        "Bonus available to claim manually on Twitch."
-    );
-
-    record_claim_available_once(
-        &mut available,
-        &mut log,
-        "channel-2".to_owned(),
-        "Streamer Two".to_owned(),
-    );
-    assert_eq!(log.len(), 2);
-    assert_eq!(log.front().unwrap().streamer, "Streamer Two");
 }
 
 #[test]

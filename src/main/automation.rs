@@ -121,6 +121,7 @@ impl Dashboard {
                             {
                                 record_activity(
                                     &mut self.activity_log,
+                                    ActivityLogKind::PointsTurnCompleted,
                                     channel_name,
                                     "Points turn completed; queue advanced after 16 eligible minutes."
                                         .to_owned(),
@@ -170,6 +171,7 @@ impl Dashboard {
                             {
                                 record_activity(
                                     &mut self.activity_log,
+                                    ActivityLogKind::StreakTurnEnded,
                                     channel_name,
                                     "Streak turn ended after 16 eligible minutes without a WATCH_STREAK event."
                                         .to_owned(),

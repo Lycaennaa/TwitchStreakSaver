@@ -390,7 +390,12 @@ impl Dashboard {
                     self.auto_open_retry_after.remove(channel_id);
                 }
                 if successful {
-                    record_activity(&mut self.activity_log, streamer, event);
+                    record_activity(
+                        &mut self.activity_log,
+                        ActivityLogKind::StreamSwitch,
+                        streamer,
+                        event,
+                    );
                 }
             }
         }

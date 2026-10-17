@@ -5,3 +5,4 @@
 /streamlink-twitch-gui/
 /.build/
 /dist
+/tmp

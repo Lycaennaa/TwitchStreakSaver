@@ -160,6 +160,7 @@ impl Dashboard {
                         if self.notified_streak_channels.insert(channel_id) {
                             record_activity(
                                 &mut self.activity_log,
+                                ActivityLogKind::WatchStreak,
                                 channel_name,
                                 format!("Watch Streak completed; reward: {points_earned} points."),
                             );
@@ -190,6 +191,7 @@ impl Dashboard {
                     }
                     if balance_changed && reason_code != "WATCH_STREAK" {
                         record_activity(&mut self.activity_log,
+                            ActivityLogKind::PointsEarned,
                             channel_name,
                             format!(
                                 "Earned {points_earned} points ({reason_code}); new balance: {balance}."
@@ -213,6 +215,7 @@ impl Dashboard {
                     if self.channel_points_balances.insert(channel_id, balance) != Some(balance) {
                         record_activity(
                             &mut self.activity_log,
+                            ActivityLogKind::PointsSpent,
                             channel_name,
                             format!("Points spent; new balance: {balance}."),
                         );

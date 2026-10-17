@@ -248,7 +248,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn raid_redirect_clear_command_matches_extension_wire_contract() {
         let command = BrowserCommand::ClearRaidRedirectedChannels {

@@ -87,7 +87,12 @@ impl eframe::App for Dashboard {
                     }
                 });
             ui.add_space(8.0);
-            Self::activity_log_panel(ui, &self.activity_log);
+            Self::activity_log_panel(
+                ui,
+                &self.activity_log,
+                &mut self.activity_log_kind_filter,
+                &mut self.activity_log_search,
+            );
         });
     }
 }
@@ -101,14 +106,43 @@ fn dashboard_content_max_height(available_height: f32) -> f32 {
     (available_height - reserved_log_height).max(0.0)
 }
 
+fn activity_log_matches(
+    entry: &ActivityLogEntry,
+    event_filter: Option<ActivityLogKind>,
+    search: &str,
+) -> bool {
+    let query = search.trim();
+    event_filter.map_or(true, |kind| entry.kind == kind)
+        && (query.is_empty()
+            || fuzzy_contains(&entry.time, query)
+            || fuzzy_contains(&entry.streamer, query)
+            || fuzzy_contains(&entry.event, query)
+            || fuzzy_contains(entry.kind.label(), query))
+}
+
 impl Dashboard {
     fn activity_log_panel(
         ui: &mut egui::Ui,
         activity_log: &std::collections::VecDeque<ActivityLogEntry>,
+        event_filter: &mut Option<ActivityLogKind>,
+        search: &mut String,
     ) -> egui::Response {
         ui.group(|ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.heading("Activity log");
+                ui.add(
+                    egui::TextEdit::singleline(search)
+                        .hint_text("Search event, streamer, or time")
+                        .desired_width(190.0),
+                );
+                egui::ComboBox::from_id_salt("activity_log_event_filter")
+                    .selected_text((*event_filter).map_or("All events", ActivityLogKind::label))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(event_filter, None, "All events");
+                        for kind in ActivityLogKind::ALL {
+                            ui.selectable_value(event_filter, Some(kind), kind.label());
+                        }
+                    });
             });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -117,6 +151,7 @@ impl Dashboard {
                         ui.label("Point, Streak, and stream-switch events will appear here.");
                         return;
                     }
+                    let mut has_matching_entries = false;
                     egui::Grid::new("activity_log_entries")
                         .num_columns(3)
                         .striped(true)
@@ -125,13 +160,20 @@ impl Dashboard {
                             ui.strong("Streamer");
                             ui.strong("Event");
                             ui.end_row();
-                            for entry in activity_log {
+                            for entry in activity_log
+                                .iter()
+                                .filter(|entry| activity_log_matches(entry, *event_filter, search))
+                            {
+                                has_matching_entries = true;
                                 ui.label(egui::RichText::new(&entry.time).monospace());
                                 ui.label(&entry.streamer);
                                 ui.label(&entry.event);
                                 ui.end_row();
                             }
                         });
+                    if !has_matching_entries {
+                        ui.label("No activity log entries match these filters.");
+                    }
                 });
         })
         .response
@@ -316,11 +358,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn activity_log_filters_by_kind_and_fuzzy_text_across_fields() {
+        let entry = ActivityLogEntry {
+            time: "21:15:09".to_owned(),
+            streamer: "Streamer One".to_owned(),
+            event: "Watch Streak completed; reward: 400 points.".to_owned(),
+            kind: ActivityLogKind::WatchStreak,
+        };
+
+        assert!(activity_log_matches(
+            &entry,
+            Some(ActivityLogKind::WatchStreak),
+            "wstrk"
+        ));
+        assert!(activity_log_matches(&entry, None, "strmr"));
+        assert!(activity_log_matches(&entry, None, "211509"));
+        let points_entry = ActivityLogEntry {
+            time: "21:15:10".to_owned(),
+            streamer: "Streamer Two".to_owned(),
+            event: "Earned 400 points (CLAIM); new balance: 400.".to_owned(),
+            kind: ActivityLogKind::PointsEarned,
+        };
+        assert!(activity_log_matches(&points_entry, None, "points earned"));
+        assert!(!activity_log_matches(
+            &entry,
+            Some(ActivityLogKind::PointsSpent),
+            ""
+        ));
+        assert!(!activity_log_matches(
+            &entry,
+            Some(ActivityLogKind::WatchStreak),
+            "missing"
+        ));
+    }
+
+    #[test]
     fn empty_activity_log_fills_the_reserved_bottom_region() {
         for screen_size in [egui::vec2(1471.0, 274.0), egui::vec2(800.0, 600.0)] {
             let context = egui::Context::default();
             let mut panel_response = None;
             let mut minimum_panel_height = 0.0;
+            let mut event_filter = None;
+            let mut search = String::new();
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
                 ..Default::default()
@@ -340,6 +419,8 @@ mod tests {
                     panel_response = Some(Dashboard::activity_log_panel(
                         ui,
                         &std::collections::VecDeque::new(),
+                        &mut event_filter,
+                        &mut search,
                     ));
                 });
             });

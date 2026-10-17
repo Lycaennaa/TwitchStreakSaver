@@ -60,7 +60,6 @@ impl PreferredQuality {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FollowedChannel {
     pub id: String,
@@ -110,7 +109,6 @@ pub struct AppPreferences {
     pub channels: Vec<FollowedChannel>,
 }
 
-
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
@@ -127,11 +125,9 @@ impl Default for AppPreferences {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{AppPreferences, ChannelSelection, PreferredQuality};
-
 
     #[test]
     fn followed_channel_refresh_keeps_selections_for_matching_ids() {
@@ -170,7 +166,6 @@ mod tests {
         preferences.wake_browser_on_open = true;
         preferences.close_on_raid_redirect = true;
         preferences.preferred_quality = PreferredQuality::P720;
-
 
         let encoded = ron::to_string(&preferences).unwrap();
         let decoded: AppPreferences = ron::from_str(&encoded).unwrap();
