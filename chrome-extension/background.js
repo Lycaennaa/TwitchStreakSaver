@@ -579,10 +579,14 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
       const loginByChannelId = new Map(
         channels.map((channel) => [channel.id, channel.login.toLowerCase()]),
       );
+      const unmutedByChannelId = new Map(
+        channels.map((channel) => [channel.id, channel.unmuted === true]),
+      );
       await openChannels(
         Array.from(managedTabs.keys()).flatMap((channelId) => {
           const login = loginByChannelId.get(channelId);
-          return login ? [{ id: channelId, login }] : [];
+          const unmuted = unmutedByChannelId.get(channelId) === true;
+          return login ? [{ id: channelId, login, unmuted }] : [];
         }),
         false,
         sourcePort,
@@ -719,7 +723,14 @@ async function openChannel(channel, wakeBrowser, sourcePort) {
   managedTabs.set(channel.id, record);
   try {
     const url = `https://www.twitch.tv/${encodeURIComponent(login)}`;
-    await openManagedTab(channel.id, record, url, wakeBrowser, sourcePort);
+    await openManagedTab(
+      channel.id,
+      record,
+      url,
+      wakeBrowser,
+      channel.unmuted === true,
+      sourcePort,
+    );
     delete record.previousLogins;
     record.chatTabId = record.playerTabId;
     managedTabs.set(channel.id, record);
@@ -818,7 +829,7 @@ async function loadManagedTab(tabId, url, wakeBrowser, forceReload) {
   }
 }
 
-async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
+async function openManagedTab(channelId, record, url, wakeBrowser, unmuted, sourcePort) {
   let tabId = record.playerTabId;
   let isNewTab = tabId === null || tabId === undefined;
   record.identityToken = record.identityToken || crypto.randomUUID();
@@ -843,7 +854,7 @@ async function openManagedTab(channelId, record, url, wakeBrowser, sourcePort) {
     await ensureDedicatedTabWindow(tabId);
   }
   const tabChanges = { autoDiscardable: false };
-  if (isNewTab) tabChanges.muted = true;
+  if (isNewTab) tabChanges.muted = !unmuted;
   await chrome.tabs.update(tabId, tabChanges);
   if (isNewTab) await saveManagedTabs();
   await rememberManagedTabOwner(tabId, channelId);

@@ -60,7 +60,9 @@ impl Dashboard {
                         "Points & Streak events disconnected"
                     });
                 });
-                ui.label("Separate player tabs are muted by default.");
+                ui.label(
+                    "Separate player tabs are muted by default; select Unmuted to start with audio.",
+                );
 
                 if let Some(error) = &browser_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
@@ -177,8 +179,7 @@ impl Dashboard {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.checkbox(&mut channel.selection.points, "Points");
-                                            ui.checkbox(&mut channel.selection.streak, "Streak");
+                                            channel_selection_controls(ui, channel);
                                         },
                                     );
                                 });
@@ -192,6 +193,15 @@ impl Dashboard {
             self.open_selected_twitch_channels();
         }
     }
+}
+
+fn channel_selection_controls(ui: &mut egui::Ui, channel: &mut FollowedChannel) -> egui::Response {
+    let unmuted = ui
+        .checkbox(&mut channel.unmuted, "Unmuted")
+        .on_hover_text("Start this player's tab with audio enabled.");
+    ui.checkbox(&mut channel.selection.points, "Points");
+    ui.checkbox(&mut channel.selection.streak, "Streak");
+    unmuted
 }
 
 fn selection_bulk_controls(
@@ -294,6 +304,67 @@ mod tests {
                 ],
             );
         }
+    }
+
+    fn show_channel_selection_controls(
+        context: &egui::Context,
+        channel: &mut FollowedChannel,
+        events: Vec<egui::Event>,
+    ) -> egui::Rect {
+        let mut unmuted_rect = None;
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    unmuted_rect = Some(channel_selection_controls(ui, channel).rect);
+                });
+            },
+        );
+        unmuted_rect.expect("channel selection controls were not rendered")
+    }
+
+    fn click_unmuted(context: &egui::Context, channel: &mut FollowedChannel) {
+        let position = show_channel_selection_controls(context, channel, Vec::new()).center();
+        for pressed in [true, false] {
+            let _ = show_channel_selection_controls(
+                context,
+                channel,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn unmuted_checkbox_only_changes_audio_preference() {
+        let mut channel = FollowedChannel::new("channel", "Channel");
+        let context = egui::Context::default();
+
+        click_unmuted(&context, &mut channel);
+
+        assert!(channel.unmuted);
+        assert!(!channel.selection.streak);
+        assert!(!channel.selection.points);
+
+        click_unmuted(&context, &mut channel);
+
+        assert!(!channel.unmuted);
+        assert!(!channel.selection.streak);
+        assert!(!channel.selection.points);
     }
 
     #[test]

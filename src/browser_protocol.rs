@@ -31,6 +31,7 @@ pub enum BrowserCommand {
 pub struct BrowserChannel {
     id: String,
     login: String,
+    unmuted: bool,
 }
 
 impl From<&FollowedChannel> for BrowserChannel {
@@ -38,6 +39,7 @@ impl From<&FollowedChannel> for BrowserChannel {
         Self {
             id: channel.id.clone(),
             login: channel.login.clone(),
+            unmuted: channel.unmuted,
         }
     }
 }
@@ -203,6 +205,7 @@ mod tests {
     fn open_command_matches_extension_wire_contract() {
         let mut channel = FollowedChannel::new("123", "Streamer");
         channel.login = "streamer".to_owned();
+        channel.unmuted = true;
         let command = BrowserCommand::OpenSelected {
             wake_browser: true,
             channels: vec![BrowserChannel::from(&channel)],
@@ -213,7 +216,7 @@ mod tests {
             json!({
                 "type": "open_selected",
                 "wake_browser": true,
-                "channels": [{"id": "123", "login": "streamer"}],
+                "channels": [{"id": "123", "login": "streamer", "unmuted": true}],
             }),
         );
     }

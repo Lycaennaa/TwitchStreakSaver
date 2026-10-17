@@ -9,6 +9,7 @@ impl ChannelSelection {
         self.streak || self.points
     }
 }
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PreferredQuality {
     #[default]
@@ -67,6 +68,8 @@ pub struct FollowedChannel {
     #[serde(default)]
     pub login: String,
     pub selection: ChannelSelection,
+    #[serde(default)]
+    pub unmuted: bool,
 }
 
 impl FollowedChannel {
@@ -76,6 +79,7 @@ impl FollowedChannel {
             display_name: display_name.into(),
             login: String::new(),
             selection: ChannelSelection::default(),
+            unmuted: false,
         }
     }
 }
@@ -84,15 +88,16 @@ pub fn merge_followed_channels(
     current: &[FollowedChannel],
     incoming: Vec<FollowedChannel>,
 ) -> Vec<FollowedChannel> {
-    let selections: std::collections::HashMap<_, _> = current
+    let preferences: std::collections::HashMap<_, _> = current
         .iter()
-        .map(|channel| (channel.id.as_str(), channel.selection))
+        .map(|channel| (channel.id.as_str(), (channel.selection, channel.unmuted)))
         .collect();
     incoming
         .into_iter()
         .map(|mut channel| {
-            if let Some(selection) = selections.get(channel.id.as_str()) {
+            if let Some((selection, unmuted)) = preferences.get(channel.id.as_str()) {
                 channel.selection = *selection;
+                channel.unmuted = *unmuted;
             }
             channel
         })
@@ -130,12 +135,13 @@ mod tests {
     use super::{AppPreferences, ChannelSelection, PreferredQuality};
 
     #[test]
-    fn followed_channel_refresh_keeps_selections_for_matching_ids() {
+    fn followed_channel_refresh_keeps_preferences_for_matching_ids() {
         let mut existing = super::FollowedChannel::new("channel-1", "Old name");
         existing.selection = ChannelSelection {
             streak: true,
             points: false,
         };
+        existing.unmuted = true;
         let removed = super::FollowedChannel::new("unfollowed", "No longer followed");
         let incoming = vec![
             super::FollowedChannel::new("channel-1", "Updated name"),
@@ -154,6 +160,8 @@ mod tests {
             }
         );
         assert_eq!(refreshed[1].selection, ChannelSelection::default());
+        assert!(refreshed[0].unmuted);
+        assert!(!refreshed[1].unmuted);
     }
     #[test]
     fn preferences_round_trip_settings() {
@@ -162,6 +170,7 @@ mod tests {
             streak: true,
             points: true,
         };
+        preferences.channels[0].unmuted = true;
         preferences.auto_start_on_launch = false;
         preferences.wake_browser_on_open = true;
         preferences.close_on_raid_redirect = true;
@@ -185,6 +194,18 @@ mod tests {
         assert!(!preferences.close_on_raid_redirect);
         assert!(preferences.channels.is_empty());
         assert_eq!(preferences.preferred_quality, PreferredQuality::P160);
+    }
+
+    #[test]
+    fn legacy_followed_channel_defaults_to_muted() {
+        let channel: super::FollowedChannel = ron::from_str(
+            "(id: \"channel-1\", display_name: \"Streamer\", login: \"streamer\", selection: (streak: true, points: false))",
+        )
+        .unwrap();
+
+        assert!(channel.selection.streak);
+        assert!(!channel.selection.points);
+        assert!(!channel.unmuted);
     }
 
     #[test]

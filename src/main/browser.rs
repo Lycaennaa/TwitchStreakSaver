@@ -534,7 +534,7 @@ impl Dashboard {
             channels,
         });
         self.browser_notice = Some(
-            "Each selected channel opens as one combined Twitch page in its own active window. Windows stay unfocused unless browser focus is enabled. App-opened player audio starts muted; you can unmute it in the browser."
+            "Each selected channel opens as one combined Twitch page in its own active window. Windows stay unfocused unless browser focus is enabled. App-opened player tabs start muted by default; channels marked Unmuted start with audio enabled."
                 .to_owned(),
         );
     }

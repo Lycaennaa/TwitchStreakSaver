@@ -778,6 +778,19 @@ test("new managed tabs stay muted when their first persistence attempt fails", a
   assert.equal(tab.url, "https://www.twitch.tv/streamer");
   assert.equal(tab.muted, true);
 });
+test("new managed tabs honor the per-channel unmuted setting", async () => {
+  const extension = await createExtension();
+
+  await extension.open({
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "channel-unmuted-preference", login: "streamer", unmuted: true }],
+  });
+
+  const [tab] = [...extension.tabsById.values()];
+  assert.ok(tab);
+  assert.equal(tab.muted, false);
+});
 test("unpersisted identity preserves startup raid quarantine", async () => {
   const opened = await createExtension({ failManagedIdentityWrites: true });
   const sync = {
