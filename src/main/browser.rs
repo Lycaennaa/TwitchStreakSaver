@@ -160,6 +160,27 @@ impl Dashboard {
                 tab_id,
                 surface,
             } => {
+                let opening_streamer = if surface == BrowserSurface::Player
+                    && tab_id > 0
+                    && self
+                        .browser_states
+                        .get(&channel_id)
+                        .and_then(|state| state.player_tab_id)
+                        .is_none()
+                    && (self.manual_open_channels.contains(&channel_id)
+                        || self.auto_open_channels.contains(&channel_id)
+                        || self
+                            .pending_stream_switch
+                            .as_ref()
+                            .is_some_and(|pending| pending.is_awaiting_open(&channel_id)))
+                {
+                    self.channels
+                        .iter()
+                        .find(|channel| channel.id == channel_id)
+                        .map(|channel| channel.display_name.clone())
+                } else {
+                    None
+                };
                 let accepted = self.handle_browser_tab(
                     channel_id.clone(),
                     tab_id,
@@ -172,6 +193,14 @@ impl Dashboard {
                         .pending_stream_switch
                         .as_ref()
                         .is_some_and(|pending| pending.is_awaiting_open(&channel_id));
+                if let Some(streamer) = opening_streamer {
+                    record_activity(
+                        &mut self.activity_log,
+                        ActivityLogKind::StreamOpened,
+                        streamer.clone(),
+                        format!("Opening {streamer}."),
+                    );
+                }
                 if surface == BrowserSurface::Player && (accepted || pending_open) {
                     if let Some(pending) = &mut self.pending_stream_switch {
                         pending.confirm_opened(&channel_id);

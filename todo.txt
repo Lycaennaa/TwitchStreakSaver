@@ -1,0 +1,30 @@
+Selected feature plan
+=====================
+
+Scope
+-----
+Implement the selected items from the feature review: reconnect freshness (1), queue visibility (3), temporary pause/snooze (5), search-scoped bulk selection (6), optional management of existing Twitch tabs (8), per-channel quality (9), activity-log improvements (10), browser diagnostics (11), background/start-at-login conveniences (12), and the extension-popup controls proposed as item 14. No activity-log export.
+
+Implementation order and acceptance
+-----------------------------------
+1. [DONE] Activity log — persists up to 500 dated entries locally, records confirmed managed stream opens, and displays per-date event summaries. No export.
+2. Reconnect freshness — show last-confirmed Twitch and PubSub state, clearly flag periods when events may have been missed, and refresh a current baseline only through a supported Twitch interface. Never imply historical event recovery.
+3. Queue visibility — show upcoming managed channels and actionable reasons a selected channel cannot currently open, using the existing player/chat readiness and capacity state.
+4. Pause/snooze — add a temporary global pause and per-channel snooze with explicit expiry semantics; preserve the existing persistent automation and selection behavior.
+5. Search-scoped selection — add an explicit action to select/unselect only channels matching the current search, while retaining the existing all-channel action.
+6. Existing-tab management — allow an explicit opt-in to adopt eligible external Twitch player tabs; preserve clear ownership boundaries and never close tabs the app did not adopt.
+7. Per-channel quality — add an optional channel override with the current global quality as fallback; propagate changes to already-open managed players.
+8. Browser diagnostics — identify which browser/extension/native-host/bridge step is unavailable and provide actionable recovery guidance; distinguish app-side checks from extension-side status.
+9. Background/startup — add a menu-bar/tray option and macOS launch-at-login support, preserving the existing Windows startup control and making close/minimize behavior explicit.
+10. Extension popup — add a compact bridge status and managed-stream summary with quick pause and open-selected actions. Reuse the pause contract from item 4 and report when an action cannot be applied.
+
+Dependencies
+------------
+- Item 1 is independent and is the first implementation slice.
+- Items 4 and 10 share pause state and should use one contract.
+- Items 6 and 7 both touch browser commands/preferences; keep ownership and quality precedence explicit.
+- Item 8 diagnostics should cover both the desktop app and extension popup without duplicating setup flows.
+
+Verification
+------------
+For each implementation slice, update affected UI, browser-protocol behavior, tests, and README as applicable. Verify actual behavior, including failure and retry paths; do not claim missed PubSub events can be reconstructed.

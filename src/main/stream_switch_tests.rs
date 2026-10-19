@@ -107,14 +107,22 @@ fn automatic_stream_switch_logs_only_after_both_player_tabs_confirm() {
         tab_id: 2,
         surface: BrowserSurface::Player,
     });
-    assert!(dashboard.activity_log.is_empty());
+    assert_eq!(dashboard.activity_log.len(), 1);
+    assert_eq!(
+        dashboard.activity_log.front().unwrap().event,
+        "Opening New Streamer."
+    );
     dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
         channel_id: "old".to_owned(),
         tab_id: 99,
         surface: BrowserSurface::Player,
         close_reason: None,
     });
-    assert!(dashboard.activity_log.is_empty());
+    assert_eq!(dashboard.activity_log.len(), 1);
+    assert_eq!(
+        dashboard.activity_log.front().unwrap().event,
+        "Opening New Streamer."
+    );
     dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
         channel_id: "old".to_owned(),
         tab_id: 1,
@@ -298,7 +306,11 @@ fn source_close_retry_preserves_switch_context() {
         tab_id: 2,
         surface: BrowserSurface::Player,
     });
-    assert!(dashboard.activity_log.is_empty());
+    assert_eq!(dashboard.activity_log.len(), 1);
+    assert_eq!(
+        dashboard.activity_log.front().unwrap().event,
+        "Opening New Streamer."
+    );
 
     dashboard.handle_browser_message(KnownBrowserMessage::Error {
         channel_id: Some("old".to_owned()),
@@ -316,7 +328,11 @@ fn source_close_retry_preserves_switch_context() {
 
     assert!(dashboard.pending_stream_switch.is_some());
     assert!(dashboard.auto_open_channels.contains("old"));
-    assert!(dashboard.activity_log.is_empty());
+    assert_eq!(dashboard.activity_log.len(), 1);
+    assert_eq!(
+        dashboard.activity_log.front().unwrap().event,
+        "Opening New Streamer."
+    );
     dashboard.handle_browser_message(KnownBrowserMessage::TabClosed {
         channel_id: "old".to_owned(),
         tab_id: 1,
@@ -645,4 +661,44 @@ fn automatic_browser_launch_requires_a_live_selected_channel_and_profile() {
 
     dashboard.browser_launch_target = None;
     assert!(!dashboard.should_launch_browser_for_automatic_channels());
+}
+#[test]
+fn activity_log_records_app_managed_player_open_once() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.pending_stream_switch = None;
+    dashboard.auto_open_channels.clear();
+    dashboard.manual_open_channels = HashSet::from(["new".to_owned()]);
+    dashboard.browser_states.clear();
+
+    dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
+        channel_id: "new".to_owned(),
+        tab_id: 1,
+        surface: BrowserSurface::Chat,
+    });
+    assert!(dashboard.activity_log.is_empty());
+
+    dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
+        channel_id: "new".to_owned(),
+        tab_id: 2,
+        surface: BrowserSurface::Player,
+    });
+    let entry = dashboard.activity_log.front().unwrap();
+    assert_eq!(entry.streamer, "New Streamer");
+    assert_eq!(entry.event, "Opening New Streamer.");
+
+    dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
+        channel_id: "new".to_owned(),
+        tab_id: 3,
+        surface: BrowserSurface::Player,
+    });
+    assert_eq!(dashboard.activity_log.len(), 1);
+
+    dashboard.manual_open_channels.clear();
+    dashboard.browser_states.clear();
+    dashboard.handle_browser_message(KnownBrowserMessage::TabOpened {
+        channel_id: "old".to_owned(),
+        tab_id: 4,
+        surface: BrowserSurface::Player,
+    });
+    assert_eq!(dashboard.activity_log.len(), 1);
 }
