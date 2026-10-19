@@ -18,6 +18,48 @@ impl Dashboard {
         self.browser_notice = Some("Automation stopped and app-managed tabs closed.".to_owned());
     }
 
+    pub(super) fn should_launch_browser_for_automatic_channels(&self) -> bool {
+        self.automation_enabled
+            && !self.browser_connected
+            && self.browser_launch_target.is_some()
+            && matches!(
+                &self.connection_status,
+                TwitchConnectionStatus::Connected(_)
+            )
+            && self.channels.iter().any(|channel| {
+                self.live_channel_ids.contains(&channel.id)
+                    && channel.selection.is_selected()
+                    && !self.raid_redirected_channels.contains(&channel.id)
+                    && !self.manual_open_channels.contains(&channel.id)
+            })
+    }
+
+    fn maybe_launch_automatic_browser(&mut self) {
+        if !self.should_launch_browser_for_automatic_channels() {
+            self.browser_launch_attempted = None;
+            return;
+        }
+        let Some(target) = self.browser_launch_target.clone() else {
+            return;
+        };
+        if self.browser_launch_attempted.as_ref() == Some(&target) {
+            return;
+        }
+
+        self.browser_launch_attempted = Some(target.clone());
+        match browser_setup::launch_browser_profile(&target, &self.browser_profile_roots) {
+            Ok(()) => {
+                self.browser_error = None;
+                self.browser_notice = Some(format!(
+                    "Opening {} profile {} for automatic channels.",
+                    target.browser.name(),
+                    target.profile_directory
+                ));
+            }
+            Err(error) => self.browser_error = Some(error),
+        }
+    }
+
     pub(super) fn reconcile_automatic_tabs(&mut self, now: Duration) {
         self.removed_auto_streamer_names.retain(|channel_id, _| {
             self.auto_open_channels.contains(channel_id)
@@ -26,6 +68,22 @@ impl Dashboard {
                     .iter()
                     .any(|channel| channel.id == *channel_id)
         });
+        let Some((desired, due_auto_open_retries)) = self.prepare_automatic_tab_plan(now) else {
+            return;
+        };
+
+        if self.pending_stream_switch.is_some() {
+            self.retry_pending_stream_switch(desired, due_auto_open_retries);
+            return;
+        }
+        self.dispatch_automatic_tab_transition(desired);
+    }
+
+    fn prepare_automatic_tab_plan(
+        &mut self,
+        now: Duration,
+    ) -> Option<(HashSet<String>, Vec<String>)> {
+        self.maybe_launch_automatic_browser();
         if !self.automation_enabled
             || !self.browser_connected
             || !self.external_inventory_received
@@ -36,7 +94,7 @@ impl Dashboard {
         {
             self.points_rotation.pause_active_sessions(now);
             self.streak_rotation.pause_active_sessions(now);
-            return;
+            return None;
         }
         let defer_due_retries = self.pending_stream_switch.is_some();
         let due_auto_open_retries = resume_due_auto_open_retries(
@@ -203,77 +261,85 @@ impl Dashboard {
         } else {
             HashSet::new()
         };
+        Some((desired, due_auto_open_retries))
+    }
 
-        if self.pending_stream_switch.is_some() {
-            let mut retry_close_ids = Vec::new();
-            let mut retry_open_channels = Vec::new();
-            let mut retry_channel_ids = Vec::new();
-            let mut abandoned_destination_ids = Vec::new();
-            for channel_id in due_auto_open_retries {
-                let state = self
-                    .pending_stream_switch
-                    .as_ref()
-                    .and_then(|pending| pending.channels.get(&channel_id))
-                    .copied();
-                if matches!(state, Some(PendingStreamChannelState::Opening))
-                    && self.raid_redirected_channels.contains(&channel_id)
-                {
-                    abandoned_destination_ids.push(channel_id);
-                    continue;
+    fn retry_pending_stream_switch(
+        &mut self,
+        desired: HashSet<String>,
+        due_auto_open_retries: Vec<String>,
+    ) {
+        let mut retry_close_ids = Vec::new();
+        let mut retry_open_channels = Vec::new();
+        let mut retry_channel_ids = Vec::new();
+        let mut abandoned_destination_ids = Vec::new();
+        for channel_id in due_auto_open_retries {
+            let state = self
+                .pending_stream_switch
+                .as_ref()
+                .and_then(|pending| pending.channels.get(&channel_id))
+                .copied();
+            if matches!(state, Some(PendingStreamChannelState::Opening))
+                && self.raid_redirected_channels.contains(&channel_id)
+            {
+                abandoned_destination_ids.push(channel_id);
+                continue;
+            }
+            match state {
+                Some(PendingStreamChannelState::Closing) => {
+                    retry_close_ids.push(channel_id.clone());
+                    retry_channel_ids.push(channel_id);
                 }
-                match state {
-                    Some(PendingStreamChannelState::Closing) => {
-                        retry_close_ids.push(channel_id.clone());
+                Some(PendingStreamChannelState::Opening) => {
+                    if let Some(channel) = self
+                        .channels
+                        .iter()
+                        .find(|channel| channel.id == channel_id)
+                    {
+                        retry_open_channels.push(BrowserChannel::from(channel));
                         retry_channel_ids.push(channel_id);
+                    } else {
+                        abandoned_destination_ids.push(channel_id);
                     }
-                    Some(PendingStreamChannelState::Opening) => {
-                        if let Some(channel) = self
-                            .channels
-                            .iter()
-                            .find(|channel| channel.id == channel_id)
-                        {
-                            retry_open_channels.push(BrowserChannel::from(channel));
-                            retry_channel_ids.push(channel_id);
-                        } else {
-                            abandoned_destination_ids.push(channel_id);
-                        }
-                    }
-                    _ => {}
                 }
+                _ => {}
             }
-            if !abandoned_destination_ids.is_empty() {
-                if let Some(pending) = &mut self.pending_stream_switch {
-                    for channel_id in &abandoned_destination_ids {
-                        pending.abandon_open(channel_id);
-                    }
-                    pending
-                        .desired_channels
-                        .retain(|channel_id| desired.contains(channel_id));
-                }
+        }
+        if !abandoned_destination_ids.is_empty() {
+            if let Some(pending) = &mut self.pending_stream_switch {
                 for channel_id in &abandoned_destination_ids {
-                    self.auto_open_channels.remove(channel_id);
-                    self.auto_open_retry_after.remove(channel_id);
+                    pending.abandon_open(channel_id);
                 }
-                self.finish_pending_stream_switch();
+                pending
+                    .desired_channels
+                    .retain(|channel_id| desired.contains(channel_id));
             }
-            for channel_id in &retry_channel_ids {
+            for channel_id in &abandoned_destination_ids {
                 self.auto_open_channels.remove(channel_id);
                 self.auto_open_retry_after.remove(channel_id);
             }
-            if !retry_close_ids.is_empty() {
-                self.send_bridge_command(BrowserCommand::CloseChannels {
-                    channel_ids: retry_close_ids,
-                });
-            }
-            if !retry_open_channels.is_empty() {
-                self.send_bridge_command(BrowserCommand::OpenSelected {
-                    wake_browser: self.wake_browser_on_open,
-                    channels: retry_open_channels,
-                });
-            }
-            self.auto_open_channels.extend(retry_channel_ids);
-            return;
+            self.finish_pending_stream_switch();
         }
+        for channel_id in &retry_channel_ids {
+            self.auto_open_channels.remove(channel_id);
+            self.auto_open_retry_after.remove(channel_id);
+        }
+        if !retry_close_ids.is_empty() {
+            self.send_bridge_command(BrowserCommand::CloseChannels {
+                channel_ids: retry_close_ids,
+            });
+        }
+        if !retry_open_channels.is_empty() {
+            self.send_bridge_command(BrowserCommand::OpenSelected {
+                wake_browser: self.wake_browser_on_open,
+                channels: retry_open_channels,
+            });
+        }
+        self.auto_open_channels.extend(retry_channel_ids);
+        return;
+    }
+
+    fn dispatch_automatic_tab_transition(&mut self, desired: HashSet<String>) {
         let close_ids = self
             .auto_open_channels
             .difference(&desired)

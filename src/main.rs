@@ -12,7 +12,9 @@ use twitch_streak_saver::browser_protocol::{
     BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, BrowserTabCloseReason,
     ChatState, KnownBrowserMessage, PlayerState,
 };
-use twitch_streak_saver::model::{AppPreferences, FollowedChannel, PreferredQuality};
+use twitch_streak_saver::model::{
+    AppPreferences, BrowserKind, BrowserLaunchTarget, FollowedChannel, PreferredQuality,
+};
 use twitch_streak_saver::scheduler::{
     QueueCandidate, QueuePlanner, QueueStage, StreamRotation, StreamSession, TurnEligibility,
     APP_STREAM_LIMIT, STREAM_TURN_DURATION,
@@ -324,6 +326,11 @@ struct Dashboard {
     #[cfg(target_os = "windows")]
     windows_startup_error: Option<String>,
     auto_start_on_launch: bool,
+    browser_launch_target: Option<BrowserLaunchTarget>,
+    browser_launch_attempted: Option<BrowserLaunchTarget>,
+    browser_profiles: Vec<browser_setup::DetectedBrowserProfile>,
+    browser_profile_roots: Vec<browser_setup::DetectedBrowserProfileRoot>,
+    browser_profile_data_directories: Vec<(BrowserKind, String)>,
     wake_browser_on_open: bool,
     close_on_raid_redirect: bool,
     preferred_quality: PreferredQuality,
@@ -375,6 +382,11 @@ impl Dashboard {
             .storage
             .and_then(|storage| eframe::get_value::<AppPreferences>(storage, PREFERENCES_KEY))
             .unwrap_or_default();
+        let browser_profile_data_directories = preferences.browser_profile_data_directories;
+        let browser_profile_roots =
+            browser_setup::detected_browser_profile_roots(&browser_profile_data_directories);
+        let browser_profiles =
+            browser_setup::detected_browser_profiles_for_roots(&browser_profile_roots);
         #[cfg(target_os = "windows")]
         let (start_with_windows, windows_startup_error) = windows_startup::initialize();
         let (browser_bridge, browser_error) = match BrowserBridge::start() {
@@ -396,6 +408,11 @@ impl Dashboard {
             #[cfg(target_os = "windows")]
             windows_startup_error,
             auto_start_on_launch: preferences.auto_start_on_launch,
+            browser_launch_target: preferences.browser_launch_target,
+            browser_launch_attempted: None,
+            browser_profiles,
+            browser_profile_roots,
+            browser_profile_data_directories,
             wake_browser_on_open: preferences.wake_browser_on_open,
             close_on_raid_redirect: preferences.close_on_raid_redirect,
             preferred_quality: preferences.preferred_quality,
@@ -451,6 +468,8 @@ impl Dashboard {
             wake_browser_on_open: self.wake_browser_on_open,
             close_on_raid_redirect: self.close_on_raid_redirect,
             preferred_quality: self.preferred_quality,
+            browser_launch_target: self.browser_launch_target.clone(),
+            browser_profile_data_directories: self.browser_profile_data_directories.clone(),
             channels: self.channels.clone(),
         }
     }

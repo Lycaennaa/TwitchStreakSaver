@@ -61,6 +61,11 @@ async function createExtension({
   let storedTabOwners = JSON.parse(JSON.stringify(storedManagedTabOwners));
   let storedPreferredQuality;
   let managedTabSaveFailures = 0;
+  let managedTabSavePause = null;
+  const browserMutationWaiters = [];
+  function signalBrowserMutation(mutation) {
+    for (const resolve of browserMutationWaiters.splice(0)) resolve(mutation);
+  }
   for (const initialTab of initialTabs) {
     const tab = {
       status: "complete",
@@ -141,6 +146,12 @@ async function createExtension({
               managedTabSaveFailures -= 1;
               throw new Error("Managed tab storage failed");
             }
+            if (managedTabSavePause) {
+              const pause = managedTabSavePause;
+              managedTabSavePause = null;
+              pause.signalStarted();
+              await pause.wait;
+            }
             storedTabs = JSON.parse(JSON.stringify(value.managedTabs));
           }
           if (Object.hasOwn(value, "closeOnRaidRedirect")) {
@@ -209,8 +220,9 @@ async function createExtension({
         if (failedRemovals.has(tabId)) throw new Error("Blocked tab removal");
         const tab = tabsById.get(tabId);
         if (!tab) throw new Error("No such tab");
+        signalBrowserMutation({ type: "tab_removed", tabId });
         tabsById.delete(tabId);
-        onRemoved.dispatch(tabId);
+        await Promise.all(onRemoved.dispatch(tabId));
       },
       async sendMessage(tabId, message) {
         const tab = tabsById.get(tabId);
@@ -289,6 +301,11 @@ async function createExtension({
             url: options.url || "chrome://newtab/",
           };
           tabsById.set(tab.id, tab);
+          signalBrowserMutation({
+            type: "window_created",
+            tabId: tab.id,
+            windowId: window.id,
+          });
           onCreated.dispatch({ ...tab });
         }
         return { ...window };
@@ -488,6 +505,12 @@ async function createExtension({
     snapshotManagedTabs() {
       return JSON.parse(JSON.stringify(storedTabs));
     },
+    managedRecordEntries() {
+      return vm.runInContext("TwitchManagedTabs.recordEntries()", context);
+    },
+    flushManagedTabs() {
+      return vm.runInContext("TwitchManagedTabs.saveManagedTabs()", context);
+    },
     snapshotRaidSetting() {
       return storedRaidSetting;
     },
@@ -496,6 +519,18 @@ async function createExtension({
     },
     snapshotRaidRedirectedChannelIds() {
       return JSON.parse(JSON.stringify(storedRaidRedirectedIds));
+    },
+    managedRecordRouteMatches(record, url, surface) {
+      return vm.runInContext(
+        `TwitchManagedTabs.matchesManagedRecordRoute(${JSON.stringify(record)}, ${JSON.stringify(url)}, ${JSON.stringify(surface)})`,
+        context,
+      );
+    },
+    pendingRecordRouteMatches(record, url, surface) {
+      return vm.runInContext(
+        `TwitchManagedTabs.matchesPendingRoute(${JSON.stringify(record)}, ${JSON.stringify(url)}, ${JSON.stringify(surface)})`,
+        context,
+      );
     },
     async updateTabUrl(tabId, url) {
       const tab = tabsById.get(tabId);
@@ -550,6 +585,21 @@ async function createExtension({
     releaseFirstNavigation,
     failNextManagedTabSave() {
       managedTabSaveFailures += 1;
+    },
+    pauseNextManagedTabSave() {
+      let signalStarted;
+      let release;
+      const started = new Promise((resolve) => {
+        signalStarted = resolve;
+      });
+      const wait = new Promise((resolve) => {
+        release = resolve;
+      });
+      managedTabSavePause = { signalStarted, wait };
+      return { started, release };
+    },
+    waitForNextBrowserMutation() {
+      return new Promise((resolve) => browserMutationWaiters.push(resolve));
     },
     failRemoval(tabId) {
       failedRemovals.add(tabId);
@@ -2033,4 +2083,172 @@ test("status forwarding waits for the replacement native port to sync", async ()
   await extension.send({ type: "sync_channels", channels });
   report();
   assert.equal(statusCount(), 2);
+});
+test("managed-record routes include previous logins but pending routes use only the current login", async () => {
+  const extension = await createExtension();
+  const record = {
+    login: "newlogin",
+    previousLogins: ["oldlogin"],
+    layout: "combined_window",
+  };
+  const previousRoute = "https://www.twitch.tv/oldlogin";
+  const currentRoute = "https://www.twitch.tv/newlogin";
+
+  assert.equal(extension.managedRecordRouteMatches(record, previousRoute, "player"), true);
+  assert.equal(extension.managedRecordRouteMatches(record, currentRoute, "player"), true);
+  assert.equal(
+    extension.managedRecordRouteMatches(record, "https://www.twitch.tv/unrelated", "player"),
+    false,
+  );
+  assert.equal(extension.pendingRecordRouteMatches(record, previousRoute, "player"), false);
+  assert.equal(extension.pendingRecordRouteMatches(record, currentRoute, "player"), true);
+});
+test("managed record enumeration exposes immutable snapshots", async () => {
+  const extension = await createExtension();
+  await extension.open({
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "channel-snapshot", login: "streamer" }],
+  });
+
+  const [[channelId, record]] = extension.managedRecordEntries();
+  assert.equal(channelId, "channel-snapshot");
+  assert.equal(Object.isFrozen(record), true);
+  record.login = "mutated";
+  assert.equal(record.login, "streamer");
+  assert.equal(extension.managedRecordEntries()[0][1].login, "streamer");
+});
+test("detaching one managed surface updates manager-owned records", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-split", {
+        login: "streamer",
+        layout: "separate_player_chat",
+        playerTabId: 21,
+        chatTabId: 22,
+      }],
+    ],
+    initialTabs: [
+      {
+        id: 21,
+        url: "https://player.twitch.tv/?channel=streamer&parent=twitch.tv",
+        windowId: 17,
+      },
+      {
+        id: 22,
+        url: "https://www.twitch.tv/popout/streamer/chat",
+        windowId: 17,
+      },
+    ],
+  });
+
+  await extension.updateTabUrl(21, "https://example.com/");
+  const record = extension.managedRecordEntries()[0][1];
+  assert.equal(record.playerTabId, null);
+  assert.equal(record.chatTabId, 22);
+  assert.equal(extension.tabsById.has(22), true);
+  await extension.flushManagedTabs();
+  const persistedRecord = extension.snapshotManagedTabs()[0][1];
+  assert.equal(persistedRecord.playerTabId, null);
+  assert.equal(persistedRecord.chatTabId, 22);
+  assert.equal(
+    extension.calls.nativeMessages.some((message) => (
+      message.type === "tab_closed"
+      && message.channel_id === "channel-split"
+      && message.surface === "player"
+    )),
+    true,
+  );
+});
+test("detach reports tab closure after a managed-state storage failure", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-split", {
+        login: "streamer",
+        layout: "separate_player_chat",
+        playerTabId: 21,
+        chatTabId: 22,
+      }],
+    ],
+    initialTabs: [
+      {
+        id: 21,
+        url: "https://player.twitch.tv/?channel=streamer&parent=twitch.tv",
+        windowId: 17,
+      },
+      {
+        id: 22,
+        url: "https://www.twitch.tv/popout/streamer/chat",
+        windowId: 17,
+      },
+    ],
+  });
+  extension.failNextManagedTabSave();
+
+  await extension.updateTabUrl(21, "https://example.com/");
+
+  const record = extension.managedRecordEntries()[0][1];
+  assert.equal(record.playerTabId, null);
+  assert.equal(record.chatTabId, 22);
+  assert.equal(extension.calls.nativeMessages.some((message) => (
+    message.type === "tab_closed"
+    && message.channel_id === "channel-split"
+    && message.surface === "player"
+  )), true);
+  assert.equal(
+    extension.calls.logs.some((entry) => (
+      entry.level === "warn"
+      && entry.message.includes("Could not persist detached managed tab state.")
+    )),
+    true,
+  );
+
+  await extension.flushManagedTabs();
+  const persistedRecord = extension.snapshotManagedTabs()[0][1];
+  assert.equal(persistedRecord.playerTabId, null);
+  assert.equal(persistedRecord.chatTabId, 22);
+});
+test("detaching shared surfaces clears manager state before awaiting persistence", async () => {
+  const extension = await createExtension({
+    storedManagedTabs: [
+      ["channel-shared", {
+        login: "streamer",
+        layout: "combined_window",
+        playerTabId: 51,
+        chatTabId: 51,
+      }],
+    ],
+    initialTabs: [{
+      id: 51,
+      url: "https://www.twitch.tv/streamer",
+      windowId: 17,
+    }],
+  });
+  const pause = extension.pauseNextManagedTabSave();
+  const update = extension.updateTabUrl(51, "https://example.com/");
+  await pause.started;
+  const nextMutation = extension.waitForNextBrowserMutation();
+  const opening = extension.send({
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "channel-shared", login: "streamer" }],
+  });
+  const mutation = await nextMutation;
+  pause.release();
+  await Promise.all([update, opening]);
+  assert.equal(mutation.type, "window_created");
+  assert.equal(extension.tabsById.has(51), true);
+  assert.equal(extension.tabsById.get(51).url, "https://example.com/");
+  const managedRecords = extension.managedRecordEntries();
+  assert.equal(managedRecords.length, 1);
+  assert.equal(managedRecords[0][0], "channel-shared");
+  assert.notEqual(managedRecords[0][1].playerTabId, 51);
+  assert.equal(
+    extension.snapshotManagedTabOwners().some(([tabId]) => tabId === 51),
+    false,
+  );
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+  assert.equal(extension.calls.nativeMessages.filter((message) => (
+    message.type === "tab_closed" && message.channel_id === "channel-shared"
+  )).length, 2);
 });

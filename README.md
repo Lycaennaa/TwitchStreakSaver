@@ -30,6 +30,9 @@ On Windows, **Launch at Windows sign-in** adds or removes this app's per-user st
 
 The extension inventories external Twitch channel/player tabs, excluding app-managed tabs and chat-only tabs. Live followed channels are mapped by ID; unknown Twitch channel tabs reserve capacity conservatively. VOD and non-channel pages are ignored. Player status and combined-page chat UI readiness are reported; chat UI readiness does not prove a live Twitch chat connection. External tabs count toward capacity but are not rotated by the app. The extension reports app-managed player channels separately, so tabs restored after reconnect also reserve capacity; unknown managed channels reserve capacity conservatively. Reload extension version 0.3.17 after updating. Older versions cannot report restored app-managed streams, so the app pauses stream opening until the extension is reloaded. Versions through 0.3.1 stored managed-tab ownership in session storage, which the browser clears on extension upgrade; those tabs stay open rather than risk closing tabs the app did not create.
 
+
+**Automatic browser opening** can launch Chrome, Brave, Edge, or Helium with the selected profile when automation is enabled, a followed Twitch channel is live, and the extension is disconnected. Profiles with the extension enabled are marked. If several are enabled, the bridge cannot identify which profile is connected, and an already-connected profile is preserved.
+
 Build incrementally with:
 
 ```sh

@@ -1,6 +1,7 @@
 use super::{
-    BrowserChannelState, BrowserSurface, BrowserTabCloseReason, Dashboard, FollowedChannel,
-    KnownBrowserMessage, PreferredQuality, QueuePlanner, TwitchConnectionStatus, TwitchUpdate,
+    BrowserChannelState, BrowserKind, BrowserLaunchTarget, BrowserSurface, BrowserTabCloseReason,
+    Dashboard, FollowedChannel, KnownBrowserMessage, PreferredQuality, QueuePlanner,
+    TwitchConnectionStatus, TwitchUpdate,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -19,6 +20,11 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         wake_browser_on_open: false,
         close_on_raid_redirect: false,
         preferred_quality: PreferredQuality::default(),
+        browser_launch_target: None,
+        browser_launch_attempted: None,
+        browser_profiles: Vec::new(),
+        browser_profile_roots: Vec::new(),
+        browser_profile_data_directories: Vec::new(),
         automation_enabled: true,
         channels: vec![
             FollowedChannel::new("old", "Old Streamer"),
@@ -612,4 +618,31 @@ fn unfollowed_destination_open_ack_completes_pending_switch() {
 
     dashboard.reconcile_automatic_tabs(Duration::ZERO);
     assert!(dashboard.auto_open_channels.is_empty());
+}
+
+#[test]
+fn automatic_browser_launch_requires_a_live_selected_channel_and_profile() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.browser_connected = false;
+    dashboard.browser_launch_target = Some(BrowserLaunchTarget {
+        browser: BrowserKind::Chrome,
+        profile_directory: "Default".to_owned(),
+    });
+
+    assert!(dashboard.should_launch_browser_for_automatic_channels());
+
+    dashboard.live_channel_ids.clear();
+    assert!(!dashboard.should_launch_browser_for_automatic_channels());
+    dashboard.live_channel_ids.insert("new".to_owned());
+
+    dashboard.browser_connected = true;
+    assert!(!dashboard.should_launch_browser_for_automatic_channels());
+    dashboard.browser_connected = false;
+
+    dashboard.automation_enabled = false;
+    assert!(!dashboard.should_launch_browser_for_automatic_channels());
+    dashboard.automation_enabled = true;
+
+    dashboard.browser_launch_target = None;
+    assert!(!dashboard.should_launch_browser_for_automatic_channels());
 }

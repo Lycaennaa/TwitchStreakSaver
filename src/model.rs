@@ -104,6 +104,32 @@ pub fn merge_followed_channels(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserKind {
+    Chrome,
+    Brave,
+    Edge,
+    Helium,
+}
+
+impl BrowserKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Chrome => "Chrome",
+            Self::Brave => "Brave",
+            Self::Edge => "Edge",
+            Self::Helium => "Helium",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrowserLaunchTarget {
+    pub browser: BrowserKind,
+    pub profile_directory: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppPreferences {
@@ -111,6 +137,8 @@ pub struct AppPreferences {
     pub wake_browser_on_open: bool,
     pub close_on_raid_redirect: bool,
     pub preferred_quality: PreferredQuality,
+    pub browser_launch_target: Option<BrowserLaunchTarget>,
+    pub browser_profile_data_directories: Vec<(BrowserKind, String)>,
     pub channels: Vec<FollowedChannel>,
 }
 
@@ -121,6 +149,8 @@ impl Default for AppPreferences {
             wake_browser_on_open: false,
             close_on_raid_redirect: false,
             preferred_quality: PreferredQuality::default(),
+            browser_launch_target: None,
+            browser_profile_data_directories: Vec::new(),
             channels: vec![
                 FollowedChannel::new("sample-01", "Sample channel one"),
                 FollowedChannel::new("sample-02", "Sample channel two"),
@@ -220,5 +250,35 @@ mod tests {
         selection.streak = false;
         assert!(selection.is_selected());
         assert!(selection.points);
+    }
+}
+
+#[cfg(test)]
+mod browser_launch_preferences_tests {
+    use super::{AppPreferences, BrowserKind, BrowserLaunchTarget};
+
+    #[test]
+    fn selected_browser_profile_persists_in_preferences() {
+        let target = BrowserLaunchTarget {
+            browser: BrowserKind::Edge,
+            profile_directory: "Profile 2".to_owned(),
+        };
+        let preferences = AppPreferences {
+            browser_launch_target: Some(target.clone()),
+            browser_profile_data_directories: vec![(
+                BrowserKind::Brave,
+                "/custom/brave-data".to_owned(),
+            )],
+            ..AppPreferences::default()
+        };
+
+        let serialized = ron::to_string(&preferences).unwrap();
+        let restored: AppPreferences = ron::from_str(&serialized).unwrap();
+
+        assert_eq!(restored.browser_launch_target, Some(target));
+        assert_eq!(
+            restored.browser_profile_data_directories,
+            vec![(BrowserKind::Brave, "/custom/brave-data".to_owned())]
+        );
     }
 }

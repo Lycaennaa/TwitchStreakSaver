@@ -288,11 +288,7 @@ impl Dashboard {
                 .show_ui(ui, |ui| {
                     for quality in PreferredQuality::ALL {
                         changed |= ui
-                            .selectable_value(
-                                &mut self.preferred_quality,
-                                quality,
-                                quality.label(),
-                            )
+                            .selectable_value(&mut self.preferred_quality, quality, quality.label())
                             .changed();
                     }
                 });
@@ -307,6 +303,7 @@ impl Dashboard {
     fn automation_settings(&mut self, ui: &mut egui::Ui) {
         let mut start = false;
         let mut stop = false;
+        let mut profile_folder_reset: Option<BrowserKind> = None;
         ui.group(|ui| {
             ui.strong("Automation");
             ui.label(if self.automation_enabled {
@@ -315,6 +312,95 @@ impl Dashboard {
                 "Automation stopped."
             });
             ui.checkbox(&mut self.auto_start_on_launch, "Auto-start on app launch");
+            if ui.button("Refresh browser profiles").clicked() {
+                self.refresh_browser_profiles();
+            }
+                ui.menu_button("Browser data folders", |ui| {
+                    ui.label("Detected browser user-data folders:");
+                    for root in &self.browser_profile_roots {
+                        ui.horizontal(|ui| {
+                            ui.label(root.browser.name());
+                            ui.label(root.path.display().to_string());
+                            if root.overridden && ui.button("Reset").clicked() {
+                                profile_folder_reset = Some(root.browser);
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                });
+            let selected_profile = self
+                .browser_launch_target
+                .as_ref()
+                .map(|target| {
+                    self.browser_profiles
+                        .iter()
+                        .find(|profile| profile.target == *target)
+                        .map(|profile| profile.label.clone())
+                        .unwrap_or_else(|| {
+                            format!(
+                                "Unavailable: {} — {}",
+                                target.browser.name(),
+                                target.profile_directory
+                            )
+                        })
+                })
+                .unwrap_or_else(|| "Disabled".to_owned());
+            egui::ComboBox::from_id_salt("automatic_browser_profile")
+                .selected_text(selected_profile)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.browser_launch_target, None, "Disabled");
+                    for profile in &self.browser_profiles {
+                        ui.selectable_value(
+                            &mut self.browser_launch_target,
+                            Some(profile.target.clone()),
+                            &profile.label,
+                        )
+                        .on_hover_text(profile.profile_root.display().to_string());
+                    }
+                });
+            for profile in &self.browser_profiles {
+                if let Some(error) = &profile.extension_scan_error {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!(
+                            "Could not inspect extension status for {} at {}: {error}",
+                            profile.label,
+                            profile
+                                .profile_root
+                                .join(&profile.target.profile_directory)
+                                .join("Preferences")
+                                .display()
+                        ),
+                    );
+                }
+            }
+            if self.browser_profiles.is_empty() {
+                ui.label("No profiles were found in the readable browser data folders.");
+            }
+            for root in &self.browser_profile_roots {
+                if !self
+                    .browser_profiles
+                    .iter()
+                    .any(|profile| profile.target.browser == root.browser)
+                {
+                    let message = match &root.scan_error {
+                        Some(error) => format!(
+                            "{} profile scan failed at {}: {error}",
+                            root.browser.name(),
+                            root.path.display()
+                        ),
+                        None => format!(
+                            "{}: no profiles found under {}",
+                            root.browser.name(),
+                            root.path.display()
+                        ),
+                    };
+                    ui.label(message);
+                }
+            }
+            ui.label(
+                "Hover a profile for its detected folder. Profiles with the extension enabled are marked; if multiple are enabled, the bridge cannot identify the connected one.",
+            );
             #[cfg(target_os = "windows")]
             {
                 let changed = ui
@@ -344,6 +430,11 @@ impl Dashboard {
                     .clicked();
             });
         });
+        if let Some(browser) = profile_folder_reset {
+            if let Err(error) = self.set_browser_profile_data_directory(browser, None) {
+                self.browser_error = Some(error);
+            }
+        }
         if start {
             self.start_automation();
         }

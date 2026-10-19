@@ -48,6 +48,7 @@ impl Dashboard {
                 BridgeEvent::Connected => {
                     self.pending_stream_switch = None;
                     self.browser_connected = true;
+                    self.browser_launch_attempted = None;
                     self.external_stream_counts.clear();
                     self.external_unmatched_streams = 0;
                     self.external_inventory_received = false;
