@@ -245,3 +245,142 @@ test("automatically applies the stored default and reacts to quality preference 
   assert.equal(menuState, "");
   assert.deepEqual([video.videoWidth, video.videoHeight], [1280, 720]);
 });
+test("applies managed player audio without carrying it across routes", () => {
+  const preferenceKey = "__twitch_streak_saver_player_unmuted__";
+  const session = new Map([[preferenceKey, JSON.stringify({ login: "streamer", unmuted: false })]]);
+  const makeVideo = (muted) => ({
+    muted,
+    ended: false,
+    paused: false,
+    readyState: 3,
+    videoWidth: 1280,
+    videoHeight: 720,
+    getClientRects: () => [1],
+    getBoundingClientRect: () => ({ width: 1280, height: 720 }),
+  });
+  const createPage = (initialVideos, opener = null) => {
+    let onMessage;
+    let routeLogin = "streamer";
+    let routeSurface = "player";
+    let videos = initialVideos;
+    const pageIntervals = [];
+    const context = vm.createContext({
+      chrome: {
+        runtime: {
+          sendMessage: () => Promise.resolve(),
+          onMessage: {
+            addListener(listener) {
+              onMessage = listener;
+            },
+          },
+        },
+        storage: {
+          local: { get: (defaults) => Promise.resolve(defaults) },
+          onChanged: { addListener() {} },
+        },
+      },
+      document: {
+        querySelectorAll: (selector) => selector === "video" ? videos : [],
+      },
+      location: {
+        get href() { return `https://www.twitch.tv/${routeLogin}`; },
+      },
+      TwitchTabUtils: {
+        channelRoute: () => ({ login: routeLogin, surface: routeSurface }),
+      },
+      TwitchQuality,
+      window: {
+        opener,
+        sessionStorage: {
+          getItem: (key) => session.get(key) ?? null,
+          setItem: (key, value) => session.set(key, value),
+          removeItem: (key) => session.delete(key),
+        },
+        setInterval(callback, delay) {
+          pageIntervals.push({ callback, delay });
+          return pageIntervals.length;
+        },
+        clearInterval() {},
+        setTimeout(callback) {
+          callback();
+          return 1;
+        },
+      },
+    });
+    const source = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
+    vm.runInContext(source, context, { filename: "content.js" });
+    return {
+      onMessage,
+      intervals: pageIntervals,
+      replaceVideos(nextVideos) {
+        videos = nextVideos;
+      },
+      setLogin(login) {
+        routeLogin = login;
+      },
+      setSurface(surface) {
+        routeSurface = surface;
+      },
+    };
+  };
+
+  const forgedVideo = makeVideo(true);
+  createPage([forgedVideo]);
+  assert.equal(forgedVideo.muted, true);
+
+  const videoA = makeVideo(true);
+  const page = createPage([videoA]);
+  let response;
+  page.onMessage(
+    { type: "set_player_audio_preference", login: "streamer", unmuted: true },
+    {},
+    (value) => { response = value; },
+  );
+  assert.equal(response.unmuted, true);
+  assert.equal(videoA.muted, false);
+  assert.equal(
+    session.get(preferenceKey),
+    JSON.stringify({ login: "streamer", unmuted: false }),
+  );
+
+  videoA.muted = true;
+  page.intervals[0].callback();
+  assert.equal(videoA.muted, true);
+
+  const replacementA = makeVideo(true);
+  page.replaceVideos([replacementA]);
+  page.intervals[0].callback();
+  assert.equal(replacementA.muted, false);
+
+  page.setLogin("another");
+  const videoB = makeVideo(true);
+  page.replaceVideos([videoB]);
+  page.intervals[0].callback();
+  assert.equal(videoB.muted, true);
+  page.onMessage(
+    { type: "set_player_audio_preference", login: "streamer", unmuted: true },
+    {},
+    (value) => { response = value; },
+  );
+  assert.equal(response.unmuted, true);
+  assert.equal(videoB.muted, true);
+  assert.equal(
+    session.get(preferenceKey),
+    JSON.stringify({ login: "streamer", unmuted: false }),
+  );
+
+  const chatVideo = makeVideo(true);
+  const chatPage = createPage([chatVideo]);
+  chatPage.onMessage(
+    { type: "set_player_audio_preference", login: "streamer", unmuted: true },
+    {},
+    () => {},
+  );
+  chatPage.setSurface("chat");
+  chatPage.intervals[0].callback();
+  chatPage.setSurface("player");
+  const returnedVideo = makeVideo(true);
+  chatPage.replaceVideos([returnedVideo]);
+  chatPage.intervals[0].callback();
+  assert.equal(returnedVideo.muted, true);
+});

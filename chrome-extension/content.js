@@ -13,7 +13,7 @@
   let qualityPreferenceChangedWhileLoading = false;
   let qualityPreferenceRevision = 0;
   let qualityApplyInProgress = false;
-  let qualityWatcher = null;
+  let playerPreferenceWatcher = null;
   let observedQualityRoute = location.href;
   let observedQualityVideo = null;
   let appliedQualityRoute = "";
@@ -21,6 +21,9 @@
   let appliedQualityPreference = "";
   let qualityRetryCount = 0;
   let qualityRetryAfter = 0;
+  let playerAudioPreference = null;
+  let appliedPlayerAudioVideo = null;
+  let appliedPlayerAudioLogin = "";
 
 
   function readManagedTabIdentity() {
@@ -47,7 +50,43 @@
         return rightRect.width * rightRect.height - leftRect.width * leftRect.height;
       })[0] || null;
   }
+  function checkPlayerAudioPreference() {
+    const route = channelRoute();
+    if (route.surface !== "player" || !route.login) {
+      playerAudioPreference = null;
+      appliedPlayerAudioVideo = null;
+      appliedPlayerAudioLogin = "";
+      return;
+    }
+    const login = route.login.toLowerCase();
+    if (playerAudioPreference?.login !== login) {
+      playerAudioPreference = null;
+      appliedPlayerAudioVideo = null;
+      appliedPlayerAudioLogin = "";
+      return;
+    }
+    const video = visiblePlayerVideo();
+    if (!video) return;
+    if (video === appliedPlayerAudioVideo && login === appliedPlayerAudioLogin) return;
+    video.muted = !playerAudioPreference.unmuted;
+    appliedPlayerAudioVideo = video;
+    appliedPlayerAudioLogin = login;
+  }
 
+  function setPlayerAudioPreference(unmuted, login) {
+    const route = channelRoute();
+    const normalizedLogin = typeof login === "string" ? login.toLowerCase() : "";
+    if (
+      route.surface !== "player"
+      || !route.login
+      || route.login.toLowerCase() !== normalizedLogin
+    ) return false;
+    playerAudioPreference = { login: normalizedLogin, unmuted };
+    appliedPlayerAudioVideo = null;
+    appliedPlayerAudioLogin = "";
+    checkPlayerAudioPreference();
+    return true;
+  }
   function playerState() {
     const video = visiblePlayerVideo();
     return !video
@@ -172,7 +211,7 @@
       resetQualityRetry();
     } catch (error) {
       if (String(error).toLowerCase().includes("extension context invalidated")) {
-        stopQualityAutomation();
+        stopPlayerPreferenceAutomation();
       } else {
         if (openedSettings) deferQualityRetry(video, route, quality, revision);
         console.debug("Could not apply the preferred Twitch quality.", error);
@@ -211,10 +250,14 @@
     ) return;
     void applyPreferredQuality(video, route, preferredQuality, qualityPreferenceRevision);
   }
+  function checkPlayerPreferences() {
+    checkPreferredQuality();
+    checkPlayerAudioPreference();
+  }
 
-  function stopQualityAutomation() {
-    if (qualityWatcher !== null) window.clearInterval(qualityWatcher);
-    qualityWatcher = null;
+  function stopPlayerPreferenceAutomation() {
+    if (playerPreferenceWatcher !== null) window.clearInterval(playerPreferenceWatcher);
+    playerPreferenceWatcher = null;
     qualityPreferenceRevision += 1;
   }
 
@@ -280,7 +323,7 @@
     } catch (error) {
       if (!String(error).toLowerCase().includes("extension context invalidated")) throw error;
       stopMonitoring();
-      stopQualityAutomation();
+      stopPlayerPreferenceAutomation();
     }
   }
 
@@ -299,6 +342,15 @@
       sendResponse({ identity: readManagedTabIdentity() });
       return false;
     }
+    if (
+      message?.type === "set_player_audio_preference"
+      && typeof message.unmuted === "boolean"
+      && typeof message.login === "string"
+    ) {
+      setPlayerAudioPreference(message.unmuted, message.login);
+      sendResponse({ unmuted: message.unmuted });
+      return false;
+    }
     if (message?.type === "start_monitoring" && !monitoring) {
       monitoring = true;
       report();
@@ -307,13 +359,15 @@
       stopMonitoring();
     }
   });
+  const managedTabIdentity = readManagedTabIdentity();
   try {
     chrome.runtime.sendMessage({
       type: "managed_tab_identity_ready",
-      identity: readManagedTabIdentity(),
+      identity: managedTabIdentity,
     }).catch(() => {});
   } catch {}
   chrome.storage.onChanged.addListener(qualityPreferenceChanged);
-  qualityWatcher = window.setInterval(checkPreferredQuality, QUALITY_CHECK_INTERVAL_MS);
+  playerPreferenceWatcher = window.setInterval(checkPlayerPreferences, QUALITY_CHECK_INTERVAL_MS);
+  checkPlayerAudioPreference();
   void loadPreferredQuality();
 })();

@@ -32,7 +32,7 @@ async function createExtension({
   storedManagedTabOwners = [],
   browserStartup = false,
   initialTabs = [],
-  extensionVersion = "0.3.15",
+  extensionVersion = "0.3.17",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
   connectNativeImpl = null,
@@ -214,12 +214,17 @@ async function createExtension({
       },
       async sendMessage(tabId, message) {
         const tab = tabsById.get(tabId);
-        calls.contentMessages.push({
+        const contentMessage = {
           tabId,
           type: message.type,
           status: tab?.status,
           discarded: tab?.discarded,
-        });
+        };
+        if (message.type === "set_player_audio_preference") {
+          contentMessage.unmuted = message.unmuted;
+          contentMessage.login = message.login;
+        }
+        calls.contentMessages.push(contentMessage);
         if (message.type === "get_managed_tab_identity") {
           if (!tab || tab.contentScriptReady === false) {
             throw new Error("No content script is available");
@@ -497,6 +502,15 @@ async function createExtension({
       if (!tab) throw new Error("No such tab");
       tab.url = url;
       await Promise.all(onUpdated.dispatch(tabId, { url }, { ...tab }));
+    },
+    completeTab(tabId) {
+      const tab = tabsById.get(tabId);
+      if (!tab) throw new Error("No such tab");
+      tab.status = "complete";
+      return Promise.all(onUpdated.dispatch(tabId, {
+        status: "complete",
+        url: tab.url,
+      }, { ...tab }));
     },
     reportManagedTabIdentity(tabId, identity) {
       const tab = tabsById.get(tabId);
@@ -777,6 +791,11 @@ test("new managed tabs stay muted when their first persistence attempt fails", a
 
   assert.equal(tab.url, "https://www.twitch.tv/streamer");
   assert.equal(tab.muted, true);
+  const playerAudioMessage = extension.calls.contentMessages.find(
+    (message) => message.type === "set_player_audio_preference",
+  );
+  assert.equal(playerAudioMessage?.tabId, tab.id);
+  assert.equal(playerAudioMessage?.unmuted, false);
 });
 test("new managed tabs honor the per-channel unmuted setting", async () => {
   const extension = await createExtension();
@@ -790,6 +809,35 @@ test("new managed tabs honor the per-channel unmuted setting", async () => {
   const [tab] = [...extension.tabsById.values()];
   assert.ok(tab);
   assert.equal(tab.muted, false);
+  const playerAudioMessage = extension.calls.contentMessages.find(
+    (message) => message.type === "set_player_audio_preference",
+  );
+  assert.equal(playerAudioMessage?.tabId, tab.id);
+  assert.equal(playerAudioMessage?.unmuted, true);
+});
+test("managed player reload reapplies its saved audio preference", async () => {
+  const extension = await createExtension();
+  const command = {
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "channel-audio-reload", login: "streamer", unmuted: true }],
+  };
+  await extension.open(command);
+  const [tab] = [...extension.tabsById.values()];
+  const audioMessages = () => extension.calls.contentMessages.filter(
+    (message) =>
+      message.tabId === tab.id
+      && message.type === "set_player_audio_preference",
+  );
+  assert.equal(audioMessages().length, 1);
+
+  await extension.completeTab(tab.id);
+  await extension.reportManagedTabIdentity(tab.id, tab.managedTabIdentity);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(audioMessages().length, 2);
+  assert.equal(audioMessages().at(-1)?.login, "streamer");
+  assert.equal(audioMessages().at(-1)?.unmuted, true);
 });
 test("unpersisted identity preserves startup raid quarantine", async () => {
   const opened = await createExtension({ failManagedIdentityWrites: true });
@@ -971,10 +1019,17 @@ test("keeps a user's unmuted state when reopening a managed channel", async () =
   const tab = [...extension.tabsById.values()][0];
   assert.equal(tab.muted, true);
 
+  const audioPreferenceMessages = extension.calls.contentMessages
+    .filter((message) => message.type === "set_player_audio_preference").length;
   tab.muted = false;
   await extension.open(command);
 
   assert.equal(tab.muted, false);
+  assert.equal(
+    extension.calls.contentMessages
+      .filter((message) => message.type === "set_player_audio_preference").length,
+    audioPreferenceMessages,
+  );
 });
 test("opens subsequent stream windows while an earlier Twitch page is still loading", async () => {
   const extension = await createExtension({ pauseFirstNavigation: true });
@@ -1564,7 +1619,7 @@ test("sync reloads managed pages when the extension version changes", async () =
   await original.open({
     type: "open_selected",
     wake_browser: false,
-    channels: [{ id: "channel-update", login: "streamer" }],
+    channels: [{ id: "channel-update", login: "streamer", unmuted: true }],
   });
   const [originalTab] = [...original.tabsById.values()];
   const restarted = await createExtension({
@@ -1575,7 +1630,7 @@ test("sync reloads managed pages when the extension version changes", async () =
 
   await restarted.send({
     type: "sync_channels",
-    channels: [{ id: "channel-update", login: "streamer" }],
+    channels: [{ id: "channel-update", login: "streamer", unmuted: true }],
   });
 
   assert.equal(restarted.tabsById.get(originalTab.id).status, "complete");
@@ -1586,6 +1641,11 @@ test("sync reloads managed pages when the extension version changes", async () =
     1,
   );
   assert.equal(restarted.snapshotManagedTabs()[0][1].contentVersion, "0.3.4");
+  const playerAudioMessage = restarted.calls.contentMessages.find(
+    (message) => message.type === "set_player_audio_preference",
+  );
+  assert.equal(playerAudioMessage?.tabId, originalTab.id);
+  assert.equal(playerAudioMessage?.unmuted, true);
   assert.deepEqual(restarted.calls.windowUpdates, []);
 });
 

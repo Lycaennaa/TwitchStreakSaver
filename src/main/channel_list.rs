@@ -21,6 +21,7 @@ impl Dashboard {
         let streak_completed = &self.streak_completed;
         let points_balances = &self.channel_points_balances;
         let mut open_selected = false;
+        let mut unmuted_changed = false;
 
         {
             let channels = &mut self.channels;
@@ -179,7 +180,9 @@ impl Dashboard {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            channel_selection_controls(ui, channel);
+                                            if channel_selection_controls(ui, channel).changed() {
+                                                unmuted_changed = true;
+                                            }
                                         },
                                     );
                                 });
@@ -188,6 +191,9 @@ impl Dashboard {
                         }
                     });
             });
+        }
+        if unmuted_changed {
+            self.sync_extension_channels();
         }
         if open_selected {
             self.open_selected_twitch_channels();

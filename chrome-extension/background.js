@@ -518,6 +518,39 @@ function sendNative(message) {
 function setMonitoring(tabId, type) {
   void chrome.tabs.sendMessage(tabId, { type }).catch(() => {});
 }
+async function setPlayerAudioPreference(tabId, unmuted, login) {
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: "set_player_audio_preference",
+      login,
+      unmuted,
+    });
+  } catch {}
+}
+
+async function applyManagedPlayerAudioPreference(tabId, reportedIdentity) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || Number.isInteger(tab.openerTabId)) return false;
+  const route = TwitchTabUtils.channelRoute(tab.url || "");
+  if (route.surface !== "player" || !route.login) return false;
+  for (const [channelId, record] of managedTabs) {
+    if (record.playerTabId !== tabId) continue;
+    if (
+      record.identityPersisted !== true
+      || managedTabOwners.get(tabId) !== channelId
+      || route.login !== record.login.toLowerCase()
+    ) return false;
+    const identity = reportedIdentity === undefined
+      ? await readManagedTabIdentity(tabId)
+      : reportedIdentity;
+    if (identity !== record.identityToken) return false;
+    if (typeof record.unmuted === "boolean") {
+      await setPlayerAudioPreference(tabId, record.unmuted, route.login);
+    }
+    return true;
+  }
+  return false;
+}
 async function setManagedTabIdentity(tabId, identity) {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -830,6 +863,7 @@ async function loadManagedTab(tabId, url, wakeBrowser, forceReload) {
 }
 
 async function openManagedTab(channelId, record, url, wakeBrowser, unmuted, sourcePort) {
+  record.unmuted = unmuted;
   let tabId = record.playerTabId;
   let isNewTab = tabId === null || tabId === undefined;
   record.identityToken = record.identityToken || crypto.randomUUID();
@@ -880,6 +914,9 @@ async function openManagedTab(channelId, record, url, wakeBrowser, unmuted, sour
   record.contentVersion = contentVersion;
   managedTabs.set(channelId, record);
   await saveManagedTabs();
+  if (isNewTab || forceReload) {
+    await setPlayerAudioPreference(tabId, unmuted, record.login.toLowerCase());
+  }
   if (nativePort === sourcePort) setMonitoring(tabId, "start_monitoring");
   sendNative({ type: "tab_opened", channel_id: channelId, tab_id: tabId, surface: "player" });
 }
@@ -1008,7 +1045,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId = sender?.tab?.id;
     if (!Number.isInteger(tabId)) return false;
     Promise.resolve(restorePromise).then(
-      () => resolvePendingStartupIdentity(tabId, message.identity).then(sendResponse),
+      async () => {
+        const identityAccepted = pendingStartupIdentityChecks.has(tabId)
+          ? await resolvePendingStartupIdentity(tabId, message.identity)
+          : false;
+        const audioPreferenceAuthorized = await applyManagedPlayerAudioPreference(
+          tabId,
+          message.identity,
+        );
+        sendResponse(identityAccepted || audioPreferenceAuthorized);
+      },
       () => sendResponse(false),
     );
     return true;
