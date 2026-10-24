@@ -39,9 +39,11 @@ fn authorize_in_browser(cancel: &AtomicBool) -> Result<String, TwitchError> {
         }
         thread::sleep(Duration::from_millis(25));
     }
-    Err(TwitchError::Failed(
-        "Twitch sign-in timed out. Connect again to retry.".to_owned(),
-    ))
+    Err(oauth_callback_timeout())
+}
+
+fn oauth_callback_timeout() -> TwitchError {
+    TwitchError::Retryable("Twitch sign-in timed out; retrying connection.".to_owned())
 }
 
 fn accept_callback(
@@ -389,4 +391,17 @@ pub(super) fn obtain_token(
     })?;
     store_keyring_token(&token)?;
     Ok((token, user))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{oauth_callback_timeout, TwitchError};
+
+    #[test]
+    fn oauth_callback_timeout_is_retryable() {
+        assert!(matches!(
+            oauth_callback_timeout(),
+            TwitchError::Retryable(_)
+        ));
+    }
 }

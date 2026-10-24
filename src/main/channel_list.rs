@@ -1,5 +1,21 @@
 use super::*;
 
+fn freshness_age(confirmed_at: Option<Instant>) -> String {
+    let Some(confirmed_at) = confirmed_at else {
+        return "not yet confirmed".to_owned();
+    };
+    let seconds = confirmed_at.elapsed().as_secs();
+    if seconds < 60 {
+        format!("{seconds}s ago")
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h {}m ago", seconds / 3_600, (seconds % 3_600) / 60)
+    } else {
+        format!("{}d {}h ago", seconds / 86_400, (seconds % 86_400) / 3_600)
+    }
+}
+
 impl Dashboard {
     pub(super) fn channel_list(&mut self, ui: &mut egui::Ui) {
         let connected = matches!(
@@ -18,6 +34,10 @@ impl Dashboard {
         let browser_error = self.browser_error.clone();
         let pubsub_connected = self.pubsub_connected;
         let pubsub_error = self.pubsub_error.clone();
+        let twitch_baseline_confirmed_at = self.twitch_baseline_confirmed_at;
+        let pubsub_state_confirmed_at = self.pubsub_state_confirmed_at;
+        let pubsub_last_event_at = self.pubsub_last_event_at;
+        let pubsub_missed_events_since = self.pubsub_missed_events_since;
         let streak_completed = &self.streak_completed;
         let points_balances = &self.channel_points_balances;
         let mut open_selected = false;
@@ -61,6 +81,33 @@ impl Dashboard {
                         "Points & Streak events disconnected"
                     });
                 });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!(
+                        "Twitch live status last confirmed {}",
+                        freshness_age(twitch_baseline_confirmed_at)
+                    ));
+                    ui.label(format!(
+                        "PubSub state last confirmed {}",
+                        freshness_age(pubsub_state_confirmed_at)
+                    ));
+                    if let Some(last_event_at) = pubsub_last_event_at {
+                        ui.label(format!(
+                            "Last PubSub event observed {}",
+                            freshness_age(Some(last_event_at))
+                        ));
+                    } else {
+                        ui.label("No PubSub events observed this session");
+                    }
+                });
+                if let Some(gap_started_at) = pubsub_missed_events_since {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!(
+                            "PubSub monitoring gap started {}; events may have been missed. Reconnecting does not restore event history.",
+                            freshness_age(Some(gap_started_at))
+                        ),
+                    );
+                }
                 ui.label(
                     "Separate player tabs are muted by default; select Unmuted to start with audio.",
                 );

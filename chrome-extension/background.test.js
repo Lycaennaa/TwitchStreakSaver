@@ -30,9 +30,10 @@ async function createExtension({
   storedCloseOnRaidRedirect = false,
   storedRaidRedirectedChannelIds = [],
   storedManagedTabOwners = [],
+  storedCompletedNativeCommandIds = [],
   browserStartup = false,
   initialTabs = [],
-  extensionVersion = "0.3.17",
+  extensionVersion = "0.3.18",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
   connectNativeImpl = null,
@@ -46,6 +47,7 @@ async function createExtension({
     windowCreates: [],
     windowUpdates: [],
     tabUpdates: [],
+    tabReloads: [],
     nativeMessages: [],
     contentMessages: [],
     registrationRequests: [],
@@ -59,9 +61,11 @@ async function createExtension({
   let storedRaidSetting = storedCloseOnRaidRedirect;
   let storedRaidRedirectedIds = JSON.parse(JSON.stringify(storedRaidRedirectedChannelIds));
   let storedTabOwners = JSON.parse(JSON.stringify(storedManagedTabOwners));
+  let storedCompletedCommandIds = JSON.parse(JSON.stringify(storedCompletedNativeCommandIds));
   let storedPreferredQuality;
   let managedTabSaveFailures = 0;
   let managedTabSavePause = null;
+  let completedCommandSaveFailures = 0;
   const browserMutationWaiters = [];
   function signalBrowserMutation(mutation) {
     for (const resolve of browserMutationWaiters.splice(0)) resolve(mutation);
@@ -106,6 +110,7 @@ async function createExtension({
     releaseFirstNavigation = resolve;
   });
   let navigationCount = 0;
+  let reloadPause = null;
   const onUpdated = event();
   const onAttached = event();
   const onCreated = event();
@@ -132,6 +137,7 @@ async function createExtension({
             closeOnRaidRedirect: storedRaidSetting,
             raidRedirectedChannelIds: storedRaidRedirectedIds,
             managedTabOwners: storedTabOwners,
+            completedNativeCommandIds: storedCompletedCommandIds,
           };
           if (storedPreferredQuality !== undefined) {
             values.preferredQuality = storedPreferredQuality;
@@ -163,6 +169,13 @@ async function createExtension({
           if (Object.hasOwn(value, "managedTabOwners")) {
             storedTabOwners = JSON.parse(JSON.stringify(value.managedTabOwners));
           }
+          if (Object.hasOwn(value, "completedNativeCommandIds")) {
+            if (completedCommandSaveFailures > 0) {
+              completedCommandSaveFailures -= 1;
+              throw new Error("Completed native command ID storage failed");
+            }
+            storedCompletedCommandIds = JSON.parse(JSON.stringify(value.completedNativeCommandIds));
+          }
           if (Object.hasOwn(value, "preferredQuality")) {
             storedPreferredQuality = value.preferredQuality;
           }
@@ -178,6 +191,16 @@ async function createExtension({
         return [...tabsById.values()]
           .filter((tab) => query.windowId === undefined || tab.windowId === query.windowId)
           .map((tab) => ({ ...tab }));
+      },
+      async reload(tabId) {
+        if (!tabsById.has(tabId)) throw new Error(`No such tab: ${tabId}`);
+        calls.tabReloads.push(tabId);
+        if (reloadPause) {
+          const pause = reloadPause;
+          reloadPause = null;
+          pause.signalStarted();
+          await pause.wait;
+        }
       },
       async get(tabId) {
         const tab = tabsById.get(tabId);
@@ -413,6 +436,16 @@ async function createExtension({
     open(message) {
       return vm.runInContext(`handleNativeCommand(${JSON.stringify(message)})`, context);
     },
+    openFromPort(message, sourcePort) {
+      context.commandSourcePort = sourcePort;
+      return vm.runInContext(
+        `handleNativeCommand(${JSON.stringify(message)}, commandSourcePort)`,
+        context,
+      );
+    },
+    currentNativePort() {
+      return vm.runInContext("nativePort", context);
+    },
     send(message) {
       port.onMessage.dispatch(message);
       return vm.runInContext("nativeCommandQueue", context);
@@ -520,6 +553,9 @@ async function createExtension({
     snapshotRaidRedirectedChannelIds() {
       return JSON.parse(JSON.stringify(storedRaidRedirectedIds));
     },
+    snapshotCompletedNativeCommandIds() {
+      return JSON.parse(JSON.stringify(storedCompletedCommandIds));
+    },
     managedRecordRouteMatches(record, url, surface) {
       return vm.runInContext(
         `TwitchManagedTabs.matchesManagedRecordRoute(${JSON.stringify(record)}, ${JSON.stringify(url)}, ${JSON.stringify(surface)})`,
@@ -586,6 +622,9 @@ async function createExtension({
     failNextManagedTabSave() {
       managedTabSaveFailures += 1;
     },
+    failNextCompletedCommandSave() {
+      completedCommandSaveFailures += 1;
+    },
     pauseNextManagedTabSave() {
       let signalStarted;
       let release;
@@ -596,6 +635,18 @@ async function createExtension({
         release = resolve;
       });
       managedTabSavePause = { signalStarted, wait };
+      return { started, release };
+    },
+    pauseNextTabReload() {
+      let signalStarted;
+      let release;
+      const started = new Promise((resolve) => {
+        signalStarted = resolve;
+      });
+      const wait = new Promise((resolve) => {
+        release = resolve;
+      });
+      reloadPause = { signalStarted, wait };
       return { started, release };
     },
     waitForNextBrowserMutation() {
@@ -2251,4 +2302,197 @@ test("detaching shared surfaces clears manager state before awaiting persistence
   assert.equal(extension.calls.nativeMessages.filter((message) => (
     message.type === "tab_closed" && message.channel_id === "channel-shared"
   )).length, 2);
+});
+
+test("network recovery reloads only app-managed player tabs", async () => {
+  const extension = await createExtension();
+  await extension.open({
+    type: "open_selected",
+    channels: [{ id: "channel-recovery", login: "recovery", unmuted: false }],
+    wake_browser: false,
+    command_id: "session-open",
+  });
+  assert.ok(extension.calls.nativeMessages.some((message) =>
+    message.type === "command_acknowledged" && message.command_id === "session-open"
+  ));
+
+  const managedRecord = extension.snapshotManagedTabs()[0][1];
+  const playerTabId = managedRecord.playerTabId;
+  const externalTabId = 999;
+  extension.tabsById.set(externalTabId, {
+    id: externalTabId,
+    url: "https://www.twitch.tv/external",
+    windowId: 17,
+    status: "complete",
+  });
+
+  const reloadCommand = {
+    type: "reload_managed_player_tabs",
+    command_id: "session-reload",
+  };
+  await extension.open(reloadCommand);
+
+  assert.deepEqual(extension.calls.tabReloads, [playerTabId]);
+  assert.equal(
+    extension.calls.nativeMessages.filter(
+      (message) => message.type === "command_acknowledged"
+        && message.command_id === reloadCommand.command_id,
+    ).length,
+    1,
+  );
+  await extension.open(reloadCommand);
+  assert.deepEqual(extension.calls.tabReloads, [playerTabId]);
+  assert.equal(
+    extension.calls.nativeMessages.filter(
+      (message) => message.type === "command_acknowledged"
+        && message.command_id === reloadCommand.command_id,
+    ).length,
+    2,
+  );
+  const restarted = await createExtension({
+    initialTabs: Array.from(extension.tabsById.values()),
+    storedManagedTabs: extension.snapshotManagedTabs(),
+    storedManagedTabOwners: extension.snapshotManagedTabOwners(),
+    storedCompletedNativeCommandIds: extension.snapshotCompletedNativeCommandIds(),
+  });
+  await restarted.open(reloadCommand);
+  assert.deepEqual(restarted.calls.tabReloads, []);
+  assert.equal(
+    restarted.calls.nativeMessages.filter(
+      (message) => message.type === "command_acknowledged"
+        && message.command_id === reloadCommand.command_id,
+    ).length,
+    1,
+  );
+});
+
+test("completed command acknowledgments wait for durable storage", async () => {
+  const extension = await createExtension();
+  await extension.open({
+    type: "open_selected",
+    channels: [{ id: "channel-durable", login: "durable", unmuted: false }],
+    wake_browser: false,
+    command_id: "session-durable-open",
+  });
+  const playerTabId = extension.snapshotManagedTabs()[0][1].playerTabId;
+  const command = {
+    type: "reload_managed_player_tabs",
+    command_id: "session-storage-failure",
+  };
+
+  extension.failNextCompletedCommandSave();
+  await assert.rejects(
+    extension.open(command),
+    (error) => error.message === "Completed native command ID storage failed",
+  );
+
+  assert.deepEqual(extension.calls.tabReloads, [playerTabId]);
+  assert.ok(!extension.snapshotCompletedNativeCommandIds().includes(command.command_id));
+  assert.equal(
+    extension.calls.nativeMessages.some(
+      (message) => message.type === "command_acknowledged"
+        && message.command_id === command.command_id,
+    ),
+    false,
+  );
+
+  await extension.open(command);
+  assert.deepEqual(extension.calls.tabReloads, [playerTabId, playerTabId]);
+  assert.ok(extension.snapshotCompletedNativeCommandIds().includes(command.command_id));
+  assert.equal(
+    extension.calls.nativeMessages.filter(
+      (message) => message.type === "command_acknowledged"
+        && message.command_id === command.command_id,
+    ).length,
+    1,
+  );
+});
+
+test("completed command IDs remain bounded under concurrent updates", async () => {
+  const extension = await createExtension();
+  const commandIds = Array.from({ length: 130 }, (_, index) => `completed-${index}`);
+
+  await Promise.all(commandIds.map((command_id) => extension.open({
+    type: "open_selected",
+    channels: [],
+    wake_browser: false,
+    command_id,
+  })));
+
+  assert.deepEqual(
+    extension.snapshotCompletedNativeCommandIds(),
+    commandIds.slice(-128),
+  );
+});
+
+test("stale native-port recovery commands are not acknowledged", async () => {
+  const extension = await createExtension();
+  await extension.open({
+    type: "open_selected",
+    command_id: "session-stale-open",
+    channels: [{ id: "channel-stale-port", login: "stale_port", unmuted: false }],
+    wake_browser: false,
+  });
+  const playerTabId = extension.snapshotManagedTabs()[0][1].playerTabId;
+  const command = {
+    type: "reload_managed_player_tabs",
+    command_id: "session-stale-reload",
+  };
+
+  await extension.openFromPort(command, {});
+  assert.deepEqual(extension.calls.tabReloads, []);
+  assert.equal(
+    extension.calls.nativeMessages.some((message) =>
+      message.type === "command_acknowledged"
+        && message.command_id === command.command_id,
+    ),
+    false,
+  );
+
+  await extension.openFromPort(command, extension.currentNativePort());
+  assert.deepEqual(extension.calls.tabReloads, [playerTabId]);
+  assert.ok(extension.calls.nativeMessages.some((message) =>
+    message.type === "command_acknowledged"
+      && message.command_id === command.command_id,
+  ));
+});
+test("in-flight stale-port commands are deduplicated without a stale acknowledgment", async () => {
+  const extension = await createExtension();
+  await extension.open({
+    type: "open_selected",
+    command_id: "session-inflight-open",
+    channels: [{ id: "channel-inflight-port", login: "inflight_port", unmuted: false }],
+    wake_browser: false,
+  });
+  const playerTabId = extension.snapshotManagedTabs()[0][1].playerTabId;
+  const stalePort = extension.currentNativePort();
+  const command = {
+    type: "reload_managed_player_tabs",
+    command_id: "session-inflight-reload",
+  };
+  const pause = extension.pauseNextTabReload();
+  const processing = extension.openFromPort(command, stalePort);
+  await pause.started;
+
+  extension.disconnectHost();
+  extension.reconnectHost();
+  const currentPort = extension.currentNativePort();
+  assert.notEqual(currentPort, stalePort);
+  pause.release();
+  await processing;
+
+  assert.deepEqual(extension.calls.tabReloads, [playerTabId]);
+  assert.equal(
+    extension.calls.nativeMessages.some((message) =>
+      message.type === "command_acknowledged"
+        && message.command_id === command.command_id,
+    ),
+    false,
+  );
+  await extension.openFromPort(command, currentPort);
+  assert.deepEqual(extension.calls.tabReloads, [playerTabId]);
+  assert.ok(extension.calls.nativeMessages.some((message) =>
+    message.type === "command_acknowledged"
+      && message.command_id === command.command_id,
+  ));
 });

@@ -9,6 +9,8 @@ impl eframe::App for Dashboard {
         self.poll_twitch_updates();
         self.poll_browser_port_check();
         self.poll_browser_bridge();
+        self.service_network_recovery();
+        self.service_pending_manual_open();
         let now = self.started_at.elapsed();
         let poll_interval = Duration::from_secs(1);
         self.reconcile_automatic_tabs(now);
@@ -50,14 +52,12 @@ impl eframe::App for Dashboard {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new(status).strong());
+                        if self.twitch_network_unavailable {
+                            ui.colored_label(egui::Color32::YELLOW, "NETWORK RECOVERING");
+                        }
                         if connecting {
                             if ui.button("Cancel").clicked() {
-                                if let Some(cancel) = self.twitch_cancel.take() {
-                                    cancel.store(true, Ordering::Release);
-                                }
-                                self.connection_generation =
-                                    self.connection_generation.wrapping_add(1);
-                                self.connection_status = TwitchConnectionStatus::Disconnected;
+                                self.cancel_twitch_connection();
                             }
                         } else if connected {
                             if ui.button("Disconnect").clicked() {

@@ -10,6 +10,13 @@ enum BrowserTabUpdate {
 const STREAM_LIMIT_EXTENSION_ERROR: &str =
     "Reload the browser extension (version 0.3.6 or newer) to enforce the two-stream limit.";
 
+const MANUAL_OPEN_INVENTORY_TIMEOUT: Duration = Duration::from_secs(10);
+const MANUAL_OPEN_INVENTORY_ERROR: &str =
+    "Browser extension is connected but has not reported Twitch-tab inventory. Reload or update the extension.";
+const COMMAND_ACK_REQUIRED_EXTENSION_ERROR: &str =
+    "Reload the browser extension (version 0.3.18 or newer) to enable reliable stream recovery.";
+const BRIDGE_COMMAND_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn browser_bridge_retry_due(retry_after: Option<Instant>, now: Instant) -> bool {
     retry_after.is_some_and(|retry_after| now >= retry_after)
 }
@@ -30,6 +37,15 @@ mod retry_tests {
     }
 }
 impl Dashboard {
+    pub(super) fn allocate_browser_command_id(&mut self) -> String {
+        let request_id = format!(
+            "{}-{}",
+            self.browser_command_session_id, self.next_browser_command_id
+        );
+        self.next_browser_command_id = self.next_browser_command_id.wrapping_add(1).max(1);
+        request_id
+    }
+
     pub(super) fn poll_browser_bridge(&mut self) {
         let now = Instant::now();
         if self.browser_bridge.is_none()
@@ -46,23 +62,29 @@ impl Dashboard {
         for event in events {
             match event {
                 BridgeEvent::Connected => {
+                    self.requeue_unacknowledged_browser_commands();
                     self.pending_stream_switch = None;
                     self.browser_connected = true;
+                    self.browser_command_ack_supported = false;
                     self.browser_launch_attempted = None;
                     self.external_stream_counts.clear();
                     self.external_unmatched_streams = 0;
                     self.external_inventory_received = false;
+                    self.pending_manual_open_inventory_wait_since = None;
                     self.auto_open_retry_after.clear();
                     self.browser_error = None;
                     self.browser_notice = None;
                     self.send_bridge_command(BrowserCommand::BridgeReady);
                 }
                 BridgeEvent::Disconnected => {
+                    self.requeue_unacknowledged_browser_commands();
                     self.pending_stream_switch = None;
                     self.browser_connected = false;
+                    self.browser_command_ack_supported = false;
                     self.external_stream_counts.clear();
                     self.external_unmatched_streams = 0;
                     self.external_inventory_received = false;
+                    self.pending_manual_open_inventory_wait_since = None;
                     self.browser_states.clear();
                     self.browser_notice = Some("Browser extension disconnected.".to_owned());
                     self.points_rotation
@@ -74,6 +96,14 @@ impl Dashboard {
                     self.handle_browser_message(message);
                 }
                 BridgeEvent::Message(BrowserMessage::Unknown(_)) => {}
+                BridgeEvent::CommandFailed {
+                    command,
+                    recovery_generation,
+                    message,
+                } => {
+                    self.handle_failed_bridge_command(command, recovery_generation, message);
+                }
+
                 BridgeEvent::Failed(message) => {
                     self.pending_stream_switch = None;
                     self.browser_error = Some(message);
@@ -82,12 +112,95 @@ impl Dashboard {
         }
     }
 
+    pub(super) fn requeue_unacknowledged_browser_commands(&mut self) {
+        let connection_generation = self.connection_generation;
+        if self
+            .pending_reload_command
+            .as_ref()
+            .is_some_and(|pending| pending.connection_generation != connection_generation)
+        {
+            self.pending_reload_command = None;
+        }
+        if let Some(pending) = self.pending_reload_command.as_mut() {
+            pending.sent_at = None;
+            self.reload_managed_player_tabs_pending = true;
+        }
+        let manual_command_is_current = self
+            .pending_manual_open_command
+            .as_ref()
+            .is_some_and(|pending| pending.connection_generation == connection_generation);
+        if manual_command_is_current {
+            if let Some(pending) = self.pending_manual_open_command.as_mut() {
+                pending.sent_at = None;
+            }
+            self.pending_manual_open = true;
+        } else if self.pending_manual_open_command.is_some() {
+            self.pending_manual_open_command = None;
+        }
+    }
+
+    pub(super) fn handle_failed_bridge_command(
+        &mut self,
+        command: BrowserCommand,
+        recovery_generation: Option<u64>,
+        message: String,
+    ) {
+        self.browser_error = Some(message);
+        self.browser_connected = false;
+        self.external_inventory_received = false;
+        self.pending_manual_open_inventory_wait_since = None;
+        if recovery_generation != Some(self.connection_generation)
+            || !matches!(
+                &self.connection_status,
+                TwitchConnectionStatus::Connected(_)
+            )
+        {
+            return;
+        }
+        match command {
+            BrowserCommand::ReloadManagedPlayerTabs { command_id } => {
+                if let Some(pending) = self.pending_reload_command.as_mut() {
+                    if pending.request_id == command_id
+                        && pending.connection_generation == self.connection_generation
+                    {
+                        pending.sent_at = None;
+                        self.reload_managed_player_tabs_pending = true;
+                    }
+                }
+            }
+            BrowserCommand::OpenSelected {
+                command_id,
+                manual_request: true,
+                ..
+            } => {
+                if self
+                    .pending_manual_open_command
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.request_id == command_id
+                            && pending.connection_generation == self.connection_generation
+                    })
+                {
+                    if let Some(pending) = self.pending_manual_open_command.as_mut() {
+                        pending.sent_at = None;
+                    }
+                    self.pending_manual_open = true;
+                    self.browser_notice = Some(
+                        "Open request will retry after the browser extension reconnects."
+                            .to_owned(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
     pub(super) fn retry_browser_bridge(&mut self) -> bool {
         if self.browser_bridge.is_some() {
             return true;
         }
         match BrowserBridge::start() {
             Ok(bridge) => {
+                bridge.set_recovery_generation(self.connection_generation);
                 self.browser_bridge = Some(bridge);
                 self.browser_bridge_retry_after = None;
                 self.browser_error = None;
@@ -107,8 +220,34 @@ impl Dashboard {
         }
     }
 
+    fn acknowledge_browser_command(&mut self, request_id: String) {
+        let connection_generation = self.connection_generation;
+        if self.pending_reload_command.as_ref().is_some_and(|pending| {
+            pending.request_id == request_id
+                && pending.connection_generation == connection_generation
+        }) {
+            self.pending_reload_command = None;
+            self.reload_managed_player_tabs_pending = false;
+        }
+        if self
+            .pending_manual_open_command
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request_id == request_id
+                    && pending.connection_generation == connection_generation
+            })
+        {
+            self.pending_manual_open_command = None;
+            self.pending_manual_open = false;
+            self.pending_manual_open_inventory_wait_since = None;
+        }
+    }
+
     pub(super) fn handle_browser_message(&mut self, message: KnownBrowserMessage) {
         match message {
+            KnownBrowserMessage::CommandAcknowledged { command_id } => {
+                self.acknowledge_browser_command(command_id);
+            }
             KnownBrowserMessage::ExternalStreams {
                 channel_counts,
                 unmatched_count,
@@ -142,7 +281,10 @@ impl Dashboard {
                             .retain(|channel_id, _| auto_open_channels.contains(channel_id));
                     }
                     self.external_inventory_received = true;
-                    if self.browser_error.as_deref() == Some(STREAM_LIMIT_EXTENSION_ERROR) {
+                    self.pending_manual_open_inventory_wait_since = None;
+                    if self.browser_error.as_deref() == Some(STREAM_LIMIT_EXTENSION_ERROR)
+                        || self.browser_error.as_deref() == Some(MANUAL_OPEN_INVENTORY_ERROR)
+                    {
                         self.browser_error = None;
                     }
                 } else {
@@ -151,9 +293,22 @@ impl Dashboard {
                 }
                 self.clear_offline_raid_redirects();
             }
-            KnownBrowserMessage::Ready => {
-                self.sync_extension_channels();
-                self.set_extension_preferred_quality();
+            KnownBrowserMessage::Ready {
+                command_acknowledgments,
+            } => {
+                self.browser_command_ack_supported = command_acknowledgments;
+                if command_acknowledgments {
+                    if self.browser_error.as_deref() == Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR) {
+                        self.browser_error = None;
+                    }
+                } else {
+                    self.external_inventory_received = false;
+                    self.browser_error = Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR.to_owned());
+                }
+                if command_acknowledgments {
+                    self.sync_extension_channels();
+                    self.set_extension_preferred_quality();
+                }
             }
             KnownBrowserMessage::TabOpened {
                 channel_id,
@@ -387,6 +542,11 @@ impl Dashboard {
                     channels,
                 } = pending;
                 self.auto_open_channels = desired_channels;
+                self.auto_open_channels.retain(|channel_id| {
+                    self.channels
+                        .iter()
+                        .any(|channel| &channel.id == channel_id)
+                });
                 for channel_id in channels.keys() {
                     self.auto_open_retry_after.remove(channel_id);
                 }
@@ -401,18 +561,177 @@ impl Dashboard {
             }
         }
     }
-
-    pub(super) fn send_bridge_command(&mut self, command: BrowserCommand) {
-        if !self.browser_connected {
-            self.browser_error = Some("Browser extension is not connected.".to_owned());
+    pub(super) fn service_network_recovery(&mut self) {
+        let stale_request = self
+            .pending_reload_command
+            .as_ref()
+            .is_some_and(|pending| pending.connection_generation != self.connection_generation);
+        if stale_request {
+            self.pending_reload_command = None;
+        }
+        if self.pending_reload_command.as_ref().is_some_and(|pending| {
+            pending
+                .sent_at
+                .is_some_and(|sent_at| sent_at.elapsed() < BRIDGE_COMMAND_ACK_TIMEOUT)
+        }) {
             return;
         }
+        if !self.reload_managed_player_tabs_pending
+            || !self.browser_command_ack_supported
+            || self.twitch_network_unavailable
+            || !matches!(
+                &self.connection_status,
+                TwitchConnectionStatus::Connected(_)
+            )
+            || self.connection_error.is_some()
+            || !self.browser_connected
+            || self.browser_error.is_some()
+            || !self.external_inventory_received
+        {
+            return;
+        }
+        let request_id = self
+            .pending_reload_command
+            .as_ref()
+            .map(|pending| pending.request_id.clone())
+            .unwrap_or_else(|| self.allocate_browser_command_id());
+        let connection_generation = self.connection_generation;
+        let sent = self.send_bridge_command(BrowserCommand::ReloadManagedPlayerTabs {
+            command_id: request_id.clone(),
+        });
+        self.pending_reload_command = Some(PendingBridgeCommand {
+            request_id,
+            connection_generation,
+            sent_at: sent.then(Instant::now),
+            command: None,
+        });
+    }
+
+    pub(super) fn service_pending_manual_open(&mut self) {
+        self.service_pending_manual_open_with(|dashboard, command| {
+            dashboard.send_bridge_command(command)
+        });
+    }
+
+    pub(super) fn service_pending_manual_open_with(
+        &mut self,
+        send: impl FnMut(&mut Self, BrowserCommand) -> bool,
+    ) {
+        if let Some(pending) = self.pending_manual_open_command.clone() {
+            let current_generation = pending.connection_generation == self.connection_generation;
+            if current_generation
+                && pending
+                    .sent_at
+                    .is_some_and(|sent_at| sent_at.elapsed() < BRIDGE_COMMAND_ACK_TIMEOUT)
+            {
+                return;
+            }
+            if current_generation {
+                if let Some(pending) = self.pending_manual_open_command.as_mut() {
+                    pending.sent_at = None;
+                }
+                self.pending_manual_open = true;
+            } else {
+                self.pending_manual_open_command = None;
+            }
+        }
+        if !self.pending_manual_open {
+            return;
+        }
+        let twitch_ready = !self.twitch_network_unavailable
+            && self.connection_error.is_none()
+            && matches!(
+                &self.connection_status,
+                TwitchConnectionStatus::Connected(_)
+            );
+        if !self.browser_command_ack_supported
+            || !self.browser_connected
+            || self.browser_error.is_some()
+        {
+            self.pending_manual_open_inventory_wait_since = None;
+            return;
+        }
+        if !self.external_inventory_received {
+            if twitch_ready {
+                let waiting_since = self
+                    .pending_manual_open_inventory_wait_since
+                    .get_or_insert_with(Instant::now);
+                if waiting_since.elapsed() >= MANUAL_OPEN_INVENTORY_TIMEOUT
+                    && self.browser_error.is_none()
+                {
+                    self.browser_error = Some(MANUAL_OPEN_INVENTORY_ERROR.to_owned());
+                }
+            } else {
+                self.pending_manual_open_inventory_wait_since = None;
+            }
+            return;
+        }
+        self.pending_manual_open_inventory_wait_since = None;
+        if !twitch_ready {
+            return;
+        }
+        self.pending_manual_open = false;
+        self.open_selected_twitch_channels_with(send);
+    }
+
+    pub(super) fn send_bridge_command(&mut self, command: BrowserCommand) -> bool {
+        if !self.browser_command_ack_supported
+            && matches!(
+                &command,
+                BrowserCommand::OpenSelected { .. }
+                    | BrowserCommand::ReloadManagedPlayerTabs { .. }
+            )
+        {
+            self.browser_error = Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR.to_owned());
+            return false;
+        }
+        if !self.browser_connected {
+            if self.browser_error.as_deref() != Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR) {
+                self.browser_error = Some("Browser extension is not connected.".to_owned());
+            }
+            return false;
+        }
         if let Some(bridge) = &self.browser_bridge {
-            if let Err(error) = bridge.send(command) {
-                self.browser_error = Some(error);
+            let result = match command {
+                BrowserCommand::OpenSelected {
+                    wake_browser,
+                    channels,
+                    command_id,
+                    manual_request,
+                } => bridge.send_recoverable(
+                    BrowserCommand::OpenSelected {
+                        wake_browser,
+                        channels,
+                        command_id,
+                        manual_request,
+                    },
+                    self.connection_generation,
+                ),
+                BrowserCommand::ReloadManagedPlayerTabs { command_id } => bridge.send_recoverable(
+                    BrowserCommand::ReloadManagedPlayerTabs { command_id },
+                    self.connection_generation,
+                ),
+                command => bridge.send(command),
+            };
+            match result {
+                Ok(()) => {
+                    if self.browser_error.as_deref() != Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR) {
+                        self.browser_error = None;
+                    }
+                    true
+                }
+                Err(error) => {
+                    if self.browser_error.as_deref() != Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR) {
+                        self.browser_error = Some(error);
+                    }
+                    false
+                }
             }
         } else {
-            self.browser_error = Some("Browser bridge listener is unavailable.".to_owned());
+            if self.browser_error.as_deref() != Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR) {
+                self.browser_error = Some("Browser bridge listener is unavailable.".to_owned());
+            }
+            false
         }
     }
 
@@ -460,13 +779,57 @@ impl Dashboard {
     }
 
     pub(super) fn open_selected_twitch_channels(&mut self) {
+        self.pending_manual_open_command = None;
+        self.open_selected_twitch_channels_with(|dashboard, command| {
+            dashboard.send_bridge_command(command)
+        });
+    }
+
+    pub(super) fn open_selected_twitch_channels_with(
+        &mut self,
+        mut send: impl FnMut(&mut Self, BrowserCommand) -> bool,
+    ) {
+        if !matches!(
+            &self.connection_status,
+            TwitchConnectionStatus::Connected(_)
+        ) || self.twitch_network_unavailable
+            || self.connection_error.is_some()
+        {
+            self.pending_manual_open = true;
+            self.browser_notice = Some(
+                "Open request queued until Twitch reconnects; it will use channels still selected when connectivity returns."
+                    .to_owned(),
+            );
+            return;
+        }
         if !self.browser_connected {
-            self.browser_error = Some("Browser extension is not connected.".to_owned());
+            self.pending_manual_open = true;
+            self.browser_notice =
+                Some("Open request queued until the browser extension reconnects.".to_owned());
             return;
         }
         if !self.external_inventory_received {
+            self.pending_manual_open = true;
             self.browser_notice =
-                Some("Scanning existing Twitch tabs; try again shortly.".to_owned());
+                Some("Open request queued until Twitch-tab inventory is ready.".to_owned());
+            return;
+        }
+        self.pending_manual_open = false;
+        let saved_manual_command = self
+            .pending_manual_open_command
+            .as_ref()
+            .filter(|pending| pending.connection_generation == self.connection_generation)
+            .and_then(|pending| pending.command.clone());
+        if let Some(command) = saved_manual_command {
+            let sent = send(self, command);
+            if let Some(pending) = self.pending_manual_open_command.as_mut() {
+                pending.sent_at = sent.then(Instant::now);
+            }
+            self.pending_manual_open = true;
+            self.browser_notice = Some(
+                "Each selected channel opens as one combined Twitch page in its own active window. Windows stay unfocused unless browser focus is enabled. App-opened player tabs start muted by default; channels marked Unmuted start with audio enabled."
+                    .to_owned(),
+            );
             return;
         }
 
@@ -525,14 +888,29 @@ impl Dashboard {
             .iter()
             .map(|index| BrowserChannel::from(&self.channels[*index]))
             .collect();
+        let request_id = self.allocate_browser_command_id();
+        let connection_generation = self.connection_generation;
+        let command = BrowserCommand::OpenSelected {
+            wake_browser: self.wake_browser_on_open,
+            channels,
+            command_id: request_id.clone(),
+            manual_request: true,
+        };
+        if !send(self, command.clone()) {
+            self.pending_manual_open = true;
+            return;
+        }
         self.manual_open_channels.extend(
             selected_indices
                 .iter()
                 .map(|index| self.channels[*index].id.clone()),
         );
-        self.send_bridge_command(BrowserCommand::OpenSelected {
-            wake_browser: self.wake_browser_on_open,
-            channels,
+        self.pending_manual_open = true;
+        self.pending_manual_open_command = Some(PendingBridgeCommand {
+            request_id,
+            connection_generation,
+            sent_at: Some(Instant::now()),
+            command: Some(command),
         });
         self.browser_notice = Some(
             "Each selected channel opens as one combined Twitch page in its own active window. Windows stay unfocused unless browser focus is enabled. App-opened player tabs start muted by default; channels marked Unmuted start with audio enabled."

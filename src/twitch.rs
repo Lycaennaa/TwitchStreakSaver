@@ -36,9 +36,24 @@ const OAUTH_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const FOLLOW_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+const NETWORK_RETRY_INITIAL: Duration = Duration::from_secs(2);
+const NETWORK_RETRY_MAX: Duration = Duration::from_secs(60);
 const MAX_FOLLOW_PAGES: usize = 1000;
 const MAX_HTTP_HEADER_BYTES: usize = 8192;
 const MAX_HTTP_BODY_BYTES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TwitchNetworkSource {
+    Connection,
+    FollowedChannels,
+    LiveStatus,
+}
+
+#[derive(Debug)]
+pub enum TwitchUpdateFailure {
+    Retryable(String),
+    Warning(String),
+}
 
 pub enum TwitchUpdate {
     Connected {
@@ -52,6 +67,12 @@ pub enum TwitchUpdate {
         channels: Vec<FollowedChannel>,
         live_channel_ids: HashSet<String>,
     },
+    FollowedChannels {
+        generation: u64,
+        channels: Vec<FollowedChannel>,
+        live_status_failure: TwitchUpdateFailure,
+    },
+
     LiveStatus {
         generation: u64,
         live_channel_ids: HashSet<String>,
@@ -60,6 +81,11 @@ pub enum TwitchUpdate {
         generation: u64,
         connected: bool,
         detail: Option<String>,
+    },
+    NetworkUnavailable {
+        generation: u64,
+        source: TwitchNetworkSource,
+        message: String,
     },
     PointsEarned {
         generation: u64,
@@ -96,14 +122,16 @@ pub enum TwitchUpdate {
 enum TwitchError {
     Cancelled,
     Reauthorize(String),
+    Retryable(String),
     Failed(String),
 }
-
 impl TwitchError {
     fn message(self) -> String {
         match self {
             Self::Cancelled => "Twitch connection cancelled".to_owned(),
-            Self::Reauthorize(message) | Self::Failed(message) => message,
+            Self::Reauthorize(message) | Self::Retryable(message) | Self::Failed(message) => {
+                message
+            }
         }
     }
 }

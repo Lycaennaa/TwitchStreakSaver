@@ -14,9 +14,7 @@ pub(super) fn validate_token(client: &Client, token: &str) -> Result<TwitchUser,
         .get(VALIDATE_URL)
         .header("Authorization", format!("OAuth {token}"))
         .send()
-        .map_err(|error| {
-            TwitchError::Failed(format!("Could not validate Twitch authorization: {error}"))
-        })?;
+        .map_err(|error| request_error(error, "Could not validate Twitch authorization"))?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
@@ -67,15 +65,32 @@ fn parse_response<T: for<'de> Deserialize<'de>>(
         )));
     }
     if !status.is_success() {
-        return Err(TwitchError::Failed(format!(
-            "Twitch could not {operation} (HTTP {status})."
-        )));
+        let message = format!("Twitch could not {operation} (HTTP {status}).");
+        return Err(
+            if status.is_server_error()
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            {
+                TwitchError::Retryable(message)
+            } else {
+                TwitchError::Failed(message)
+            },
+        );
     }
     response.json().map_err(|error| {
-        TwitchError::Failed(format!(
-            "Twitch returned invalid data while trying to {operation}: {error}"
-        ))
+        request_error(
+            error,
+            &format!("Twitch returned invalid data while trying to {operation}"),
+        )
     })
+}
+fn request_error(error: reqwest::Error, operation: &str) -> TwitchError {
+    let message = format!("{operation}: {error}");
+    if error.is_connect() || error.is_timeout() || error.is_body() {
+        TwitchError::Retryable(message)
+    } else {
+        TwitchError::Failed(message)
+    }
 }
 
 pub(super) fn fetch_followed_channels(
@@ -101,9 +116,9 @@ pub(super) fn fetch_followed_channels(
         if let Some(after) = cursor.as_deref() {
             request = request.query(&[("after", after)]);
         }
-        let response = request.send().map_err(|error| {
-            TwitchError::Failed(format!("Could not load followed Twitch channels: {error}"))
-        })?;
+        let response = request
+            .send()
+            .map_err(|error| request_error(error, "Could not load followed Twitch channels"))?;
         let page: FollowedResponse = parse_response(response, "load followed channels")?;
         for record in page.data {
             if channel_ids.insert(record.broadcaster_id.clone()) {
@@ -150,9 +165,7 @@ pub(super) fn fetch_live_channel_ids(
             .bearer_auth(token)
             .query(&user_ids)
             .send()
-            .map_err(|error| {
-                TwitchError::Failed(format!("Could not load Twitch live status: {error}"))
-            })?;
+            .map_err(|error| request_error(error, "Could not load Twitch live status"))?;
         let streams: StreamsResponse = parse_response(response, "load live status")?;
         live_ids.extend(streams.data.into_iter().map(|stream| stream.user_id));
     }

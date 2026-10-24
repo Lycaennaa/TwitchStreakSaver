@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserCommand {
     BridgeReady,
@@ -20,14 +20,19 @@ pub enum BrowserCommand {
     OpenSelected {
         wake_browser: bool,
         channels: Vec<BrowserChannel>,
+        command_id: String,
+        manual_request: bool,
     },
     CloseAll,
+    ReloadManagedPlayerTabs {
+        command_id: String,
+    },
     CloseChannels {
         channel_ids: Vec<String>,
     },
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct BrowserChannel {
     id: String,
     login: String,
@@ -54,7 +59,13 @@ pub enum BrowserMessage {
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KnownBrowserMessage {
-    Ready,
+    Ready {
+        #[serde(default)]
+        command_acknowledgments: bool,
+    },
+    CommandAcknowledged {
+        command_id: String,
+    },
     ExternalStreams {
         #[serde(deserialize_with = "deserialize_channel_counts")]
         channel_counts: HashMap<String, usize>,
@@ -209,6 +220,8 @@ mod tests {
         let command = BrowserCommand::OpenSelected {
             wake_browser: true,
             channels: vec![BrowserChannel::from(&channel)],
+            command_id: "session-7".to_owned(),
+            manual_request: true,
         };
 
         assert_eq!(
@@ -217,9 +230,42 @@ mod tests {
                 "type": "open_selected",
                 "wake_browser": true,
                 "channels": [{"id": "123", "login": "streamer", "unmuted": true}],
+                "command_id": "session-7",
+                "manual_request": true,
             }),
         );
     }
+
+    #[test]
+    fn command_acknowledgment_decodes_request_id() {
+        let message: BrowserMessage = serde_json::from_value(json!({
+            "type": "command_acknowledged",
+            "command_id": "session-7",
+        }))
+        .unwrap();
+
+        assert_eq!(
+            message,
+            BrowserMessage::Known(KnownBrowserMessage::CommandAcknowledged {
+                command_id: "session-7".to_owned(),
+            })
+        );
+    }
+    #[test]
+    fn legacy_ready_without_ack_capability_defaults_to_unsupported() {
+        let message: BrowserMessage = serde_json::from_value(json!({
+            "type": "ready",
+        }))
+        .unwrap();
+
+        assert_eq!(
+            message,
+            BrowserMessage::Known(KnownBrowserMessage::Ready {
+                command_acknowledgments: false,
+            })
+        );
+    }
+
     #[test]
     fn channel_sync_includes_raid_redirect_setting() {
         let command = BrowserCommand::SyncChannels {

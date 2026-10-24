@@ -7,10 +7,12 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 const BRIDGE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+// Bound the complete socket write because recoverable sends hold the generation lock.
+const BRIDGE_COMMAND_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 mod registration;
 
 pub const NATIVE_HOST_NAME: &str = "com.twitchstreaksaver.bridge";
@@ -24,12 +26,23 @@ pub enum BridgeEvent {
     Disconnected,
     Message(BrowserMessage),
     Failed(String),
+    CommandFailed {
+        command: BrowserCommand,
+        recovery_generation: Option<u64>,
+        message: String,
+    },
+}
+
+struct QueuedBrowserCommand {
+    command: BrowserCommand,
+    recovery_generation: Option<u64>,
 }
 
 pub struct BrowserBridge {
-    commands: Sender<BrowserCommand>,
+    commands: Sender<QueuedBrowserCommand>,
     events: Receiver<BridgeEvent>,
     stop: Arc<AtomicBool>,
+    recovery_generation: Arc<Mutex<u64>>,
     server: Option<JoinHandle<()>>,
     registration_server: Option<JoinHandle<()>>,
 }
@@ -58,9 +71,19 @@ impl BrowserBridge {
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = Arc::clone(&stop);
         let server_events = event_tx.clone();
+        let recovery_generation = Arc::new(Mutex::new(0));
+        let server_recovery_generation = Arc::clone(&recovery_generation);
         let server = thread::Builder::new()
             .name("browser-native-bridge".to_owned())
-            .spawn(move || serve(listener, command_rx, server_events, server_stop))
+            .spawn(move || {
+                serve(
+                    listener,
+                    command_rx,
+                    server_events,
+                    server_stop,
+                    server_recovery_generation,
+                )
+            })
             .map_err(|error| format!("Could not start browser bridge: {error}"))?;
 
         let registration_stop = Arc::clone(&stop);
@@ -87,20 +110,47 @@ impl BrowserBridge {
             commands: command_tx,
             events: event_rx,
             stop,
+            recovery_generation,
             server: Some(server),
             registration_server: Some(registration_server),
         })
     }
-
     pub fn send(&self, command: BrowserCommand) -> Result<(), String> {
+        self.enqueue(command, None)
+    }
+
+    pub fn send_recoverable(
+        &self,
+        command: BrowserCommand,
+        recovery_generation: u64,
+    ) -> Result<(), String> {
+        self.enqueue(command, Some(recovery_generation))
+    }
+
+    pub fn set_recovery_generation(&self, generation: u64) {
+        update_recovery_generation(&self.recovery_generation, generation);
+    }
+    fn enqueue(
+        &self,
+        command: BrowserCommand,
+        recovery_generation: Option<u64>,
+    ) -> Result<(), String> {
         self.commands
-            .send(command)
+            .send(QueuedBrowserCommand {
+                command,
+                recovery_generation,
+            })
             .map_err(|_| "Browser bridge is not running.".to_owned())
     }
 
     pub fn try_recv(&self) -> Result<BridgeEvent, TryRecvError> {
         self.events.try_recv()
     }
+}
+fn update_recovery_generation(recovery_generation: &Mutex<u64>, generation: u64) {
+    *recovery_generation
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = generation;
 }
 
 impl Drop for BrowserBridge {
@@ -117,13 +167,16 @@ impl Drop for BrowserBridge {
 
 fn serve(
     listener: TcpListener,
-    commands: Receiver<BrowserCommand>,
+    commands: Receiver<QueuedBrowserCommand>,
     events: Sender<BridgeEvent>,
     stop: Arc<AtomicBool>,
+    recovery_generation: Arc<Mutex<u64>>,
 ) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
-            Ok((stream, _)) => handle_connection(stream, &commands, &events, &stop),
+            Ok((stream, _)) => {
+                handle_connection(stream, &commands, &events, &stop, &recovery_generation)
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
             }
@@ -136,12 +189,48 @@ fn serve(
         }
     }
 }
+fn send_command(
+    queued_command: QueuedBrowserCommand,
+    current_recovery_generation: &Mutex<u64>,
+    events: &mpsc::Sender<BridgeEvent>,
+    write: impl FnOnce(&BrowserCommand) -> std::io::Result<()>,
+) -> bool {
+    let QueuedBrowserCommand {
+        command,
+        recovery_generation,
+    } = queued_command;
+    let generation_guard = recovery_generation.map(|saved_generation| {
+        let current_generation = current_recovery_generation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (saved_generation, current_generation)
+    });
+    if generation_guard
+        .as_ref()
+        .is_some_and(|(saved_generation, current_generation)| {
+            *saved_generation != **current_generation
+        })
+    {
+        return true;
+    }
+    if let Err(error) = write(&command) {
+        let _ = events.send(BridgeEvent::CommandFailed {
+            command,
+            recovery_generation,
+            message: format!("Could not send command to browser: {error}"),
+        });
+        false
+    } else {
+        true
+    }
+}
 
 fn handle_connection(
     mut stream: TcpStream,
-    commands: &Receiver<BrowserCommand>,
+    commands: &Receiver<QueuedBrowserCommand>,
     events: &Sender<BridgeEvent>,
     stop: &AtomicBool,
+    recovery_generation: &Mutex<u64>,
 ) {
     if let Err(error) = stream.set_nonblocking(false) {
         let _ = events.send(BridgeEvent::Failed(format!(
@@ -184,7 +273,7 @@ fn handle_connection(
         reader_active.store(false, Ordering::Release);
     });
     let ready = match incoming_rx.recv_timeout(BRIDGE_HANDSHAKE_TIMEOUT) {
-        Ok(message @ BrowserMessage::Known(KnownBrowserMessage::Ready)) => {
+        Ok(message @ BrowserMessage::Known(KnownBrowserMessage::Ready { .. })) => {
             let _ = events.send(BridgeEvent::Connected);
             let _ = events.send(BridgeEvent::Message(message));
             true
@@ -218,10 +307,9 @@ fn handle_connection(
         }
         match commands.recv_timeout(Duration::from_millis(50)) {
             Ok(command) => {
-                if let Err(error) = write_message(&mut stream, &command) {
-                    let _ = events.send(BridgeEvent::Failed(format!(
-                        "Could not send command to browser: {error}"
-                    )));
+                if !send_command(command, recovery_generation, events, |command| {
+                    write_command_with_timeout(&mut stream, command)
+                }) {
                     break;
                 }
             }
@@ -270,6 +358,43 @@ pub fn write_message(writer: &mut impl Write, message: &impl Serialize) -> io::R
     writer.write_all(&length.to_le_bytes())?;
     writer.write_all(&payload)?;
     writer.flush()
+}
+struct CommandWriteDeadline<'a> {
+    stream: &'a mut TcpStream,
+    deadline: Instant,
+}
+
+impl CommandWriteDeadline<'_> {
+    fn set_stream_write_timeout(&self) -> io::Result<()> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Browser command write timed out",
+            ));
+        }
+        self.stream.set_write_timeout(Some(remaining))
+    }
+}
+
+impl Write for CommandWriteDeadline<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.set_stream_write_timeout()?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.set_stream_write_timeout()?;
+        self.stream.flush()
+    }
+}
+
+fn write_command_with_timeout(stream: &mut TcpStream, command: &BrowserCommand) -> io::Result<()> {
+    let mut writer = CommandWriteDeadline {
+        stream,
+        deadline: Instant::now() + BRIDGE_COMMAND_WRITE_TIMEOUT,
+    };
+    write_message(&mut writer, command)
 }
 
 fn install_native_host() -> Result<(), String> {
@@ -423,12 +548,15 @@ fn register_windows_hosts(manifest_path: &std::path::Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::{
-        native_host_manifest, native_manifest_paths, read_message,
-        windows_native_host_registry_paths, write_message, NATIVE_HOST_NAME, TRUSTED_EXTENSION_ID,
+        native_host_manifest, native_manifest_paths, read_message, send_command,
+        update_recovery_generation, windows_native_host_registry_paths, write_message, BridgeEvent,
+        BrowserCommand, QueuedBrowserCommand, NATIVE_HOST_NAME, TRUSTED_EXTENSION_ID,
     };
     use serde_json::{json, Value};
     use std::io::Cursor;
     use std::path::Path;
+    use std::sync::mpsc;
+    use std::sync::Mutex;
 
     #[test]
     fn native_message_frames_round_trip_json() {
@@ -463,6 +591,7 @@ mod tests {
                 &command_rx,
                 &event_tx,
                 &Arc::new(AtomicBool::new(false)),
+                &Mutex::new(0),
             )
         });
 
@@ -500,6 +629,7 @@ mod tests {
                 &command_rx,
                 &event_tx,
                 &Arc::new(AtomicBool::new(false)),
+                &Mutex::new(0),
             )
         });
 
@@ -512,7 +642,9 @@ mod tests {
         assert!(matches!(
             ready,
             BridgeEvent::Message(crate::browser_protocol::BrowserMessage::Known(
-                crate::browser_protocol::KnownBrowserMessage::Ready
+                crate::browser_protocol::KnownBrowserMessage::Ready {
+                    command_acknowledgments: false,
+                }
             ))
         ));
         drop(client);
@@ -569,5 +701,75 @@ mod tests {
                     .join(file_name),
             ]
         );
+    }
+    #[test]
+    fn failed_bridge_command_write_reports_recoverable_command() {
+        let (events, received) = mpsc::channel();
+        assert!(!send_command(
+            QueuedBrowserCommand {
+                command: BrowserCommand::ReloadManagedPlayerTabs {
+                    command_id: "session-9".to_owned(),
+                },
+                recovery_generation: Some(9),
+            },
+            &Mutex::new(9),
+            &events,
+            |_| Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "socket closed",
+            )),
+        ));
+        assert!(matches!(
+            received.recv().unwrap(),
+            BridgeEvent::CommandFailed {
+                command: BrowserCommand::ReloadManagedPlayerTabs {
+                    command_id,
+                },
+                recovery_generation: Some(9),
+                message,
+            } if command_id == "session-9"
+                && message.contains("Could not send command to browser")
+        ));
+    }
+    #[test]
+    fn queued_command_is_discarded_when_recovery_generation_advances() {
+        let (events, received) = mpsc::channel();
+        let current_generation = Mutex::new(9);
+        let queued_command = QueuedBrowserCommand {
+            command: BrowserCommand::ReloadManagedPlayerTabs {
+                command_id: "stale-session".to_owned(),
+            },
+            recovery_generation: Some(9),
+        };
+
+        assert!(send_command(
+            QueuedBrowserCommand {
+                command: BrowserCommand::ReloadManagedPlayerTabs {
+                    command_id: "session-9".to_owned(),
+                },
+                recovery_generation: Some(9),
+            },
+            &current_generation,
+            &events,
+            |_| {
+                assert!(current_generation.try_lock().is_err());
+                Ok(())
+            },
+        ));
+        update_recovery_generation(&current_generation, 10);
+
+        let mut wrote_stale_command = false;
+        assert!(send_command(
+            queued_command,
+            &current_generation,
+            &events,
+            |_| {
+                wrote_stale_command = true;
+                Ok(())
+            },
+        ));
+
+        assert!(!wrote_stale_command);
+        assert!(received.try_recv().is_err());
     }
 }

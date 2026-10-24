@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use twitch_streak_saver::browser_bridge::{
     BridgeEvent, BrowserBridge, EXTENSION_REGISTRATION_ADDRESS,
 };
@@ -20,7 +20,7 @@ use twitch_streak_saver::scheduler::{
     APP_STREAM_LIMIT, STREAM_TURN_DURATION,
 };
 use twitch_streak_saver::twitch as twitch_api;
-use twitch_streak_saver::twitch::TwitchUpdate;
+use twitch_streak_saver::twitch::{TwitchNetworkSource, TwitchUpdate, TwitchUpdateFailure};
 #[path = "main/activity_log.rs"]
 mod activity_log;
 use activity_log::{
@@ -82,10 +82,7 @@ fn resume_due_auto_open_retries(
 ) -> Vec<String> {
     let due = retry_after
         .iter()
-        .filter_map(|(channel_id, retry_at)| {
-            (auto_open_channels.contains(channel_id) && *retry_at <= now)
-                .then(|| channel_id.clone())
-        })
+        .filter_map(|(channel_id, retry_at)| (*retry_at <= now).then(|| channel_id.clone()))
         .collect::<Vec<_>>();
     if !defer {
         for channel_id in &due {
@@ -320,6 +317,14 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[derive(Clone)]
+struct PendingBridgeCommand {
+    request_id: String,
+    connection_generation: u64,
+    sent_at: Option<Instant>,
+    command: Option<BrowserCommand>,
+}
+
 struct Dashboard {
     #[cfg(target_os = "windows")]
     start_with_windows: bool,
@@ -340,6 +345,15 @@ struct Dashboard {
     started_at: Instant,
     connection_status: TwitchConnectionStatus,
     connection_error: Option<String>,
+    twitch_network_unavailable: bool,
+    twitch_network_errors: HashMap<TwitchNetworkSource, String>,
+    reload_managed_player_tabs_pending: bool,
+    pending_manual_open: bool,
+    pending_manual_open_inventory_wait_since: Option<Instant>,
+    next_browser_command_id: u64,
+    browser_command_session_id: String,
+    pending_reload_command: Option<PendingBridgeCommand>,
+    pending_manual_open_command: Option<PendingBridgeCommand>,
     live_channel_ids: HashSet<String>,
     connection_generation: u64,
     twitch_cancel: Option<Arc<AtomicBool>>,
@@ -351,6 +365,7 @@ struct Dashboard {
     browser_bridge: Option<BrowserBridge>,
     browser_bridge_retry_after: Option<Instant>,
     browser_connected: bool,
+    browser_command_ack_supported: bool,
     browser_error: Option<String>,
     browser_notice: Option<String>,
     browser_states: HashMap<String, BrowserChannelState>,
@@ -359,6 +374,10 @@ struct Dashboard {
     external_inventory_received: bool,
     pubsub_connected: bool,
     pubsub_error: Option<String>,
+    twitch_baseline_confirmed_at: Option<Instant>,
+    pubsub_state_confirmed_at: Option<Instant>,
+    pubsub_last_event_at: Option<Instant>,
+    pubsub_missed_events_since: Option<Instant>,
     streak_completed: HashMap<String, u64>,
     notified_streak_channels: HashSet<String>,
     activity_log: VecDeque<ActivityLogEntry>,
@@ -422,6 +441,19 @@ impl Dashboard {
             started_at: Instant::now(),
             connection_status: TwitchConnectionStatus::Disconnected,
             connection_error: None,
+            twitch_network_unavailable: false,
+            twitch_network_errors: HashMap::new(),
+            reload_managed_player_tabs_pending: false,
+            pending_manual_open: false,
+            pending_manual_open_inventory_wait_since: None,
+            next_browser_command_id: 1,
+            browser_command_session_id: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+                .to_string(),
+            pending_reload_command: None,
+            pending_manual_open_command: None,
             live_channel_ids: HashSet::new(),
             connection_generation: 0,
             twitch_cancel: None,
@@ -430,6 +462,7 @@ impl Dashboard {
             browser_bridge,
             browser_bridge_retry_after,
             browser_connected: false,
+            browser_command_ack_supported: false,
             browser_error,
             browser_port_check_sender,
             browser_port_check_receiver,
@@ -441,6 +474,10 @@ impl Dashboard {
             external_inventory_received: false,
             pubsub_connected: false,
             pubsub_error: None,
+            twitch_baseline_confirmed_at: None,
+            pubsub_state_confirmed_at: None,
+            pubsub_last_event_at: None,
+            pubsub_missed_events_since: None,
             streak_completed: HashMap::new(),
             notified_streak_channels: HashSet::new(),
             activity_log: VecDeque::new(),

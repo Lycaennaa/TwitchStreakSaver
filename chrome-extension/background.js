@@ -15,6 +15,27 @@ let externalScanTimer = null;
 let externalScanGeneration = 0;
 let nativeCommandQueue = Promise.resolve();
 const MAX_CONCURRENT_CHANNEL_OPENS = 2;
+const MAX_COMPLETED_NATIVE_COMMAND_IDS = 128;
+const completedNativeCommandIds = new Set();
+let completedNativeCommandIdOrder = [];
+const COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY = "completedNativeCommandIds";
+let completedNativeCommandIdSaveQueue = Promise.resolve();
+const completedNativeCommandIdsReady = chrome.storage.local
+  .get(COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY)
+  .then((stored) => {
+    const storedIds = stored?.[COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY];
+    if (!Array.isArray(storedIds)) return;
+    for (const commandId of storedIds) {
+      if (!isValidNativeCommandId(commandId) || completedNativeCommandIds.has(commandId)) {
+        continue;
+      }
+      completedNativeCommandIds.add(commandId);
+      completedNativeCommandIdOrder.push(commandId);
+      if (completedNativeCommandIdOrder.length > MAX_COMPLETED_NATIVE_COMMAND_IDS) {
+        completedNativeCommandIds.delete(completedNativeCommandIdOrder.shift());
+      }
+    }
+  });
 let nativeSyncPromise = null;
 const BROWSER_STARTUP_EVENT_GRACE_PERIOD_MS = 100;
 let browserStartupOwnershipReset = Promise.resolve();
@@ -148,7 +169,7 @@ function connectNativeHost() {
     port.onDisconnect.addListener(() => {
       handleNativePortDisconnect(port, chrome.runtime.lastError);
     });
-    port.postMessage({ type: "ready" });
+    port.postMessage({ type: "ready", command_acknowledgments: true });
   } catch (error) {
     if (port) {
       if (nativePort === port) handleNativePortDisconnect(port, error);
@@ -196,13 +217,58 @@ function sendNative(message) {
   }
 }
 
+async function acknowledgeNativeCommand(message, sourcePort) {
+  const commandId = message?.command_id;
+  if (!isValidNativeCommandId(commandId)) return;
+  await persistCompletedNativeCommand(commandId);
+  if (nativePort !== sourcePort) return;
+  sendNative({ type: "command_acknowledged", command_id: commandId });
+}
+
+function isValidNativeCommandId(commandId) {
+  return typeof commandId === "string"
+    && commandId.length > 0
+    && commandId.length <= 128;
+}
+
+async function persistCompletedNativeCommand(commandId) {
+  await completedNativeCommandIdsReady;
+  const save = completedNativeCommandIdSaveQueue.then(async () => {
+    if (completedNativeCommandIds.has(commandId)) return;
+    const nextOrder = [...completedNativeCommandIdOrder, commandId]
+      .slice(-MAX_COMPLETED_NATIVE_COMMAND_IDS);
+    await chrome.storage.local.set({
+      [COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY]: nextOrder,
+    });
+    completedNativeCommandIdOrder = nextOrder;
+    completedNativeCommandIds.clear();
+    for (const completedId of nextOrder) {
+      completedNativeCommandIds.add(completedId);
+    }
+  });
+  completedNativeCommandIdSaveQueue = save.catch(() => {});
+  await save;
+}
+
 function setMonitoring(tabId, type) {
   void chrome.tabs.sendMessage(tabId, { type }).catch(() => {});
 }
 
 async function handleNativeCommand(message, sourcePort = nativePort) {
   await restorePromise;
+  await completedNativeCommandIdsReady;
   if (nativePort !== sourcePort) return;
+  const recoverableCommand = message?.type === "open_selected"
+    || message?.type === "reload_managed_player_tabs";
+  const commandId = message?.command_id;
+  if (
+    recoverableCommand
+    && typeof commandId === "string"
+    && completedNativeCommandIds.has(commandId)
+  ) {
+    sendNative({ type: "command_acknowledged", command_id: commandId });
+    return;
+  }
   switch (message?.type) {
     case "bridge_ready":
       nativeBridgeReadyPort = sourcePort;
@@ -240,12 +306,26 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
       break;
     }
       break;
+    case "reload_managed_player_tabs":
+      for (const record of TwitchManagedTabs.recordValues()) {
+        for (const [surface, tabId] of TwitchManagedTabs.managedSurfaceTabs(record)) {
+          if (surface !== "player") continue;
+          try {
+            await chrome.tabs.reload(tabId);
+          } catch (error) {
+            console.warn("Could not reload an app-managed Twitch player after network recovery.", error);
+          }
+        }
+      }
+      await acknowledgeNativeCommand(message, sourcePort);
+      break;
     case "open_selected":
       await openChannels(
         message.channels || [],
         message.wake_browser === true,
         sourcePort,
       );
+      await acknowledgeNativeCommand(message, sourcePort);
       break;
     case "close_all":
       await closeAllChannels();
