@@ -299,6 +299,7 @@ fn selected_channel_indices(channels: &[FollowedChannel], limit: usize) -> Vec<u
         .collect()
 }
 const PREFERENCES_KEY: &str = "preferences";
+const ACTIVITY_LOG_KEY: &str = "activity_log";
 const BROWSER_EXTENSION_ID: &str = include_str!("../chrome-extension/trusted-extension-id");
 const BROWSER_BRIDGE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
@@ -401,6 +402,13 @@ impl Dashboard {
             .storage
             .and_then(|storage| eframe::get_value::<AppPreferences>(storage, PREFERENCES_KEY))
             .unwrap_or_default();
+        let mut activity_log = creation_context
+            .storage
+            .and_then(|storage| {
+                eframe::get_value::<VecDeque<ActivityLogEntry>>(storage, ACTIVITY_LOG_KEY)
+            })
+            .unwrap_or_default();
+        activity_log.truncate(activity_log::MAX_ACTIVITY_LOG_ENTRIES);
         let browser_profile_data_directories = preferences.browser_profile_data_directories;
         let browser_profile_roots =
             browser_setup::detected_browser_profile_roots(&browser_profile_data_directories);
@@ -480,7 +488,7 @@ impl Dashboard {
             pubsub_missed_events_since: None,
             streak_completed: HashMap::new(),
             notified_streak_channels: HashSet::new(),
-            activity_log: VecDeque::new(),
+            activity_log,
             activity_log_kind_filter: None,
             activity_log_search: String::new(),
             channel_points_balances: HashMap::new(),

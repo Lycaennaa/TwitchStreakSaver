@@ -3,6 +3,7 @@ use super::*;
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PREFERENCES_KEY, &self.preferences());
+        eframe::set_value(storage, super::ACTIVITY_LOG_KEY, &self.activity_log);
     }
 
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
@@ -144,6 +145,31 @@ impl Dashboard {
                         }
                     });
             });
+                ui.collapsing("Daily summaries", |ui| {
+                    let summaries = super::activity_log::daily_activity_summaries(activity_log);
+                    if summaries.is_empty() {
+                        ui.label("No retained activity to summarize.");
+                        return;
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(100.0)
+                        .show(ui, |ui| {
+                            for summary in summaries {
+                                ui.label(format!(
+                                    "{} — {} streak completions, {} points-earned events, {} points-spent events, {} bonus notices, {} points turns, {} streak turns, {} stream switches, {} stream openings",
+                                    summary.date,
+                                    summary.streaks_completed,
+                                    summary.points_earned_events,
+                                    summary.points_spent_events,
+                                    summary.bonuses_available,
+                                    summary.points_turns_completed,
+                                    summary.streak_turns_ended,
+                                    summary.stream_switches,
+                                    summary.streams_opened,
+                                ));
+                            }
+                        });
+                });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -156,7 +182,7 @@ impl Dashboard {
                         .num_columns(3)
                         .striped(true)
                         .show(ui, |ui| {
-                            ui.strong("Time");
+                        ui.strong("Date/time");
                             ui.strong("Streamer");
                             ui.strong("Event");
                             ui.end_row();
@@ -451,7 +477,7 @@ mod tests {
     #[test]
     fn activity_log_filters_by_kind_and_fuzzy_text_across_fields() {
         let entry = ActivityLogEntry {
-            time: "21:15:09".to_owned(),
+            time: "2026-10-19 21:15:09".to_owned(),
             streamer: "Streamer One".to_owned(),
             event: "Watch Streak completed; reward: 400 points.".to_owned(),
             kind: ActivityLogKind::WatchStreak,
@@ -465,7 +491,7 @@ mod tests {
         assert!(activity_log_matches(&entry, None, "strmr"));
         assert!(activity_log_matches(&entry, None, "211509"));
         let points_entry = ActivityLogEntry {
-            time: "21:15:10".to_owned(),
+            time: "2026-10-19 21:15:10".to_owned(),
             streamer: "Streamer Two".to_owned(),
             event: "Earned 400 points (CLAIM); new balance: 400.".to_owned(),
             kind: ActivityLogKind::PointsEarned,
