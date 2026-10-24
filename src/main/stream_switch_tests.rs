@@ -78,6 +78,20 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         raid_redirected_channels: HashSet::new(),
         removed_auto_streamer_names: HashMap::new(),
         pending_stream_switch: None,
+        twitch_network_unavailable: false,
+        twitch_network_errors: HashMap::new(),
+        reload_managed_player_tabs_pending: false,
+        pending_manual_open: false,
+        pending_manual_open_inventory_wait_since: None,
+        next_browser_command_id: 1,
+        browser_command_session_id: "test-session".to_owned(),
+        pending_reload_command: None,
+        pending_manual_open_command: None,
+        browser_command_ack_supported: true,
+        twitch_baseline_confirmed_at: None,
+        pubsub_state_confirmed_at: None,
+        pubsub_last_event_at: None,
+        pubsub_missed_events_since: None,
         auto_open_retry_after: HashMap::new(),
     };
     dashboard.browser_connected = false;
@@ -92,9 +106,153 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
     dashboard.browser_connected = true;
     dashboard.external_inventory_received = true;
 
-    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, _| true);
 
     dashboard
+}
+
+#[test]
+fn queue_visibility_keeps_candidates_visible_when_stream_capacity_is_full() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.external_unmatched_streams = super::APP_STREAM_LIMIT;
+
+    let queue = dashboard.queue_visibility();
+
+    assert_eq!(queue.open_capacity, 0);
+    assert_eq!(queue.entries[0].channel_id, "new");
+    assert!(queue
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("capacity is full")));
+}
+
+#[test]
+fn offline_selected_channels_are_shown_as_waiting_to_go_live() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.live_channel_ids.clear();
+
+    let queue = dashboard.queue_visibility();
+
+    assert!(queue.entries.is_empty());
+    assert_eq!(queue.offline_waiting.len(), 1);
+    assert_eq!(queue.offline_waiting[0].channel_id, "new");
+    assert_eq!(queue.offline_waiting[0].display_name, "New Streamer");
+}
+
+#[test]
+fn queue_visibility_separates_turn_readiness_from_open_blockers() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.external_inventory_received = false;
+    dashboard.connection_status = TwitchConnectionStatus::Disconnected;
+    dashboard.automation_enabled = false;
+    let now = std::time::Instant::now();
+    dashboard.browser_states.insert(
+        "new".to_owned(),
+        BrowserChannelState {
+            player_tab_id: Some(1),
+            chat_tab_id: Some(2),
+            player_state: Some(super::PlayerState::Playing),
+            chat_state: Some(super::ChatState::Ready),
+            player_last_seen: Some(now),
+            chat_last_seen: Some(now),
+        },
+    );
+
+    let queue = dashboard.queue_visibility();
+
+    let entry = queue
+        .entries
+        .iter()
+        .find(|entry| entry.channel_id == "new")
+        .unwrap();
+    assert!(entry.player_ready);
+    assert!(entry.chat_ready);
+    assert!(queue
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("Start automation")));
+    assert!(queue
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("Connect Twitch")));
+    assert!(queue
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("tab inventory")));
+    assert!(!queue.blockers.iter().any(|blocker| {
+        blocker.to_ascii_lowercase().contains("player")
+            || blocker.to_ascii_lowercase().contains("chat")
+    }));
+}
+
+#[test]
+fn queue_preview_expires_deferred_streaks_while_browser_is_unavailable() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let mut points = FollowedChannel::new("points", "Points Channel");
+    points.selection.points = true;
+    dashboard.channels.push(points);
+    dashboard.live_channel_ids.insert("points".to_owned());
+    dashboard
+        .queue_planner
+        .record_streak_turn_timed_out("new", Duration::ZERO);
+    dashboard.browser_connected = false;
+    dashboard.external_inventory_received = false;
+
+    assert_eq!(
+        dashboard.queue_visibility().stage,
+        super::QueueStage::Points
+    );
+
+    dashboard.reconcile_automatic_tabs_with(super::STREAM_TURN_DURATION, |_, _| true);
+
+    let queue = dashboard.queue_visibility();
+    assert_eq!(queue.stage, super::QueueStage::Streak);
+    assert_eq!(queue.entries[0].channel_id, "new");
+}
+
+#[test]
+fn queue_visibility_blocks_opening_without_command_acknowledgements() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.browser_command_ack_supported = false;
+
+    let queue = dashboard.queue_visibility();
+
+    assert!(!queue.entries.is_empty());
+    assert!(queue
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("0.3.18") && blocker.contains("acknowledgements")));
+}
+
+#[test]
+fn streak_deferral_survives_twitch_disconnect_until_expiry() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let mut points = FollowedChannel::new("points", "Points Channel");
+    points.selection.points = true;
+    dashboard.channels.push(points);
+    dashboard.live_channel_ids.insert("points".to_owned());
+    dashboard
+        .queue_planner
+        .record_streak_turn_timed_out("new", Duration::ZERO);
+    dashboard.connection_status = TwitchConnectionStatus::Disconnected;
+    dashboard.live_channel_ids.clear();
+
+    dashboard.reconcile_automatic_tabs_with(Duration::from_secs(10), |_, _| true);
+
+    dashboard.connection_status = TwitchConnectionStatus::Connected("test".to_owned());
+    dashboard.live_channel_ids.insert("new".to_owned());
+    dashboard.live_channel_ids.insert("points".to_owned());
+    dashboard.reconcile_automatic_tabs_with(Duration::from_secs(10), |_, _| true);
+    assert_eq!(
+        dashboard.queue_visibility().stage,
+        super::QueueStage::Points
+    );
+
+    dashboard.reconcile_automatic_tabs_with(super::STREAM_TURN_DURATION, |_, _| true);
+    assert_eq!(
+        dashboard.queue_visibility().stage,
+        super::QueueStage::Streak
+    );
 }
 
 #[test]
@@ -202,7 +360,7 @@ fn raid_redirect_retires_a_live_auto_channel_until_extension_confirms_offline() 
     assert!(!dashboard.raid_redirected_channels.contains("new"));
 
     dashboard.live_channel_ids.insert("new".to_owned());
-    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, _| true);
     assert!(dashboard.auto_open_channels.contains("new"));
 }
 
@@ -282,7 +440,7 @@ fn destination_open_retry_preserves_switch_context() {
     dashboard
         .auto_open_retry_after
         .insert("new".to_owned(), Instant::now() - Duration::from_secs(1));
-    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, _| true);
 
     assert!(dashboard.auto_open_channels.contains("new"));
     assert!(dashboard.pending_stream_switch.is_some());
@@ -471,7 +629,7 @@ fn failed_raid_close_preserves_pending_source_close_retry() {
     dashboard
         .auto_open_retry_after
         .insert("old".to_owned(), Instant::now() - Duration::from_secs(1));
-    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, _| true);
 
     assert!(!dashboard.auto_open_retry_after.contains_key("old"));
     assert!(dashboard
@@ -513,7 +671,7 @@ fn latest_stream_plan_waits_for_in_flight_switch_confirmation() {
     dashboard.channels.push(latest);
     dashboard.live_channel_ids.insert("third".to_owned());
 
-    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, _| true);
 
     assert_eq!(
         dashboard.auto_open_channels,
@@ -540,7 +698,7 @@ fn latest_stream_plan_waits_for_in_flight_switch_confirmation() {
         "Switched from Old Streamer to New Streamer."
     );
 
-    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, _| true);
 
     assert_eq!(
         dashboard.auto_open_channels,
@@ -590,7 +748,7 @@ fn unrelated_due_retry_waits_for_pending_switch() {
         "Switched from Old Streamer to New Streamer."
     );
 
-    dashboard.reconcile_automatic_tabs(Duration::ZERO);
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, _| true);
 
     assert!(dashboard.auto_open_channels.contains("other"));
     assert!(!dashboard.auto_open_retry_after.contains_key("other"));

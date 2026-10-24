@@ -43,6 +43,35 @@ mod ui;
 #[path = "main/windows_startup.rs"]
 mod windows_startup;
 const AUTO_TAB_RETRY_DELAY: Duration = Duration::from_secs(30);
+fn queue_candidates<'a>(
+    channels: &'a [FollowedChannel],
+    manual_open_channels: &HashSet<String>,
+    external_stream_counts: &HashMap<String, usize>,
+    live_channel_ids: &HashSet<String>,
+    raid_redirected_channels: &HashSet<String>,
+    streak_completed: &HashMap<String, u64>,
+) -> Vec<QueueCandidate<'a>> {
+    let external_channel_ids = external_stream_counts
+        .iter()
+        .filter(|(channel_id, count)| **count > 0 && live_channel_ids.contains(*channel_id))
+        .map(|(channel_id, _)| channel_id.as_str())
+        .collect::<HashSet<_>>();
+
+    channels
+        .iter()
+        .filter(|channel| {
+            !manual_open_channels.contains(&channel.id)
+                && !external_channel_ids.contains(channel.id.as_str())
+                && !raid_redirected_channels.contains(&channel.id)
+        })
+        .map(|channel| QueueCandidate {
+            channel_id: &channel.id,
+            is_live: live_channel_ids.contains(&channel.id),
+            selection: channel.selection,
+            streak_completed_for_live: streak_completed.contains_key(&channel.id),
+        })
+        .collect()
+}
 
 enum TwitchConnectionStatus {
     Disconnected,

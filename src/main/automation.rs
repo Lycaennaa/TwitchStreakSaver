@@ -78,6 +78,7 @@ impl Dashboard {
                     .iter()
                     .any(|channel| channel.id == *channel_id)
         });
+        self.queue_planner.expire_streak_turn_deferrals(now);
         let Some((desired, due_auto_open_retries)) = self.prepare_automatic_tab_plan(now) else {
             return;
         };
@@ -107,6 +108,8 @@ impl Dashboard {
             self.streak_rotation.pause_active_sessions(now);
             return None;
         }
+        self.queue_planner
+            .retain_live_channels(&self.live_channel_ids);
         let defer_due_retries = self.pending_stream_switch.is_some();
         let due_auto_open_retries = resume_due_auto_open_retries(
             &mut self.auto_open_channels,
@@ -114,9 +117,6 @@ impl Dashboard {
             Instant::now(),
             defer_due_retries,
         );
-        self.queue_planner.expire_streak_turn_deferrals(now);
-        self.queue_planner
-            .retain_live_channels(&self.live_channel_ids);
 
         let external_streams = active_external_stream_count(
             &self.external_stream_counts,
@@ -129,36 +129,17 @@ impl Dashboard {
             &self.live_channel_ids,
         );
         let manual_active_streams = manually_open_streams.saturating_add(external_streams);
-        let external_channel_ids = self
-            .external_stream_counts
-            .iter()
-            .filter(|(channel_id, count)| {
-                **count > 0 && self.live_channel_ids.contains(*channel_id)
-            })
-            .map(|(channel_id, _)| channel_id.clone())
-            .collect::<HashSet<_>>();
-        let channels = &self.channels;
-        let manual_open_channels = &self.manual_open_channels;
-        let live_channel_ids = &self.live_channel_ids;
-        let raid_redirected_channels = &self.raid_redirected_channels;
-        let streak_completed = &self.streak_completed;
-        let external_channel_ids = &external_channel_ids;
-        let candidates = || {
-            channels
-                .iter()
-                .filter(|channel| {
-                    !manual_open_channels.contains(&channel.id)
-                        && !external_channel_ids.contains(&channel.id)
-                        && !raid_redirected_channels.contains(&channel.id)
-                })
-                .map(|channel| QueueCandidate {
-                    channel_id: &channel.id,
-                    is_live: live_channel_ids.contains(&channel.id),
-                    selection: channel.selection,
-                    streak_completed_for_live: streak_completed.contains_key(&channel.id),
-                })
-        };
-        let mut plan = self.queue_planner.plan(candidates(), manual_active_streams);
+        let candidates = queue_candidates(
+            &self.channels,
+            &self.manual_open_channels,
+            &self.external_stream_counts,
+            &self.live_channel_ids,
+            &self.raid_redirected_channels,
+            &self.streak_completed,
+        );
+        let mut plan = self
+            .queue_planner
+            .plan(candidates.iter().copied(), manual_active_streams);
 
         match plan.stage {
             QueueStage::Points if !plan.channel_ids.is_empty() => {
@@ -197,7 +178,9 @@ impl Dashboard {
                                 );
                             }
                         }
-                        plan = self.queue_planner.plan(candidates(), manual_active_streams);
+                        plan = self
+                            .queue_planner
+                            .plan(candidates.iter().copied(), manual_active_streams);
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -247,7 +230,9 @@ impl Dashboard {
                                 );
                             }
                         }
-                        plan = self.queue_planner.plan(candidates(), manual_active_streams);
+                        plan = self
+                            .queue_planner
+                            .plan(candidates.iter().copied(), manual_active_streams);
                     }
                     Ok(_) => {}
                     Err(error) => {
