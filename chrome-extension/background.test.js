@@ -30,6 +30,7 @@ async function createExtension({
   storedCloseOnRaidRedirect = false,
   storedRaidRedirectedChannelIds = [],
   storedManagedTabOwners = [],
+  storedAdoptExistingTwitchTabs = false,
   storedCompletedNativeCommandIds = [],
   browserStartup = false,
   initialTabs = [],
@@ -61,10 +62,13 @@ async function createExtension({
   let storedRaidSetting = storedCloseOnRaidRedirect;
   let storedRaidRedirectedIds = JSON.parse(JSON.stringify(storedRaidRedirectedChannelIds));
   let storedTabOwners = JSON.parse(JSON.stringify(storedManagedTabOwners));
+  let storedAdoptionEnabled = storedAdoptExistingTwitchTabs;
   let storedCompletedCommandIds = JSON.parse(JSON.stringify(storedCompletedNativeCommandIds));
   let storedPreferredQuality;
   let managedTabSaveFailures = 0;
   let managedTabSavePause = null;
+  let managedTabIdentityReadPause = null;
+  let raidRedirectedSavePause = null;
   let completedCommandSaveFailures = 0;
   const browserMutationWaiters = [];
   function signalBrowserMutation(mutation) {
@@ -137,6 +141,7 @@ async function createExtension({
             closeOnRaidRedirect: storedRaidSetting,
             raidRedirectedChannelIds: storedRaidRedirectedIds,
             managedTabOwners: storedTabOwners,
+            adoptExistingTwitchTabs: storedAdoptionEnabled,
             completedNativeCommandIds: storedCompletedCommandIds,
           };
           if (storedPreferredQuality !== undefined) {
@@ -152,23 +157,33 @@ async function createExtension({
               managedTabSaveFailures -= 1;
               throw new Error("Managed tab storage failed");
             }
-            if (managedTabSavePause) {
-              const pause = managedTabSavePause;
-              managedTabSavePause = null;
-              pause.signalStarted();
-              await pause.wait;
-            }
-            storedTabs = JSON.parse(JSON.stringify(value.managedTabs));
+          if (managedTabSavePause) {
+            const pause = managedTabSavePause;
+            managedTabSavePause = null;
+            pause.signalStarted();
+            await pause.wait;
+            if (pause.failOnRelease) throw new Error("Managed tab storage failed");
+          }
+          storedTabs = JSON.parse(JSON.stringify(value.managedTabs));
           }
           if (Object.hasOwn(value, "closeOnRaidRedirect")) {
             storedRaidSetting = value.closeOnRaidRedirect;
           }
           if (Object.hasOwn(value, "raidRedirectedChannelIds")) {
+          const pause = raidRedirectedSavePause;
+          if (pause) {
+            raidRedirectedSavePause = null;
+            pause.signalStarted();
+            await pause.wait;
+          }
             storedRaidRedirectedIds = JSON.parse(JSON.stringify(value.raidRedirectedChannelIds));
           }
           if (Object.hasOwn(value, "managedTabOwners")) {
             storedTabOwners = JSON.parse(JSON.stringify(value.managedTabOwners));
           }
+        if (Object.hasOwn(value, "adoptExistingTwitchTabs")) {
+          storedAdoptionEnabled = value.adoptExistingTwitchTabs;
+        }
           if (Object.hasOwn(value, "completedNativeCommandIds")) {
             if (completedCommandSaveFailures > 0) {
               completedCommandSaveFailures -= 1;
@@ -261,6 +276,12 @@ async function createExtension({
         }
         calls.contentMessages.push(contentMessage);
         if (message.type === "get_managed_tab_identity") {
+          const pause = managedTabIdentityReadPause;
+          if (pause) {
+            managedTabIdentityReadPause = null;
+            pause.signalStarted();
+            await pause.wait;
+          }
           if (!tab || tab.contentScriptReady === false) {
             throw new Error("No content script is available");
           }
@@ -550,6 +571,9 @@ async function createExtension({
     snapshotManagedTabOwners() {
       return JSON.parse(JSON.stringify(storedTabOwners));
     },
+    snapshotExistingTabAdoption() {
+      return storedAdoptionEnabled;
+    },
     snapshotRaidRedirectedChannelIds() {
       return JSON.parse(JSON.stringify(storedRaidRedirectedIds));
     },
@@ -625,7 +649,7 @@ async function createExtension({
     failNextCompletedCommandSave() {
       completedCommandSaveFailures += 1;
     },
-    pauseNextManagedTabSave() {
+    pauseNextManagedTabSave({ failOnRelease = false } = {}) {
       let signalStarted;
       let release;
       const started = new Promise((resolve) => {
@@ -634,7 +658,31 @@ async function createExtension({
       const wait = new Promise((resolve) => {
         release = resolve;
       });
-      managedTabSavePause = { signalStarted, wait };
+      managedTabSavePause = { signalStarted, wait, failOnRelease };
+      return { started, release };
+    },
+    pauseNextManagedTabIdentityRead() {
+      let signalStarted;
+      let release;
+      const started = new Promise((resolve) => {
+        signalStarted = resolve;
+      });
+      const wait = new Promise((resolve) => {
+        release = resolve;
+      });
+      managedTabIdentityReadPause = { signalStarted, wait };
+      return { started, release };
+    },
+    pauseNextRaidRedirectedSave() {
+      let signalStarted;
+      let release;
+      const started = new Promise((resolve) => {
+        signalStarted = resolve;
+      });
+      const wait = new Promise((resolve) => {
+        release = resolve;
+      });
+      raidRedirectedSavePause = { signalStarted, wait };
       return { started, release };
     },
     pauseNextTabReload() {
@@ -2494,5 +2542,433 @@ test("in-flight stale-port commands are deduplicated without a stale acknowledgm
   assert.ok(extension.calls.nativeMessages.some((message) =>
     message.type === "command_acknowledged"
       && message.command_id === command.command_id,
+  ));
+});
+test("external Twitch tabs stay unmanaged until existing-tab adoption is enabled", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 201,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: false }],
+  });
+  await extension.reportExternalStreams();
+  await extension.send({ type: "close_all" });
+
+  assert.equal(extension.tabsById.has(201), true);
+  assert.deepEqual(extension.snapshotManagedTabs(), []);
+  const inventory = extension.calls.nativeMessages.findLast(
+    (message) => message.type === "external_streams",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(inventory.channel_counts)), {
+    "channel-streamer": 1,
+  });
+});
+
+test("opt-in adopts only one eligible followed player tab and closes only that tab", async () => {
+  const extension = await createExtension({
+    initialTabs: [
+      {
+        id: 211,
+        windowId: 17,
+        status: "complete",
+        url: "https://www.twitch.tv/streamer",
+      },
+      {
+        id: 212,
+        windowId: 17,
+        status: "complete",
+        active: true,
+        url: "https://www.twitch.tv/streamer",
+      },
+      {
+        id: 213,
+        windowId: 17,
+        status: "complete",
+        openerTabId: 88,
+        url: "https://www.twitch.tv/streamer",
+      },
+      {
+        id: 214,
+        windowId: 17,
+        status: "complete",
+        url: "https://www.twitch.tv/popout/streamer/chat",
+      },
+      {
+        id: 215,
+        windowId: 17,
+        status: "complete",
+        url: "https://www.twitch.tv/unfollowed",
+      },
+    ],
+  });
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: true,
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: false }],
+  });
+  await extension.reportExternalStreams();
+
+  const records = extension.snapshotManagedTabs();
+  assert.equal(records.length, 1);
+  assert.equal(records[0][1].adoptedExternal, true);
+  assert.equal(records[0][1].playerTabId, 212);
+  assert.equal(extension.tabsById.get(212).url, "https://www.twitch.tv/streamer");
+  assert.equal(extension.tabsById.has(211), true);
+  assert.equal(extension.tabsById.has(213), true);
+  assert.equal(extension.tabsById.has(214), true);
+  assert.equal(extension.tabsById.has(215), true);
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "tab_adopted"
+      && message.channel_id === "channel-streamer"
+      && message.tab_id === 212,
+  ));
+  const inventory = extension.calls.nativeMessages.findLast(
+    (message) => message.type === "external_streams",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(inventory.channel_counts)), {
+    "channel-streamer": 2,
+  });
+  assert.equal(inventory.unmatched_count, 1);
+
+  await extension.send({ type: "close_all" });
+  assert.equal(extension.tabsById.has(212), false);
+  assert.equal(extension.tabsById.has(211), true);
+  assert.equal(extension.tabsById.has(213), true);
+  assert.equal(extension.tabsById.has(214), true);
+  assert.equal(extension.tabsById.has(215), true);
+});
+
+test("disabling adoption releases existing tabs without closing them", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 221,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+  const channels = [{ id: "channel-streamer", login: "streamer", unmuted: false }];
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: true,
+    channels,
+  });
+  await extension.reportExternalStreams();
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: false,
+    channels,
+  });
+  await extension.reportExternalStreams();
+
+  assert.equal(extension.snapshotManagedTabs().length, 0);
+  assert.equal(extension.tabsById.has(221), true);
+  assert.equal(extension.snapshotExistingTabAdoption(), false);
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "tab_released"
+      && message.channel_id === "channel-streamer"
+      && message.tab_id === 221,
+  ));
+});
+test("unverifiable restored adopted tabs are released without being closed", async () => {
+  const extension = await createExtension({
+    storedAdoptExistingTwitchTabs: true,
+    storedManagedTabs: [["channel-streamer", {
+      login: "streamer",
+      playerTabId: 231,
+      chatTabId: null,
+      layout: "adopted_external",
+      identityToken: "old-session",
+      identityPersisted: true,
+      identityPolicyVersion: 1,
+      adoptedExternal: true,
+    }]],
+    storedManagedTabOwners: [[231, "channel-streamer"]],
+    initialTabs: [{
+      id: 231,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+
+  assert.deepEqual(extension.snapshotManagedTabs(), []);
+  assert.equal(extension.tabsById.has(231), true);
+});
+test("failed adoption persistence leaves the tab external and retries safely", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 241,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+    setTimeoutImpl(callback, delay) {
+      return { callback, delay };
+    },
+    clearTimeoutImpl() {},
+  });
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: true,
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: false }],
+  });
+
+  extension.failNextManagedTabSave();
+  await extension.reportExternalStreams();
+  assert.deepEqual(extension.snapshotManagedTabs(), []);
+  assert.equal(extension.tabsById.has(241), true);
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "error"
+      && message.channel_id === "channel-streamer"
+      && message.message.includes("save adopted Twitch tab ownership"),
+  ));
+  const inventory = extension.calls.nativeMessages.findLast(
+    (message) => message.type === "external_streams",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(inventory.channel_counts)), {
+    "channel-streamer": 1,
+  });
+
+  await extension.reportExternalStreams();
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+  assert.equal(extension.tabsById.has(241), true);
+});
+test("verified adopted website tabs survive browser-start restoration", async () => {
+  const extension = await createExtension({
+    storedAdoptExistingTwitchTabs: true,
+    storedManagedTabs: [["channel-streamer", {
+      login: "streamer",
+      layout: "combined_window",
+      playerTabId: 251,
+      chatTabId: null,
+      identityToken: "restored-session",
+      identityPersisted: true,
+      identityPolicyVersion: 1,
+      adoptedExternal: true,
+    }]],
+    storedManagedTabOwners: [[251, "channel-streamer"]],
+    browserStartup: true,
+    initialTabs: [{
+      id: 251,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+      managedTabIdentity: "restored-session",
+    }],
+  });
+
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+  assert.equal(extension.snapshotManagedTabs()[0][1].playerTabId, 251);
+  assert.equal(extension.tabsById.get(251).url, "https://www.twitch.tv/streamer");
+});
+
+test("closing adopted tabs refuses a tab that navigated to another channel", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 261,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: true,
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: false }],
+  });
+  await extension.reportExternalStreams();
+
+  extension.tabsById.get(261).url = "https://www.twitch.tv/another";
+  await extension.send({ type: "close_all" });
+
+  assert.equal(extension.tabsById.has(261), true);
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "error"
+      && message.channel_id === "channel-streamer"
+      && message.message.includes("ownership could not be verified"),
+  ));
+});
+
+test("failed adoption opt-out persistence keeps ownership and retries", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 271,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+    setTimeoutImpl(callback, delay) {
+      return { callback, delay };
+    },
+    clearTimeoutImpl() {},
+  });
+  const channels = [{ id: "channel-streamer", login: "streamer", unmuted: false }];
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: true,
+    channels,
+  });
+  await extension.reportExternalStreams();
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+
+  extension.failNextManagedTabSave();
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: false,
+    channels,
+  });
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+  assert.equal(extension.snapshotExistingTabAdoption(), true);
+  assert.equal(extension.tabsById.has(271), true);
+  assert.equal(extension.calls.nativeMessages.some(
+    (message) => message.type === "tab_released" && message.tab_id === 271,
+  ), false);
+
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: false,
+    channels,
+  });
+  assert.equal(extension.snapshotManagedTabs().length, 0);
+  assert.equal(extension.snapshotExistingTabAdoption(), false);
+  assert.equal(extension.tabsById.has(271), true);
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "tab_released"
+      && message.channel_id === "channel-streamer"
+      && message.tab_id === 271,
+  ));
+});
+test("an explicit channel open wins a race with existing-tab adoption", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 281,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: true }],
+    adopt_existing_twitch_tabs: true,
+  });
+  const identityRead = extension.pauseNextManagedTabIdentityRead();
+  const adoption = extension.reportExternalStreams();
+  await identityRead.started;
+  await extension.open({
+    type: "open_selected",
+    channels: [{ id: "channel-streamer", login: "streamer" }],
+    wake_browser: false,
+  });
+  identityRead.release();
+  await adoption;
+  const [channelId, record] = extension.snapshotManagedTabs()[0];
+  assert.equal(channelId, "channel-streamer");
+  assert.notEqual(record.playerTabId, 281);
+  assert.notEqual(record.adoptedExternal, true);
+  assert.equal(extension.tabsById.has(281), true);
+  assert.equal(extension.tabsById.has(record.playerTabId), true);
+  assert.equal(extension.snapshotManagedTabs().length, 1);
+});
+
+test("adoption releases a tab that navigates while its state is being persisted", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 282,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: true }],
+    adopt_existing_twitch_tabs: true,
+  });
+  const save = extension.pauseNextManagedTabSave();
+  const adoption = extension.reportExternalStreams();
+  await save.started;
+  const navigation = extension.updateTabUrl(282, "https://www.twitch.tv/another");
+  save.release();
+  await Promise.all([adoption, navigation]);
+  assert.equal(extension.tabsById.has(282), true);
+  assert.equal(extension.tabsById.get(282).url, "https://www.twitch.tv/another");
+  assert.equal(extension.snapshotManagedTabs().length, 0);
+  assert.equal(extension.calls.nativeMessages.some(
+    (message) => message.type === "tab_adopted" && message.channel_id === "channel-streamer",
+  ), false);
+});
+
+test("an adopted tab navigating away during raid-close persistence is not closed", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 283,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: true }],
+    adopt_existing_twitch_tabs: true,
+    close_on_raid_redirect: true,
+  });
+  await extension.reportExternalStreams();
+  const save = extension.pauseNextRaidRedirectedSave();
+  const redirect = extension.updateTabUrl(283, "https://www.twitch.tv/streamer?referrer=raid");
+  await save.started;
+  const away = extension.updateTabUrl(283, "https://example.com/");
+  save.release();
+  await Promise.all([redirect, away]);
+  assert.equal(extension.tabsById.has(283), true);
+  assert.equal(extension.tabsById.get(283).url, "https://example.com/");
+  assert.equal(extension.snapshotManagedTabs().length, 0);
+});
+test("failed opt-out does not restore an adopted tab that has navigated away", async () => {
+  const extension = await createExtension({
+    initialTabs: [{
+      id: 291,
+      windowId: 17,
+      status: "complete",
+      url: "https://www.twitch.tv/streamer",
+    }],
+  });
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "channel-streamer", login: "streamer", unmuted: true }],
+    adopt_existing_twitch_tabs: true,
+  });
+  await extension.reportExternalStreams();
+  assert.equal(extension.snapshotManagedTabs()[0][1].adoptedExternal, true);
+
+  const save = extension.pauseNextManagedTabSave({ failOnRelease: true });
+  const sync = extension.send({
+    type: "sync_channels",
+    channels: [],
+    adopt_existing_twitch_tabs: false,
+  });
+  await save.started;
+  extension.updateTabUrl(291, "https://example.com/");
+  save.release();
+  await sync;
+
+  assert.equal(extension.tabsById.has(291), true);
+  assert.equal(extension.tabsById.get(291).url, "https://example.com/");
+  assert.equal(extension.snapshotManagedTabs().length, 0);
+  assert.equal(extension.snapshotExistingTabAdoption(), true);
+  assert.ok(extension.calls.nativeMessages.some(
+    (message) => message.type === "tab_released"
+      && message.channel_id === "channel-streamer"
+      && message.tab_id === 291,
   ));
 });

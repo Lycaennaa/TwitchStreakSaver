@@ -252,6 +252,7 @@ impl Dashboard {
             self.open_extension_setup(target);
         }
         let mut close_on_raid_redirect_changed = false;
+        let mut adopt_existing_twitch_tabs_changed = false;
         ui.group(|ui| {
             ui.strong("Twitch tab opening");
             ui.label(
@@ -271,8 +272,15 @@ impl Dashboard {
                 )
                 .changed();
             ui.label("Closes a managed stream when its URL includes referrer=raid.");
+            adopt_existing_twitch_tabs_changed = ui
+                .checkbox(
+                    &mut self.adopt_existing_twitch_tabs,
+                    "Adopt eligible existing Twitch player tabs",
+                )
+                .changed();
+            ui.label("Turning this off releases adopted tabs without closing them.");
         });
-        if close_on_raid_redirect_changed {
+        if close_on_raid_redirect_changed || adopt_existing_twitch_tabs_changed {
             self.sync_extension_channels();
         }
 

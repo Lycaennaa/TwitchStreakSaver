@@ -13,6 +13,9 @@ let reconnectTimer = null;
 let channelsByLogin = new Map();
 let externalScanTimer = null;
 let externalScanGeneration = 0;
+let channelsById = new Map();
+let syncedExistingTabAdoption = false;
+let channelSyncInProgress = false;
 let nativeCommandQueue = Promise.resolve();
 const MAX_CONCURRENT_CHANNEL_OPENS = 2;
 const MAX_COMPLETED_NATIVE_COMMAND_IDS = 128;
@@ -112,11 +115,68 @@ function handleNativeHostWakeRequest(forceReconnect, sendResponse) {
 
 
 async function reportExternalStreams() {
-  if (!nativePort) return;
+  if (!nativePort || channelSyncInProgress) return;
   const generation = ++externalScanGeneration;
   await restorePromise;
   const tabs = await chrome.tabs.query({});
   if (generation !== externalScanGeneration || !nativePort) return;
+  if (
+    nativePort
+    && syncedNativePort === nativePort
+    && TwitchManagedTabs.existingTabAdoptionEnabled()
+    && syncedExistingTabAdoption
+  ) {
+    const candidates = new Map();
+    for (const tab of tabs) {
+      if (
+        !Number.isInteger(tab.id)
+        || tab.status !== "complete"
+        || Number.isInteger(tab.openerTabId)
+      ) continue;
+      const route = TwitchTabUtils.channelRoute(tab.url || "");
+      if (route.surface !== "player") continue;
+      const channelId = channelsByLogin.get(route.login);
+      const channel = channelsById.get(channelId);
+      if (
+        !channel
+        || TwitchManagedTabs.getRecord(channelId)
+        || TwitchManagedTabs.getOwner(tab.id) !== undefined
+      ) continue;
+      const prior = candidates.get(channelId);
+      if (!prior || (tab.active === true && prior.active !== true)) {
+        candidates.set(channelId, tab);
+      }
+    }
+    for (const [channelId, tab] of candidates) {
+      const channel = channelsById.get(channelId);
+      try {
+        if (await TwitchManagedTabs.adoptExistingPlayerTab(
+          channel,
+          tab,
+          () => generation === externalScanGeneration
+            && nativePort !== null
+            && syncedNativePort === nativePort
+            && channelsById.get(channelId) === channel
+            && channelsByLogin.get(channel.login.toLowerCase()) === channelId,
+        )) {
+          setMonitoring(tab.id, "start_monitoring");
+          sendNative({
+            type: "tab_adopted",
+            channel_id: channelId,
+            tab_id: tab.id,
+            surface: "player",
+          });
+        }
+      } catch (error) {
+        console.warn("Could not adopt an existing Twitch player tab.", error);
+        sendNative({
+          type: "error",
+          channel_id: channelId,
+          message: "Could not save adopted Twitch tab ownership.",
+        });
+      }
+    }
+  }
   const managedTabIds = new Set(
     Array.from(TwitchManagedTabs.recordValues()).flatMap((record) =>
       TwitchManagedTabs.managedSurfaceTabs(record).map(([, tabId]) => tabId),
@@ -186,6 +246,9 @@ function handleNativePortDisconnect(port, error) {
   nativePort = null;
   syncedNativePort = null;
   nativeBridgeReadyPort = null;
+  externalScanGeneration += 1;
+  syncedExistingTabAdoption = false;
+  channelSyncInProgress = false;
   nativeHostError = error?.message || "Native host disconnected.";
   channelsByLogin = new Map();
   for (const record of TwitchManagedTabs.recordValues()) {
@@ -275,6 +338,15 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
       nativeHostError = null;
       break;
     case "sync_channels": {
+      externalScanGeneration += 1;
+      channelSyncInProgress = true;
+      syncedNativePort = null;
+      syncedExistingTabAdoption = false;
+      const channels = (message.channels || []).filter((channel) => isValidChannel(channel));
+      channelsByLogin = new Map(
+        channels.map((channel) => [channel.login.toLowerCase(), channel.id]),
+      );
+      channelsById = new Map(channels.map((channel) => [channel.id, channel]));
       try {
         await TwitchManagedTabs.setCloseOnRaidRedirect(
           message.close_on_raid_redirect === true,
@@ -282,11 +354,32 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
       } catch (error) {
         console.warn("Could not persist the raid redirect setting.", error);
       }
-      const channels = (message.channels || []).filter((channel) => isValidChannel(channel));
-      channelsByLogin = new Map(
-        channels.map((channel) => [channel.login.toLowerCase(), channel.id]),
-      );
-      syncedNativePort = sourcePort;
+      let adoptionSettingApplied = false;
+      let releasedTabs = [];
+      try {
+        releasedTabs = await TwitchManagedTabs.setExistingTabAdoption(
+          message.adopt_existing_twitch_tabs === true,
+        );
+        adoptionSettingApplied = true;
+    } catch (error) {
+      console.warn("Could not persist existing-tab adoption setting.", error);
+      releasedTabs = Array.isArray(error?.releasedTabs) ? error.releasedTabs : [];
+      sendNative({
+        type: "error",
+        message: releasedTabs.length > 0
+          ? "Could not persist existing-tab adoption settings; stale tabs were released and remaining ownership was restored."
+          : "Could not persist existing-tab adoption settings; ownership was unchanged.",
+      });
+    }
+      for (const { channelId, tabId } of releasedTabs) {
+        setMonitoring(tabId, "stop_monitoring");
+        sendNative({
+          type: "tab_released",
+          channel_id: channelId,
+          tab_id: tabId,
+          surface: "player",
+        });
+      }
       const loginByChannelId = new Map(
         channels.map((channel) => [channel.id, channel.login.toLowerCase()]),
       );
@@ -294,7 +387,8 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
         channels.map((channel) => [channel.id, channel.unmuted === true]),
       );
       await openChannels(
-        Array.from(TwitchManagedTabs.recordKeys()).flatMap((channelId) => {
+        Array.from(TwitchManagedTabs.recordEntries()).flatMap(([channelId, record]) => {
+          if (record.adoptedExternal === true) return [];
           const login = loginByChannelId.get(channelId);
           const unmuted = unmutedByChannelId.get(channelId) === true;
           return login ? [{ id: channelId, login, unmuted }] : [];
@@ -302,6 +396,27 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
         false,
         sourcePort,
       );
+      channelSyncInProgress = false;
+      if (nativePort === sourcePort) {
+        syncedNativePort = sourcePort;
+        syncedExistingTabAdoption = adoptionSettingApplied
+          && message.adopt_existing_twitch_tabs === true;
+      }
+      for (const [channelId, record] of TwitchManagedTabs.recordEntries()) {
+        if (
+          record.adoptedExternal === true
+          && Number.isInteger(record.playerTabId)
+          && await TwitchManagedTabs.verifyAdoptedTabOwnership(channelId, record.playerTabId)
+        ) {
+          setMonitoring(record.playerTabId, "start_monitoring");
+          sendNative({
+            type: "tab_adopted",
+            channel_id: channelId,
+            tab_id: record.playerTabId,
+            surface: "player",
+          });
+        }
+      }
       scheduleExternalStreamReport();
       break;
     }
@@ -397,6 +512,16 @@ async function openChannels(channels, wakeBrowser, sourcePort) {
 
 async function openChannel(channel, wakeBrowser, sourcePort) {
   const login = channel.login.toLowerCase();
+  const adoptedRecord = TwitchManagedTabs.getRecord(channel.id);
+  if (
+    adoptedRecord?.adoptedExternal === true
+    && adoptedRecord.login === login
+    && Number.isInteger(adoptedRecord.playerTabId)
+    && await TwitchManagedTabs.verifyAdoptedTabOwnership(
+      channel.id,
+      adoptedRecord.playerTabId,
+    )
+  ) return adoptedRecord.playerTabId;
   if (!await TwitchManagedTabs.prepareChannelOpen(channel)) return;
   try {
     const url = `https://www.twitch.tv/${encodeURIComponent(login)}`;
@@ -441,6 +566,24 @@ async function closeChannels(channelIds, closeReason = null) {
   for (const channelId of new Set(channelIds.filter((id) => typeof id === "string"))) {
     const record = TwitchManagedTabs.getRecord(channelId);
     if (!record) continue;
+    if (
+      record.adoptedExternal === true
+      && await Promise.all(TwitchManagedTabs.managedSurfaceTabs(record)
+        .filter(([surface]) => surface === "player")
+        .map(([, tabId]) => TwitchManagedTabs.verifyAdoptedTabOwnership(
+          channelId,
+          tabId,
+          closeReason === "raid_redirect",
+        )))
+        .then((verified) => verified.some(Boolean)) === false
+    ) {
+      sendNative({
+        type: "error",
+        channel_id: channelId,
+        message: "Could not close an adopted Twitch tab because its ownership could not be verified.",
+      });
+      continue;
+    }
     const tabSurfaces = new Map();
     for (const [surface, tabId] of TwitchManagedTabs.managedSurfaceTabs(record)) {
       if (!tabSurfaces.has(tabId)) tabSurfaces.set(tabId, []);
@@ -452,6 +595,25 @@ async function closeChannels(channelIds, closeReason = null) {
     }
     if (closeReason === "raid_redirect") {
       await TwitchManagedTabs.markRaidRedirectedChannel(channelId);
+    }
+    if (closeReason === "raid_redirect" && record.adoptedExternal === true) {
+      const stillOwned = await Promise.all(
+        Array.from(tabSurfaces)
+          .filter(([, surfaces]) => surfaces.includes("player"))
+          .map(([tabId]) => TwitchManagedTabs.verifyAdoptedTabOwnership(
+            channelId,
+            tabId,
+            true,
+          )),
+      ).then((verified) => verified.length > 0 && verified.every(Boolean));
+      if (!stillOwned) {
+        sendNative({
+          type: "error",
+          channel_id: channelId,
+          message: "Could not close an adopted Twitch tab because its ownership could not be verified.",
+        });
+        continue;
+      }
     }
     for (const [tabId, surfaces] of tabSurfaces) {
       TwitchManagedTabs.markClosingTab(tabId);
@@ -652,8 +814,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
       }
     }
   }
-  if (!changeInfo.url || changeInfo.url === "about:blank") return;
-  scheduleExternalStreamReport();
+  if (!changeInfo.url || changeInfo.url === "about:blank") {
+    if (changeInfo.status === "complete") scheduleExternalStreamReport();
+    return;
+  }
   for (const [channelId, record] of TwitchManagedTabs.recordEntries()) {
     const updatedSurfaces = TwitchManagedTabs.managedSurfaceTabs(record)
       .filter(([, managedTabId]) => managedTabId === tabId)

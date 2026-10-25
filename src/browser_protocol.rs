@@ -13,6 +13,7 @@ pub enum BrowserCommand {
     SyncChannels {
         channels: Vec<BrowserChannel>,
         close_on_raid_redirect: bool,
+        adopt_existing_twitch_tabs: bool,
     },
     ClearRaidRedirectedChannels {
         channel_ids: Vec<String>,
@@ -76,6 +77,16 @@ pub enum KnownBrowserMessage {
         raid_redirected_channel_ids: Option<Vec<String>>,
     },
     TabOpened {
+        channel_id: String,
+        tab_id: i64,
+        surface: BrowserSurface,
+    },
+    TabAdopted {
+        channel_id: String,
+        tab_id: i64,
+        surface: BrowserSurface,
+    },
+    TabReleased {
         channel_id: String,
         tab_id: i64,
         surface: BrowserSurface,
@@ -265,12 +276,12 @@ mod tests {
             })
         );
     }
-
     #[test]
     fn channel_sync_includes_raid_redirect_setting() {
         let command = BrowserCommand::SyncChannels {
             channels: vec![],
             close_on_raid_redirect: true,
+            adopt_existing_twitch_tabs: true,
         };
 
         assert_eq!(
@@ -279,6 +290,7 @@ mod tests {
                 "type": "sync_channels",
                 "channels": [],
                 "close_on_raid_redirect": true,
+                "adopt_existing_twitch_tabs": true,
             }),
         );
     }
@@ -476,5 +488,39 @@ mod tests {
                 ..
             })
         ));
+    }
+    #[test]
+    fn adopted_and_released_tab_messages_deserialize() {
+        let adopted = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "tab_adopted",
+            "channel_id": "channel-1",
+            "tab_id": 7,
+            "surface": "player",
+        }))
+        .unwrap();
+        assert_eq!(
+            adopted,
+            BrowserMessage::Known(KnownBrowserMessage::TabAdopted {
+                channel_id: "channel-1".to_owned(),
+                tab_id: 7,
+                surface: BrowserSurface::Player,
+            }),
+        );
+
+        let released = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "tab_released",
+            "channel_id": "channel-1",
+            "tab_id": 7,
+            "surface": "player",
+        }))
+        .unwrap();
+        assert_eq!(
+            released,
+            BrowserMessage::Known(KnownBrowserMessage::TabReleased {
+                channel_id: "channel-1".to_owned(),
+                tab_id: 7,
+                surface: BrowserSurface::Player,
+            }),
+        );
     }
 }

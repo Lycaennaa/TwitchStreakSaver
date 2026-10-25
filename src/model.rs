@@ -136,6 +136,7 @@ pub struct AppPreferences {
     pub auto_start_on_launch: bool,
     pub wake_browser_on_open: bool,
     pub close_on_raid_redirect: bool,
+    pub adopt_existing_twitch_tabs: bool,
     pub preferred_quality: PreferredQuality,
     pub browser_launch_target: Option<BrowserLaunchTarget>,
     pub browser_profile_data_directories: Vec<(BrowserKind, String)>,
@@ -148,6 +149,7 @@ impl Default for AppPreferences {
             auto_start_on_launch: true,
             wake_browser_on_open: false,
             close_on_raid_redirect: false,
+            adopt_existing_twitch_tabs: false,
             preferred_quality: PreferredQuality::default(),
             browser_launch_target: None,
             browser_profile_data_directories: Vec::new(),
@@ -204,6 +206,7 @@ mod tests {
         preferences.auto_start_on_launch = false;
         preferences.wake_browser_on_open = true;
         preferences.close_on_raid_redirect = true;
+        preferences.adopt_existing_twitch_tabs = true;
         preferences.preferred_quality = PreferredQuality::P720;
 
         let encoded = ron::to_string(&preferences).unwrap();
@@ -222,6 +225,7 @@ mod tests {
         assert!(!preferences.auto_start_on_launch);
         assert!(preferences.wake_browser_on_open);
         assert!(!preferences.close_on_raid_redirect);
+        assert!(!preferences.adopt_existing_twitch_tabs);
         assert!(preferences.channels.is_empty());
         assert_eq!(preferences.preferred_quality, PreferredQuality::P160);
     }
@@ -280,5 +284,15 @@ mod browser_launch_preferences_tests {
             restored.browser_profile_data_directories,
             vec![(BrowserKind::Brave, "/custom/brave-data".to_owned())]
         );
+    }
+    #[test]
+    fn existing_tab_adoption_preference_is_opt_in_and_roundtrips() {
+        let mut preferences = AppPreferences::default();
+        assert!(!preferences.adopt_existing_twitch_tabs);
+        preferences.adopt_existing_twitch_tabs = true;
+
+        let encoded = ron::to_string(&preferences).unwrap();
+        let restored: AppPreferences = ron::from_str(&encoded).unwrap();
+        assert!(restored.adopt_existing_twitch_tabs);
     }
 }

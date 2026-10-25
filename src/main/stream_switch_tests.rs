@@ -19,6 +19,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         auto_start_on_launch: false,
         wake_browser_on_open: false,
         close_on_raid_redirect: false,
+        adopt_existing_twitch_tabs: false,
         preferred_quality: PreferredQuality::default(),
         browser_launch_target: None,
         browser_launch_attempted: None,
@@ -1050,4 +1051,34 @@ fn followed_channel_list_ends_with_right_settings_in_compact_view() {
         "scrolled left panel ends {} points from right settings",
         panel_end_gap
     );
+}
+#[test]
+fn adopted_browser_tabs_are_tracked_without_logging_an_app_open_and_release_clears_state() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.auto_open_channels.clear();
+    dashboard.manual_open_channels.clear();
+    dashboard.activity_log.clear();
+
+    dashboard.handle_browser_message(KnownBrowserMessage::TabAdopted {
+        channel_id: "new".to_owned(),
+        tab_id: 7,
+        surface: BrowserSurface::Player,
+    });
+    assert_eq!(
+        dashboard.browser_states.get("new").unwrap().player_tab_id,
+        Some(7),
+    );
+    assert!(dashboard.manual_open_channels.contains("new"));
+    assert!(dashboard.activity_log.is_empty());
+    assert!(dashboard.pending_stream_switch.is_some());
+
+    dashboard.handle_browser_message(KnownBrowserMessage::TabReleased {
+        channel_id: "new".to_owned(),
+        tab_id: 7,
+        surface: BrowserSurface::Player,
+    });
+    assert!(!dashboard.browser_states.contains_key("new"));
+    assert!(dashboard.pending_stream_switch.is_none());
+    assert!(!dashboard.manual_open_channels.contains("new"));
+    assert!(dashboard.activity_log.is_empty());
 }

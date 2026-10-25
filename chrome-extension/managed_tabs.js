@@ -11,6 +11,8 @@
   let raidRedirectedChannelIds = new Set();
   let raidRedirectedChannelIdsSaveQueue = Promise.resolve();
   let browserStartupOwnershipInvalidated = false;
+  let adoptExistingTwitchTabs = false;
+  const pendingAdoptions = new Set();
 
 function hasRaidReferrer(value) {
   try {
@@ -107,7 +109,9 @@ async function restoreManagedTabs() {
     "closeOnRaidRedirect",
     "raidRedirectedChannelIds",
     "managedTabOwners",
+    "adoptExistingTwitchTabs",
   ]);
+  adoptExistingTwitchTabs = stored.adoptExistingTwitchTabs === true;
   managedTabs = new Map(stored.managedTabs || []);
   closeOnRaidRedirect = stored.closeOnRaidRedirect === true;
   raidRedirectedChannelIds = new Set(
@@ -133,6 +137,28 @@ async function restoreManagedTabs() {
     for (const surface of ["player", "chat"]) {
       const key = `${surface}TabId`;
       const tab = tabsById.get(record[key]);
+      if (record.adoptedExternal === true) {
+        const route = TwitchTabUtils.channelRoute(tab?.url || "");
+        const identity = tab ? await readManagedTabIdentity(tab.id) : null;
+        if (
+          !adoptExistingTwitchTabs
+          || surface !== "player"
+          || !tab
+          || Number.isInteger(tab.openerTabId)
+          || record.identityPersisted !== true
+          || record.identityPolicyVersion !== MANAGED_TAB_IDENTITY_POLICY_VERSION
+          || typeof record.identityToken !== "string"
+          || identity !== record.identityToken
+          || route.surface !== "player"
+          || route.login !== record.login.toLowerCase()
+        ) {
+          record[key] = null;
+          pendingStartupIdentityChecks.delete(tab?.id);
+          if (tab) managedTabOwners.delete(tab.id);
+          if (!record.playerTabId && !record.chatTabId) managedTabs.delete(channelId);
+          continue;
+        }
+      }
       const owner = tab && managedTabOwners.get(tab.id);
       const raidPlayerRoute = surface === "player"
         && closeOnRaidRedirect
@@ -354,6 +380,18 @@ function saveManagedTabOwners() {
   managedTabOwnersSaveQueue = saving.catch(() => {});
   return saving;
 }
+function saveManagedTabState() {
+  const saving = Promise.all([managedTabsSaveQueue, managedTabOwnersSaveQueue]).then(() =>
+    chrome.storage.local.set({
+      managedTabs: Array.from(managedTabs.entries()),
+      managedTabOwners: Array.from(managedTabOwners.entries()),
+      adoptExistingTwitchTabs,
+    }),
+  );
+  managedTabsSaveQueue = saving.catch(() => {});
+  managedTabOwnersSaveQueue = saving.catch(() => {});
+  return saving;
+}
 
 async function rememberManagedTabOwner(tabId, channelId) {
   if (managedTabOwners.get(tabId) === channelId) return;
@@ -418,6 +456,203 @@ async function setManagedTabIdentity(tabId, identity) {
   } catch {
     return false;
   }
+}
+async function setExistingTabAdoption(enabled) {
+  const previousAdoption = adoptExistingTwitchTabs;
+  const releasedRecords = [];
+  adoptExistingTwitchTabs = enabled === true;
+  if (!adoptExistingTwitchTabs) {
+    for (const [channelId, record] of managedTabs) {
+      if (record.adoptedExternal !== true) continue;
+      const tabId = record.playerTabId;
+      releasedRecords.push({
+        channelId,
+        record,
+        tabId,
+        owner: managedTabOwners.get(tabId),
+        pendingIdentityCheck: pendingStartupIdentityChecks.get(tabId),
+      });
+      managedTabs.delete(channelId);
+      pendingStartupIdentityChecks.delete(tabId);
+      managedTabOwners.delete(tabId);
+    }
+  }
+  try {
+    await saveManagedTabState();
+  } catch (error) {
+    adoptExistingTwitchTabs = previousAdoption;
+    const staleReleasedTabs = [];
+    for (const {
+      channelId,
+      record,
+      tabId,
+      owner,
+      pendingIdentityCheck,
+    } of releasedRecords) {
+      const currentRecord = managedTabs.get(channelId);
+      const currentOwner = managedTabOwners.get(tabId);
+      if (
+        (currentRecord && currentRecord !== record)
+        || (currentOwner !== undefined && currentOwner !== owner)
+      ) {
+        if (Number.isInteger(tabId)) staleReleasedTabs.push({ channelId, tabId });
+        continue;
+      }
+      managedTabs.set(channelId, record);
+      if (owner !== undefined) managedTabOwners.set(tabId, owner);
+      if (!await verifyAdoptedTabOwnership(channelId, tabId)) {
+        if (managedTabs.get(channelId) === record) managedTabs.delete(channelId);
+        if (managedTabOwners.get(tabId) === owner) managedTabOwners.delete(tabId);
+        if (Number.isInteger(tabId)) staleReleasedTabs.push({ channelId, tabId });
+        continue;
+      }
+      if (
+        pendingIdentityCheck !== undefined
+        && !pendingStartupIdentityChecks.has(tabId)
+      ) {
+        pendingStartupIdentityChecks.set(tabId, pendingIdentityCheck);
+      }
+    }
+    if (staleReleasedTabs.length > 0) {
+      const rollbackError = error instanceof Error ? error : new Error(String(error));
+      rollbackError.releasedTabs = staleReleasedTabs;
+      await saveManagedTabState().catch(() => {});
+      throw rollbackError;
+    }
+    throw error;
+  }
+  return releasedRecords
+    .filter(({ tabId }) => Number.isInteger(tabId))
+    .map(({ channelId, tabId }) => ({ channelId, tabId }));
+}
+
+async function adoptExistingPlayerTab(channel, candidate, isStillEligible) {
+  const channelId = channel?.id;
+  const login = channel?.login?.toLowerCase();
+  if (
+    !adoptExistingTwitchTabs
+    || typeof channelId !== "string"
+    || !channelId
+    || typeof login !== "string"
+    || !Number.isInteger(candidate?.id)
+    || !Number.isInteger(candidate?.windowId)
+    || candidate.status !== "complete"
+    || Number.isInteger(candidate.openerTabId)
+    || pendingAdoptions.has(channelId)
+    || managedTabs.has(channelId)
+    || managedTabOwners.has(candidate.id)
+      || typeof isStillEligible !== "function"
+      || !isStillEligible()
+  ) return false;
+  const initialRoute = TwitchTabUtils.channelRoute(candidate.url || "");
+  if (initialRoute.surface !== "player" || initialRoute.login !== login) return false;
+  pendingAdoptions.add(channelId);
+  try {
+    if (!adoptExistingTwitchTabs || managedTabs.has(channelId) || !isStillEligible()) return false;
+    const current = await chrome.tabs.get(candidate.id).catch(() => null);
+    if (!isStillEligible()) return false;
+    if (
+      !current
+      || current.status !== "complete"
+      || Number.isInteger(current.openerTabId)
+      || TwitchTabUtils.channelRoute(current.url || "").login !== login
+      || TwitchTabUtils.channelRoute(current.url || "").surface !== "player"
+    ) return false;
+    const identityToken = crypto.randomUUID();
+    const identityWasSet = await setManagedTabIdentity(candidate.id, identityToken);
+    if (!isStillEligible() || !identityWasSet) return false;
+    const verifiedTab = await chrome.tabs.get(candidate.id).catch(() => null);
+    if (!isStillEligible()) return false;
+    if (
+      !adoptExistingTwitchTabs
+      || managedTabs.has(channelId)
+      || managedTabOwners.has(candidate.id)
+      || !verifiedTab
+      || Number.isInteger(verifiedTab.openerTabId)
+      || TwitchTabUtils.channelRoute(verifiedTab.url || "").login !== login
+      || TwitchTabUtils.channelRoute(verifiedTab.url || "").surface !== "player"
+    ) return false;
+    const identity = await readManagedTabIdentity(candidate.id);
+    if (
+      !isStillEligible()
+      || identity !== identityToken
+      || !adoptExistingTwitchTabs
+      || managedTabs.has(channelId)
+      || managedTabOwners.has(candidate.id)
+    ) return false;
+    const record = {
+      login,
+      playerTabId: candidate.id,
+      chatTabId: null,
+      playerWindowId: verifiedTab.windowId,
+      layout: "combined_window",
+      unmuted: channel.unmuted === true,
+      identityToken,
+      identityPersisted: true,
+      identityPolicyVersion: MANAGED_TAB_IDENTITY_POLICY_VERSION,
+      adoptedExternal: true,
+    };
+    managedTabs.set(channelId, record);
+    managedTabOwners.set(candidate.id, channelId);
+    try {
+      await saveManagedTabState();
+    } catch (error) {
+      if (managedTabs.get(channelId) === record) managedTabs.delete(channelId);
+      if (managedTabOwners.get(candidate.id) === channelId) {
+        managedTabOwners.delete(candidate.id);
+      }
+      await saveManagedTabState().catch(() => {});
+      throw error;
+    }
+    const ownershipVerified =
+      adoptExistingTwitchTabs
+      && isStillEligible()
+      && await verifyAdoptedTabOwnership(channelId, candidate.id)
+      && isStillEligible();
+    if (!ownershipVerified) {
+      if (managedTabs.get(channelId) === record) managedTabs.delete(channelId);
+      if (managedTabOwners.get(candidate.id) === channelId) {
+        managedTabOwners.delete(candidate.id);
+      }
+      await saveManagedTabState().catch(() => {});
+      return false;
+    }
+    return true;
+  } finally {
+    pendingAdoptions.delete(channelId);
+  }
+}
+
+async function verifyAdoptedTabOwnership(channelId, tabId, allowRaidRedirect = false) {
+  const record = managedTabs.get(channelId);
+  if (
+    !record
+    || record.adoptedExternal !== true
+    || record.playerTabId !== tabId
+    || managedTabOwners.get(tabId) !== channelId
+    || record.identityPersisted !== true
+    || typeof record.identityToken !== "string"
+  ) return false;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || Number.isInteger(tab.openerTabId)) return false;
+  const identity = await readManagedTabIdentity(tabId);
+  if (
+    identity !== record.identityToken
+    || managedTabs.get(channelId) !== record
+    || managedTabOwners.get(tabId) !== channelId
+  ) return false;
+  const latestTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (
+    !latestTab
+    || Number.isInteger(latestTab.openerTabId)
+    || managedTabs.get(channelId) !== record
+    || managedTabOwners.get(tabId) !== channelId
+  ) return false;
+  const route = TwitchTabUtils.channelRoute(latestTab.url || "");
+  const raidRedirectAllowed = allowRaidRedirect
+    && route.surface === "player"
+    && hasRaidReferrer(latestTab.url || "");
+  return matchesManagedRecordRoute(record, latestTab.url, "player") || raidRedirectAllowed;
 }
 
 function managedSurfaceTabs(record) {
@@ -704,5 +939,9 @@ async function openManagedTab(channelId, url, wakeBrowser, unmuted) {
     detachManagedTab,
     openManagedTab,
     activateManagedTab,
+    setExistingTabAdoption,
+    existingTabAdoptionEnabled: () => adoptExistingTwitchTabs,
+    adoptExistingPlayerTab,
+    verifyAdoptedTabOwnership,
   });
 })();

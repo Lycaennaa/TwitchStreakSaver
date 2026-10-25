@@ -363,6 +363,28 @@ impl Dashboard {
                     self.finish_pending_stream_switch();
                 }
             }
+            KnownBrowserMessage::TabAdopted {
+                channel_id,
+                tab_id,
+                surface,
+            } => {
+                let is_player = surface == BrowserSurface::Player;
+                let accepted = self.handle_browser_tab(
+                    channel_id.clone(),
+                    tab_id,
+                    surface,
+                    BrowserTabUpdate::Opened,
+                );
+                if accepted && is_player && !channel_id.is_empty() {
+                    if !self.auto_open_channels.contains(&channel_id) {
+                        self.manual_open_channels.insert(channel_id.clone());
+                    }
+                    if let Some(pending) = self.pending_stream_switch.as_mut() {
+                        pending.confirm_opened(&channel_id);
+                    }
+                    self.finish_pending_stream_switch();
+                }
+            }
             KnownBrowserMessage::ChannelStatus {
                 channel_id,
                 tab_id,
@@ -433,6 +455,43 @@ impl Dashboard {
                 }
                 if player_tab_closed || (raid_redirected && pending_tab_open) {
                     self.finish_pending_stream_switch();
+                }
+            }
+            KnownBrowserMessage::TabReleased {
+                channel_id,
+                tab_id,
+                surface,
+            } => {
+                let should_remove_state =
+                    if let Some(state) = self.browser_states.get_mut(&channel_id) {
+                        match surface {
+                            BrowserSurface::Player if state.player_tab_id == Some(tab_id) => {
+                                state.player_tab_id = None;
+                                state.player_state = None;
+                                state.player_last_seen = None;
+                            }
+                            BrowserSurface::Chat if state.chat_tab_id == Some(tab_id) => {
+                                state.chat_tab_id = None;
+                                state.chat_state = None;
+                                state.chat_last_seen = None;
+                            }
+                            _ => {}
+                        }
+                        state.player_tab_id.is_none() && state.chat_tab_id.is_none()
+                    } else {
+                        false
+                    };
+                if should_remove_state {
+                    self.browser_states.remove(&channel_id);
+                }
+                self.manual_open_channels.remove(&channel_id);
+                self.auto_open_retry_after.remove(&channel_id);
+                if self
+                    .pending_stream_switch
+                    .as_ref()
+                    .is_some_and(|pending| pending.channels.contains_key(&channel_id))
+                {
+                    self.pending_stream_switch = None;
                 }
             }
             KnownBrowserMessage::Error {
@@ -778,6 +837,7 @@ impl Dashboard {
         self.send_bridge_command(BrowserCommand::SyncChannels {
             channels,
             close_on_raid_redirect: self.close_on_raid_redirect,
+            adopt_existing_twitch_tabs: self.adopt_existing_twitch_tabs,
         });
     }
 
