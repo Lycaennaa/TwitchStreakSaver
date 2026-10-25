@@ -36,6 +36,8 @@ mod browser_connection;
 mod browser_setup;
 #[path = "main/channel_list.rs"]
 mod channel_list;
+#[path = "main/channel_selection_controls.rs"]
+mod channel_selection_controls;
 #[path = "main/queue_visibility.rs"]
 mod queue_visibility;
 #[path = "main/twitch.rs"]

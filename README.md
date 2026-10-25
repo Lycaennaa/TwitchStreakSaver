@@ -21,7 +21,7 @@ The followed-channel list is sorted alphabetically by display name, ignoring let
 
 The in-app activity log retains the most recent 500 events locally across launches, including app-managed stream openings. Expand **Daily summaries** to review retained streak, points-event, bonus, and stream activity by date. The log can also be filtered by event type and searched with case-insensitive fuzzy matching across event text, streamer names, and timestamps.
 
-Each button selects its option for every followed channel, regardless of the current search. Once all channels have an option selected, the button changes to **Unselect all** and clears that selection.
+**Select all** buttons continue to apply to every followed channel regardless of the current search. The separate **Select matching** buttons affect only followed channels matching the search (with an empty search, all followed channels match). Each button toggles to **Unselect all** or **Unselect matching** once every channel in its scope has the option selected; unselecting affects only that scope.
 
 ## Chromium browser extension setup
 
