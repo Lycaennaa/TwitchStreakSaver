@@ -51,6 +51,7 @@ impl Dashboard {
             let browser_states = &self.browser_states;
             let points_rotation = &self.points_rotation;
             let points_now = self.started_at.elapsed();
+            let automation_delays = &mut self.automation_delays;
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.strong("Followed channels");
@@ -231,6 +232,12 @@ impl Dashboard {
                                             if channel_selection_controls(ui, channel).changed() {
                                                 unmuted_changed = true;
                                             }
+                                            channel_snooze_controls(
+                                                ui,
+                                                automation_delays,
+                                                &channel.id,
+                                                points_now,
+                                            );
                                         },
                                     );
                                 });
@@ -452,5 +459,30 @@ mod tests {
 
         assert!(channels.iter().all(|channel| !channel.selection.points));
         assert!(channels.iter().all(|channel| !channel.selection.streak));
+    }
+}
+fn channel_snooze_controls(
+    ui: &mut egui::Ui,
+    automation_delays: &mut automation::AutomationDelays,
+    channel_id: &str,
+    now: Duration,
+) {
+    if let Some(remaining) = automation_delays.channel_snooze_remaining(channel_id, now) {
+        ui.label(format!(
+            "Snoozed · {}",
+            automation::format_remaining_duration(remaining)
+        ));
+        if ui.button("Unsnooze").clicked() {
+            automation_delays.unsnooze_channel(channel_id);
+        }
+    } else {
+        ui.menu_button("Snooze", |ui| {
+            for (duration, label) in automation::TEMPORARY_AUTOMATION_DURATIONS {
+                if ui.button(label).clicked() {
+                    automation_delays.snooze_channel_for(channel_id, now, duration);
+                    ui.close_menu();
+                }
+            }
+        });
     }
 }

@@ -52,6 +52,8 @@ fn queue_candidates<'a>(
     live_channel_ids: &HashSet<String>,
     raid_redirected_channels: &HashSet<String>,
     streak_completed: &HashMap<String, u64>,
+    automation_delays: &automation::AutomationDelays,
+    now: Duration,
 ) -> Vec<QueueCandidate<'a>> {
     let external_channel_ids = external_stream_counts
         .iter()
@@ -65,6 +67,7 @@ fn queue_candidates<'a>(
             !manual_open_channels.contains(&channel.id)
                 && !external_channel_ids.contains(channel.id.as_str())
                 && !raid_redirected_channels.contains(&channel.id)
+                && !automation_delays.is_channel_snoozed(&channel.id, now)
         })
         .map(|channel| QueueCandidate {
             channel_id: &channel.id,
@@ -372,6 +375,7 @@ struct Dashboard {
     close_on_raid_redirect: bool,
     preferred_quality: PreferredQuality,
     automation_enabled: bool,
+    automation_delays: automation::AutomationDelays,
     channels: Vec<FollowedChannel>,
     followed_search: String,
     started_at: Instant,
@@ -475,6 +479,7 @@ impl Dashboard {
             close_on_raid_redirect: preferences.close_on_raid_redirect,
             preferred_quality: preferences.preferred_quality,
             automation_enabled: preferences.auto_start_on_launch,
+            automation_delays: automation::AutomationDelays::default(),
             channels: preferences.channels,
             followed_search: String::new(),
             started_at: Instant::now(),

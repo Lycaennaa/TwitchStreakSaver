@@ -26,6 +26,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         browser_profile_roots: Vec::new(),
         browser_profile_data_directories: Vec::new(),
         automation_enabled: true,
+        automation_delays: super::automation::AutomationDelays::default(),
         channels: vec![
             FollowedChannel::new("old", "Old Streamer"),
             new_streamer.clone(),
@@ -859,4 +860,107 @@ fn activity_log_records_app_managed_player_open_once() {
         surface: BrowserSurface::Player,
     });
     assert_eq!(dashboard.activity_log.len(), 1);
+}
+
+#[test]
+fn temporary_global_pause_preserves_tabs_and_resumes_at_expiry() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.pending_stream_switch = None;
+    let now = dashboard.started_at.elapsed();
+    let existing_auto_open_channels = dashboard.auto_open_channels.clone();
+    let auto_start_on_launch = dashboard.auto_start_on_launch;
+
+    dashboard
+        .automation_delays
+        .pause_for(now, Duration::from_secs(60));
+    dashboard
+        .streak_rotation
+        .observe_active_sessions(
+            &[super::StreamSession {
+                channel_id: "new".to_owned(),
+                eligibility: super::TurnEligibility {
+                    player_playing: true,
+                    chat_ready: true,
+                    capacity_available: true,
+                },
+            }],
+            now,
+        )
+        .unwrap();
+    dashboard.streak_rotation.pause_active_sessions(now);
+
+    let mut commands = Vec::new();
+    dashboard.reconcile_automatic_tabs_with(now + Duration::from_secs(59), |_, command| {
+        commands.push(command);
+        true
+    });
+
+    assert!(commands.is_empty());
+    assert_eq!(dashboard.auto_open_channels, existing_auto_open_channels);
+    assert!(dashboard.automation_enabled);
+    assert_eq!(dashboard.auto_start_on_launch, auto_start_on_launch);
+    assert_eq!(
+        dashboard
+            .streak_rotation
+            .elapsed_eligible("new", now + Duration::from_secs(59)),
+        Some(Duration::ZERO)
+    );
+    assert!(dashboard
+        .queue_visibility()
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("paused")));
+
+    dashboard.reconcile_automatic_tabs_with(now + Duration::from_secs(60), |_, command| {
+        commands.push(command);
+        true
+    });
+
+    assert!(!commands.is_empty());
+}
+
+#[test]
+fn channel_snooze_skips_automation_until_its_expiry_without_changing_selection() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.pending_stream_switch = None;
+    dashboard.auto_open_channels.clear();
+    dashboard.auto_open_retry_after.clear();
+    let now = dashboard.started_at.elapsed();
+    let original_selection = dashboard
+        .channels
+        .iter()
+        .find(|channel| channel.id == "new")
+        .expect("new channel remains followed")
+        .selection
+        .clone();
+    dashboard
+        .automation_delays
+        .snooze_channel_for("new", now, Duration::from_secs(60));
+
+    assert!(dashboard.queue_visibility().entries.is_empty());
+
+    let mut commands = Vec::new();
+    dashboard.reconcile_automatic_tabs_with(now + Duration::from_secs(59), |_, command| {
+        commands.push(command);
+        true
+    });
+    assert!(commands.is_empty());
+    assert!(dashboard.auto_open_channels.is_empty());
+
+    dashboard.reconcile_automatic_tabs_with(now + Duration::from_secs(60), |_, command| {
+        commands.push(command);
+        true
+    });
+
+    assert!(!commands.is_empty());
+    assert!(dashboard.auto_open_channels.contains("new"));
+    assert_eq!(
+        dashboard
+            .channels
+            .iter()
+            .find(|channel| channel.id == "new")
+            .expect("new channel remains followed")
+            .selection,
+        original_selection
+    );
 }

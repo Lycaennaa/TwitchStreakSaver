@@ -1,4 +1,81 @@
 use super::*;
+#[derive(Default)]
+pub(super) struct AutomationDelays {
+    global_pause_until: Option<Duration>,
+    channel_snooze_until: HashMap<String, Duration>,
+}
+
+impl AutomationDelays {
+    pub(super) fn pause_for(&mut self, now: Duration, duration: Duration) {
+        self.global_pause_until = Some(now.saturating_add(duration));
+    }
+
+    pub(super) fn resume(&mut self) {
+        self.global_pause_until = None;
+    }
+
+    pub(super) fn global_pause_remaining(&self, now: Duration) -> Option<Duration> {
+        let until = self.global_pause_until?;
+        (until > now).then_some(until.saturating_sub(now))
+    }
+
+    pub(super) fn is_paused(&self, now: Duration) -> bool {
+        self.global_pause_remaining(now).is_some()
+    }
+
+    pub(super) fn snooze_channel_for(
+        &mut self,
+        channel_id: &str,
+        now: Duration,
+        duration: Duration,
+    ) {
+        self.channel_snooze_until
+            .insert(channel_id.to_owned(), now.saturating_add(duration));
+    }
+
+    pub(super) fn unsnooze_channel(&mut self, channel_id: &str) {
+        self.channel_snooze_until.remove(channel_id);
+    }
+
+    pub(super) fn channel_snooze_remaining(
+        &self,
+        channel_id: &str,
+        now: Duration,
+    ) -> Option<Duration> {
+        let until = *self.channel_snooze_until.get(channel_id)?;
+        (until > now).then_some(until.saturating_sub(now))
+    }
+
+    pub(super) fn is_channel_snoozed(&self, channel_id: &str, now: Duration) -> bool {
+        self.channel_snooze_remaining(channel_id, now).is_some()
+    }
+
+    pub(super) fn expire(&mut self, now: Duration) {
+        if self.global_pause_until.is_some_and(|until| until <= now) {
+            self.global_pause_until = None;
+        }
+        self.channel_snooze_until.retain(|_, until| *until > now);
+    }
+}
+
+pub(super) const TEMPORARY_AUTOMATION_DURATIONS: [(Duration, &str); 3] = [
+    (Duration::from_secs(15 * 60), "15 minutes"),
+    (Duration::from_secs(60 * 60), "1 hour"),
+    (Duration::from_secs(4 * 60 * 60), "4 hours"),
+];
+
+pub(super) fn format_remaining_duration(remaining: Duration) -> String {
+    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+    if seconds >= 60 * 60 {
+        format!(
+            "{}h {:02}m",
+            seconds / (60 * 60),
+            (seconds % (60 * 60)) / 60
+        )
+    } else {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
+}
 
 impl Dashboard {
     pub(super) fn start_automation(&mut self) {
@@ -79,6 +156,7 @@ impl Dashboard {
                     .any(|channel| channel.id == *channel_id)
         });
         self.queue_planner.expire_streak_turn_deferrals(now);
+        self.automation_delays.expire(now);
         let Some((desired, due_auto_open_retries)) = self.prepare_automatic_tab_plan(now) else {
             return;
         };
@@ -95,8 +173,12 @@ impl Dashboard {
         &mut self,
         now: Duration,
     ) -> Option<(HashSet<String>, Vec<String>)> {
-        self.maybe_launch_automatic_browser();
-        if !self.automation_enabled
+        let globally_paused = self.automation_delays.is_paused(now);
+        if !globally_paused {
+            self.maybe_launch_automatic_browser();
+        }
+        if globally_paused
+            || !self.automation_enabled
             || !self.browser_connected
             || !self.external_inventory_received
             || !matches!(
@@ -136,6 +218,8 @@ impl Dashboard {
             &self.live_channel_ids,
             &self.raid_redirected_channels,
             &self.streak_completed,
+            &self.automation_delays,
+            now,
         );
         let mut plan = self
             .queue_planner

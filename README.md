@@ -45,6 +45,9 @@ The extension inventories external Twitch channel/player tabs separately from ap
 **Automatic browser opening** can launch Chrome, Brave, Edge, or Helium with the selected profile when automation is enabled, a followed Twitch channel is live, and the extension is disconnected. Profiles with the extension enabled are marked. If several are enabled, the bridge cannot identify which profile is connected, and an already-connected profile is preserved.
 
 **Queue visibility.** The followed-channel panel shows the upcoming managed Watch Streak or Channel Points queue and the player/chat readiness used for each 16-minute turn timer. Player/chat readiness does not block opening. The queue reports actionable opening blockers—including automation, Twitch/browser connection or tab-inventory state, and full stream capacity—and keeps upcoming channels visible while capacity is full.
+
+**Temporary pause and snooze.** Pause automatic opening for 15 minutes, 1 hour, or 4 hours; it resumes automatically at expiry and leaves currently app-managed tabs open. Snooze an individual followed channel for the same durations to skip it until expiry; if it is already app-managed, it closes on the next automation update. Neither action changes persistent automation or channel selection. These timers run while the app is open and reset when it exits.
+
 Offline selected channels are listed as **Waiting to go live** until Twitch reports them live; this status is independent of queue readiness.
 
 Build incrementally with:

@@ -330,6 +330,7 @@ impl Dashboard {
         let mut start = false;
         let mut stop = false;
         let mut profile_folder_reset: Option<BrowserKind> = None;
+        let now = self.started_at.elapsed();
         ui.group(|ui| {
             ui.strong("Automation");
             ui.label(if self.automation_enabled {
@@ -337,6 +338,12 @@ impl Dashboard {
             } else {
                 "Automation stopped."
             });
+            draw_automation_pause_controls(
+                ui,
+                &mut self.automation_delays,
+                now,
+                self.automation_enabled,
+            );
             ui.checkbox(&mut self.auto_start_on_launch, "Auto-start on app launch");
             if ui.button("Refresh browser profiles").clicked() {
                 self.refresh_browser_profiles();
@@ -556,5 +563,51 @@ mod tests {
                 screen_size.y
             );
         }
+    }
+}
+fn draw_automation_pause_controls(
+    ui: &mut egui::Ui,
+    automation_delays: &mut automation::AutomationDelays,
+    now: Duration,
+    automation_enabled: bool,
+) {
+    let remaining = automation_delays.global_pause_remaining(now);
+    let mut resume = false;
+    let mut pause_for = None;
+
+    if let Some(remaining) = remaining {
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Automation paused — resumes in {}.",
+                automation::format_remaining_duration(remaining)
+            ));
+            resume = ui.button("Resume now").clicked();
+            if automation_enabled {
+                ui.menu_button("Extend pause", |ui| {
+                    for (duration, label) in automation::TEMPORARY_AUTOMATION_DURATIONS {
+                        if ui.button(label).clicked() {
+                            pause_for = Some(duration);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
+        });
+    } else if automation_enabled {
+        ui.menu_button("Pause automatic opening", |ui| {
+            for (duration, label) in automation::TEMPORARY_AUTOMATION_DURATIONS {
+                if ui.button(label).clicked() {
+                    pause_for = Some(duration);
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    if resume {
+        automation_delays.resume();
+    }
+    if let Some(duration) = pause_for {
+        automation_delays.pause_for(now, duration);
     }
 }

@@ -15,6 +15,7 @@ pub(super) struct QueueVisibility {
 }
 impl Dashboard {
     pub(super) fn queue_visibility(&self) -> QueueVisibility {
+        let automation_now = self.started_at.elapsed();
         let external_streams = active_external_stream_count(
             &self.external_stream_counts,
             self.external_unmatched_streams,
@@ -32,6 +33,8 @@ impl Dashboard {
             &self.live_channel_ids,
             &self.raid_redirected_channels,
             &self.streak_completed,
+            &self.automation_delays,
+            automation_now,
         );
         let offline_waiting = candidates
             .iter()
@@ -78,6 +81,9 @@ impl Dashboard {
         let stream_count = manually_open_streams.saturating_add(external_streams);
         let open_capacity = APP_STREAM_LIMIT.saturating_sub(stream_count);
         let mut blockers = Vec::new();
+        if self.automation_delays.is_paused(automation_now) {
+            blockers.push("Automation temporarily paused.".to_owned());
+        }
         if !self.automation_enabled {
             blockers.push("Start automation to open managed queue channels.".to_owned());
         }
