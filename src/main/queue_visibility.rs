@@ -10,7 +10,6 @@ pub(super) struct QueueVisibility {
     pub(super) stage: QueueStage,
     pub(super) entries: Vec<QueueVisibilityEntry>,
     pub(super) blockers: Vec<String>,
-    pub(super) offline_waiting: Vec<QueueVisibilityEntry>,
     pub(super) open_capacity: usize,
 }
 impl Dashboard {
@@ -36,24 +35,6 @@ impl Dashboard {
             &self.automation_delays,
             automation_now,
         );
-        let offline_waiting = candidates
-            .iter()
-            .filter(|candidate| {
-                !candidate.is_live && (candidate.selection.streak || candidate.selection.points)
-            })
-            .filter_map(|candidate| {
-                let channel = self
-                    .channels
-                    .iter()
-                    .find(|channel| channel.id == candidate.channel_id)?;
-                Some(QueueVisibilityEntry {
-                    channel_id: channel.id.clone(),
-                    display_name: channel.display_name.clone(),
-                    player_ready: false,
-                    chat_ready: false,
-                })
-            })
-            .collect();
         let plan = self.queue_planner.plan(candidates.iter().copied(), 0);
         let now = Instant::now();
         let entries: Vec<QueueVisibilityEntry> = plan
@@ -120,7 +101,6 @@ impl Dashboard {
         QueueVisibility {
             stage: plan.stage,
             entries,
-            offline_waiting,
             blockers,
             open_capacity,
         }
@@ -161,15 +141,6 @@ impl Dashboard {
             ));
             for blocker in &queue.blockers {
                 ui.colored_label(egui::Color32::YELLOW, blocker);
-            }
-            if !queue.offline_waiting.is_empty() {
-                ui.label("Waiting to go live:");
-                for entry in &queue.offline_waiting {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.strong(&entry.display_name);
-                        ui.label("Waiting for channel to go live");
-                    });
-                }
             }
         });
     }

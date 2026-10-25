@@ -48,7 +48,7 @@ The extension inventories external Twitch channel/player tabs separately from ap
 
 **Temporary pause and snooze.** Pause automatic opening for 15 minutes, 1 hour, or 4 hours; it resumes automatically at expiry and leaves currently app-managed tabs open. Snooze an individual followed channel for the same durations to skip it until expiry; if it is already app-managed, it closes on the next automation update. Neither action changes persistent automation or channel selection. These timers run while the app is open and reset when it exits.
 
-Offline selected channels are listed as **Waiting to go live** until Twitch reports them live; this status is independent of queue readiness.
+Offline selected channels are omitted from the upcoming managed-channel list until Twitch reports them live.
 
 Build incrementally with:
 

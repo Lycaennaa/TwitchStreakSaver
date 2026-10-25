@@ -128,16 +128,13 @@ fn queue_visibility_keeps_candidates_visible_when_stream_capacity_is_full() {
 }
 
 #[test]
-fn offline_selected_channels_are_shown_as_waiting_to_go_live() {
+fn offline_selected_channels_remain_excluded_from_queue_entries() {
     let mut dashboard = dashboard_with_pending_stream_switch(true);
     dashboard.live_channel_ids.clear();
 
     let queue = dashboard.queue_visibility();
 
     assert!(queue.entries.is_empty());
-    assert_eq!(queue.offline_waiting.len(), 1);
-    assert_eq!(queue.offline_waiting[0].channel_id, "new");
-    assert_eq!(queue.offline_waiting[0].display_name, "New Streamer");
 }
 
 #[test]
