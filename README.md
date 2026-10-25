@@ -49,6 +49,8 @@ The extension revalidates tab identity and player route after async adoption and
 
 **Queue visibility.** The followed-channel panel shows the upcoming managed Watch Streak or Channel Points queue and the player/chat readiness used for each 16-minute turn timer. Player/chat readiness does not block opening. The queue reports actionable opening blockers—including automation, Twitch/browser connection or tab-inventory state, and full stream capacity—and keeps upcoming channels visible while capacity is full.
 
+**Chat engagement.** The extension checks the Twitch login attached to each rendered chat message against the Twitch account connected in the Rust app. Only matching messages from app-managed streams are excluded from the 16-minute rotation for the current automation run. Message text stays local.
+
 **Temporary pause and snooze.** Pause automatic opening for 15 minutes, 1 hour, or 4 hours; it resumes automatically at expiry and leaves currently app-managed tabs open. Snooze an individual followed channel for the same durations to skip it until expiry; if it is already app-managed, it closes on the next automation update. Neither action changes persistent automation or channel selection. These timers run while the app is open and reset when it exits.
 
 Offline selected channels are omitted from the upcoming managed-channel list until Twitch reports them live.

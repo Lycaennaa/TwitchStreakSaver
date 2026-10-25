@@ -9,6 +9,17 @@
   const QUALITY_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
   const QUALITY_STORAGE_KEY = "preferredQuality";
   let preferredQuality = TwitchQuality.DEFAULT_QUALITY;
+  const CHAT_MESSAGE_LIST_SELECTOR =
+    '[data-test-selector="chat-scrollable-area__message-container"], [data-a-target="chat-message-list"]';
+  const CHAT_LINE_SELECTOR = '[data-a-target="chat-line-message"]';
+  const CHAT_LINE_BODY_SELECTOR = '[data-a-target="chat-line-message-body"]';
+  const CHAT_SEND_CONFIRMATION_TIMEOUT_MS = 10_000;
+  let chatMessageObserver = null;
+  let observedChatMessageList = null;
+  let observedChatLogin = "";
+  let pendingOutgoingChatMessages = [];
+  let seenConfirmedChatMessages = new WeakSet();
+  let viewerLogin = "";
   let qualityPreferenceReady = false;
   let qualityPreferenceChangedWhileLoading = false;
   let qualityPreferenceRevision = 0;
@@ -111,6 +122,30 @@
     );
     return loading ? "loading" : "missing";
   }
+  function normalizeChatText(text) {
+    return typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+  }
+
+  function chatNodeText(node) {
+    if (node.nodeType === 3) return node.textContent || "";
+    if (node.nodeType !== 1) return "";
+    if (node.tagName === "IMG") return node.getAttribute?.("alt") || node.alt || "";
+    if (node.tagName === "BR") return "\n";
+    return Array.from(node.childNodes || []).map(chatNodeText).join("");
+  }
+
+  function chatElementText(element) {
+    if (typeof element.value === "string") return normalizeChatText(element.value);
+    const text = element.childNodes?.length
+      ? Array.from(element.childNodes).map(chatNodeText).join("")
+      : element.innerText || element.textContent || "";
+    return normalizeChatText(text);
+  }
+
+  function chatEchoText(text) {
+    return text.replace(/^\/me\s+/i, "");
+  }
+
   function visibleElement(selector) {
     return Array.from(document.querySelectorAll(selector))
       .find((element) => element.getClientRects().length > 0) || null;
@@ -300,12 +335,20 @@
     if (timer !== null) window.clearInterval(timer);
     timer = null;
     previousState = "";
+    chatMessageObserver?.disconnect();
+    chatMessageObserver = null;
+    observedChatMessageList = null;
+    observedChatLogin = "";
+    viewerLogin = "";
+    pendingOutgoingChatMessages = [];
+    seenConfirmedChatMessages = new WeakSet();
   }
 
-  function report() {
+  function report(chatMessageAuthorLogin = "") {
     if (!monitoring) return;
     const route = channelRoute();
     if (!route.login || !route.surface) return;
+    observeChatMessages(route.login);
     const state = {
       type: "channel_status",
       surface: route.surface,
@@ -313,11 +356,16 @@
       player_state: playerState(),
       chat_state: chatState(),
     };
+    if (chatMessageAuthorLogin) {
+      state.chat_message_author_login = chatMessageAuthorLogin;
+    }
     const encoded = JSON.stringify(state);
     const now = Date.now();
-    if (encoded === previousState && now - lastSentAt < 5000) return;
-    previousState = encoded;
-    lastSentAt = now;
+    if (!chatMessageAuthorLogin && encoded === previousState && now - lastSentAt < 5000) return;
+    if (!chatMessageAuthorLogin) {
+      previousState = encoded;
+      lastSentAt = now;
+    }
     try {
       chrome.runtime.sendMessage(state).catch(() => {});
     } catch (error) {
@@ -326,6 +374,102 @@
       stopPlayerPreferenceAutomation();
     }
   }
+  function chatMessagesIn(node) {
+    const element = node?.nodeType === 1 ? node : node?.parentElement;
+    if (!element) return [];
+    const messages = new Set();
+    const enclosingMessage = element.matches?.(CHAT_LINE_SELECTOR)
+      ? element
+      : element.closest?.(CHAT_LINE_SELECTOR);
+    if (enclosingMessage) messages.add(enclosingMessage);
+    for (const message of element.querySelectorAll?.(CHAT_LINE_SELECTOR) || []) {
+      messages.add(message);
+    }
+    return messages;
+  }
+
+  function confirmChatMessage(message, login) {
+    if (seenConfirmedChatMessages.has(message)) return;
+    const body = message.querySelector(CHAT_LINE_BODY_SELECTOR);
+    if (!body) return;
+    const authorLogin = message.getAttribute("data-a-user")?.trim().toLowerCase();
+    if (!authorLogin || authorLogin !== viewerLogin) return;
+    const text = chatEchoText(chatElementText(body));
+    if (!text) return;
+    const now = Date.now();
+    pendingOutgoingChatMessages = pendingOutgoingChatMessages.filter(
+      (pending) => pending.expiresAt > now,
+    );
+    const pendingIndex = pendingOutgoingChatMessages.findIndex(
+      (pending) => pending.login === login && (pending.text === text || pending.echoText === text),
+    );
+    if (pendingIndex === -1) return;
+    pendingOutgoingChatMessages.splice(pendingIndex, 1);
+    seenConfirmedChatMessages.add(message);
+    report(authorLogin);
+  }
+
+  function observeChatMessages(login) {
+    if (typeof MutationObserver !== "function") return;
+    const messageList = document.querySelector(CHAT_MESSAGE_LIST_SELECTOR);
+    if (!messageList) return;
+    const normalizedLogin = login.toLowerCase();
+    if (messageList === observedChatMessageList && normalizedLogin === observedChatLogin) return;
+    chatMessageObserver?.disconnect();
+    observedChatMessageList = messageList;
+    observedChatLogin = normalizedLogin;
+    seenConfirmedChatMessages = new WeakSet();
+    chatMessageObserver = new MutationObserver((mutations) => {
+      if (!monitoring || channelRoute().login?.toLowerCase() !== observedChatLogin) return;
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          for (const message of chatMessagesIn(node)) {
+            confirmChatMessage(message, observedChatLogin);
+          }
+        }
+      }
+    });
+    chatMessageObserver.observe(messageList, { childList: true, subtree: true });
+  }
+
+  function queueChatMessage(input) {
+    if (!monitoring) return;
+    const route = channelRoute();
+    if (!route.login || !route.surface) return;
+    const text = chatElementText(input);
+    if (!text) return;
+    const now = Date.now();
+    pendingOutgoingChatMessages = pendingOutgoingChatMessages.filter(
+      (pending) => pending.expiresAt > now,
+    );
+    // Keep the draft local until Twitch renders its matching transcript echo.
+    pendingOutgoingChatMessages.push({
+      login: route.login.toLowerCase(),
+      text,
+      echoText: chatEchoText(text),
+      expiresAt: now + CHAT_SEND_CONFIRMATION_TIMEOUT_MS,
+    });
+  }
+
+  function handleChatKeydown(event) {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    const input = event.target?.closest?.('[data-a-target="chat-input"]');
+    if (input) queueChatMessage(input);
+  }
+
+  function handleChatSendClick(event) {
+    const button = event.target?.closest?.('[data-a-target="chat-send-button"]');
+    if (!button || button.disabled || button.getAttribute?.("aria-disabled") === "true") return;
+    const input = document.querySelector('[data-a-target="chat-input"]');
+    if (input) queueChatMessage(input);
+  }
+
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("keydown", handleChatKeydown, true);
+    document.addEventListener("click", handleChatSendClick, true);
+  }
+
+
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "get_managed_tab_identity") {
@@ -351,10 +495,19 @@
       sendResponse({ unmuted: message.unmuted });
       return false;
     }
-    if (message?.type === "start_monitoring" && !monitoring) {
-      monitoring = true;
-      report();
-      if (monitoring) timer = window.setInterval(report, 2000);
+    if (message?.type === "start_monitoring") {
+      const nextViewerLogin = typeof message.viewer_login === "string"
+        ? message.viewer_login.trim().toLowerCase()
+        : "";
+      if (nextViewerLogin !== viewerLogin) {
+        viewerLogin = nextViewerLogin;
+        pendingOutgoingChatMessages = [];
+      }
+      if (!monitoring) {
+        monitoring = true;
+        report();
+        if (monitoring) timer = window.setInterval(report, 2000);
+      }
     } else if (message?.type === "stop_monitoring" && monitoring) {
       stopMonitoring();
     }

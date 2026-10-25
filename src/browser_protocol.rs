@@ -14,6 +14,7 @@ pub enum BrowserCommand {
         channels: Vec<BrowserChannel>,
         close_on_raid_redirect: bool,
         adopt_existing_twitch_tabs: bool,
+        viewer_login: Option<String>,
     },
     ClearRaidRedirectedChannels {
         channel_ids: Vec<String>,
@@ -99,6 +100,8 @@ pub enum KnownBrowserMessage {
         player_state: Option<PlayerState>,
         #[serde(default)]
         chat_state: Option<ChatState>,
+        #[serde(default)]
+        chat_message_author_login: Option<String>,
     },
     TabClosed {
         channel_id: String,
@@ -280,6 +283,7 @@ mod tests {
     fn channel_sync_includes_raid_redirect_setting() {
         let command = BrowserCommand::SyncChannels {
             channels: vec![],
+            viewer_login: Some("viewer".to_owned()),
             close_on_raid_redirect: true,
             adopt_existing_twitch_tabs: true,
         };
@@ -289,6 +293,7 @@ mod tests {
             json!({
                 "type": "sync_channels",
                 "channels": [],
+                "viewer_login": "viewer",
                 "close_on_raid_redirect": true,
                 "adopt_existing_twitch_tabs": true,
             }),
@@ -403,6 +408,7 @@ mod tests {
             "surface": "player",
             "player_state": "playing",
             "chat_state": "ready",
+            "chat_message_author_login": "viewer",
         }))
         .unwrap();
 
@@ -414,6 +420,7 @@ mod tests {
                 surface: BrowserSurface::Player,
                 player_state: Some(PlayerState::Playing),
                 chat_state: Some(ChatState::Ready),
+                chat_message_author_login: Some("viewer".to_owned()),
             }),
         );
         let unknown_status = serde_json::from_value::<BrowserMessage>(json!({
@@ -433,6 +440,7 @@ mod tests {
                 surface: BrowserSurface::Player,
                 player_state: Some(PlayerState::Unknown),
                 chat_state: Some(ChatState::Unknown),
+                chat_message_author_login: None,
             }),
         );
         assert_eq!(

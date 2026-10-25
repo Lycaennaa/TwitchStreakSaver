@@ -274,6 +274,9 @@ async function createExtension({
           contentMessage.unmuted = message.unmuted;
           contentMessage.login = message.login;
         }
+        if (message.type === "start_monitoring") {
+          contentMessage.viewer_login = message.viewer_login;
+        }
         calls.contentMessages.push(contentMessage);
         if (message.type === "get_managed_tab_identity") {
           const pause = managedTabIdentityReadPause;
@@ -1217,8 +1220,15 @@ test("combined Twitch page reports both player and chat readiness from one activ
   await extension.send({
     type: "sync_channels",
     channels: [{ id: "channel-1", login: "streamer" }],
+    viewer_login: "viewer",
   });
   const [tab] = [...extension.tabsById.values()];
+  assert.equal(
+    extension.calls.contentMessages
+      .filter((message) => message.tabId === tab.id && message.type === "start_monitoring")
+      .at(-1)?.viewer_login,
+    "viewer",
+  );
 
   extension.reportState(tab.id, {
     surface: "player",
@@ -1227,18 +1237,36 @@ test("combined Twitch page reports both player and chat readiness from one activ
     chat_state: "ready",
   });
 
+  extension.reportState(tab.id, {
+    surface: "player",
+    login: "streamer",
+    player_state: "playing",
+    chat_state: "ready",
+    chat_message_author_login: "viewer",
+  });
   assert.deepEqual(
     JSON.parse(JSON.stringify(extension.calls.nativeMessages.filter(
       (message) => message.type === "channel_status",
     ))),
-    [{
-      type: "channel_status",
-      channel_id: "channel-1",
-      tab_id: tab.id,
-      surface: "player",
-      player_state: "playing",
-      chat_state: "ready",
-    }],
+    [
+      {
+        type: "channel_status",
+        channel_id: "channel-1",
+        tab_id: tab.id,
+        surface: "player",
+        player_state: "playing",
+        chat_state: "ready",
+      },
+      {
+        type: "channel_status",
+        channel_id: "channel-1",
+        tab_id: tab.id,
+        surface: "player",
+        player_state: "playing",
+        chat_state: "ready",
+        chat_message_author_login: "viewer",
+      },
+    ],
   );
 });
 

@@ -160,6 +160,7 @@ pub enum StreamRotationError {
 #[derive(Default)]
 pub struct StreamRotation {
     turns: Vec<TrackedStreamTurn>,
+    excluded_channels: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -218,6 +219,12 @@ impl StreamTurnTimer {
 }
 
 impl StreamRotation {
+    pub fn exclude_channel(&mut self, channel_id: impl Into<String>) {
+        let channel_id = channel_id.into();
+        self.turns.retain(|turn| turn.channel_id != channel_id);
+        self.excluded_channels.insert(channel_id);
+    }
+
     pub fn observe_active_sessions(
         &mut self,
         sessions: &[StreamSession],
@@ -246,6 +253,9 @@ impl StreamRotation {
 
         let mut completed = Vec::new();
         for session in sessions {
+            if self.excluded_channels.contains(&session.channel_id) {
+                continue;
+            }
             let turn = if let Some(turn) = self
                 .turns
                 .iter_mut()

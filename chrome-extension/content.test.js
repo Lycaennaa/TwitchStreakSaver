@@ -384,3 +384,154 @@ test("applies managed player audio without carrying it across routes", () => {
   chatPage.intervals[0].callback();
   assert.equal(returnedVideo.muted, true);
 });
+test("confirms chat messages from transcript echoes without sending message text", () => {
+  const sent = [];
+  const listeners = new Map();
+  const chatInput = {
+    value: "",
+    closest(selector) {
+      return selector === '[data-a-target="chat-input"]' ? this : null;
+    },
+  };
+  const chatMessageList = {};
+  let onMessage;
+  let chatObserver;
+  const document = {
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    querySelectorAll: () => [],
+    querySelector(selector) {
+      return selector === '[data-test-selector="chat-scrollable-area__message-container"], [data-a-target="chat-message-list"]'
+        ? chatMessageList
+        : chatInput;
+    },
+  };
+  class FakeMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+      chatObserver = this;
+    }
+    observe() {}
+    disconnect() {}
+  }
+  const context = vm.createContext({
+    chrome: {
+      runtime: {
+        sendMessage(message) {
+          sent.push(message);
+          return Promise.resolve();
+        },
+        onMessage: {
+          addListener(listener) {
+            onMessage = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          get(defaults) {
+            return Promise.resolve(defaults);
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    },
+    document,
+    MutationObserver: FakeMutationObserver,
+    HTMLMediaElement: { HAVE_FUTURE_DATA: 3 },
+    location: { href: "https://www.twitch.tv/streamer" },
+    TwitchTabUtils: {
+      channelRoute: () => ({ login: "streamer", surface: "player" }),
+    },
+    TwitchQuality,
+    window: {
+      opener: null,
+      sessionStorage: {
+        getItem: () => null,
+        removeItem() {},
+        setItem() {},
+      },
+      setInterval: () => 1,
+      clearInterval() {},
+      setTimeout: () => 1,
+    },
+  });
+  const source = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
+  vm.runInContext(source, context, { filename: "content.js" });
+  onMessage({ type: "start_monitoring", viewer_login: "viewer" }, {}, () => {});
+
+  function addChatLine(text, authorLogin = "viewer") {
+    const body = { textContent: text };
+    const line = {
+      nodeType: 1,
+      matches(selector) {
+        return selector === '[data-a-target="chat-line-message"]';
+      },
+      closest(selector) {
+        return this.matches(selector) ? this : null;
+      },
+      getAttribute(name) {
+        return name === "data-a-user" ? authorLogin : null;
+      },
+      querySelector(selector) {
+        return selector === '[data-a-target="chat-line-message-body"]' ? body : null;
+      },
+      querySelectorAll: () => [],
+    };
+    chatObserver.callback([{ addedNodes: [line] }]);
+  }
+  const submissions = () => sent.filter((message) => message.chat_message_author_login);
+  const keydown = listeners.get("keydown");
+
+  chatInput.value = "first message";
+  keydown({ key: "Enter", target: chatInput });
+  assert.equal(submissions().length, 0);
+  addChatLine("unrelated message");
+  assert.equal(submissions().length, 0);
+  addChatLine("first message", "another_viewer");
+  assert.equal(submissions().length, 0);
+  addChatLine("first message");
+  assert.equal(submissions().length, 1);
+
+  chatInput.value = "second message";
+  keydown({ key: "Enter", target: chatInput });
+  addChatLine("second message");
+  assert.equal(submissions().length, 2);
+
+  chatInput.value = "failed send";
+  keydown({ key: "Enter", target: chatInput });
+  assert.equal(submissions().length, 2);
+  chatInput.value = "multiline";
+  keydown({ key: "Enter", shiftKey: true, target: chatInput });
+  addChatLine("multiline");
+  assert.equal(submissions().length, 2);
+  chatInput.value = "";
+  keydown({ key: "Enter", target: chatInput });
+  assert.equal(submissions().length, 2);
+
+  chatInput.value = "button message";
+  const sendButton = {
+    disabled: false,
+    getAttribute: () => null,
+  };
+  listeners.get("click")({
+    target: {
+      closest(selector) {
+        return selector === '[data-a-target="chat-send-button"]' ? sendButton : null;
+      },
+    },
+  });
+  assert.equal(submissions().length, 2);
+  addChatLine("button message");
+  assert.equal(submissions().length, 3);
+
+  for (const submission of submissions()) {
+    assert.equal(submission.type, "channel_status");
+    assert.equal(submission.login, "streamer");
+    assert.equal(submission.chat_state, "ready");
+    assert.equal(Object.hasOwn(submission, "text"), false);
+    assert.equal(Object.hasOwn(submission, "message"), false);
+    assert.equal(submission.chat_message_author_login, "viewer");
+  }
+});

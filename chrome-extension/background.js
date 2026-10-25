@@ -11,6 +11,7 @@ let nativeBridgeReadyPort = null;
 let nativeHostError = null;
 let reconnectTimer = null;
 let channelsByLogin = new Map();
+let viewerLogin = "";
 let externalScanTimer = null;
 let externalScanGeneration = 0;
 let channelsById = new Map();
@@ -314,7 +315,10 @@ async function persistCompletedNativeCommand(commandId) {
 }
 
 function setMonitoring(tabId, type) {
-  void chrome.tabs.sendMessage(tabId, { type }).catch(() => {});
+  void chrome.tabs.sendMessage(tabId, {
+    type,
+    ...(type === "start_monitoring" ? { viewer_login: viewerLogin } : {}),
+  }).catch(() => {});
 }
 
 async function handleNativeCommand(message, sourcePort = nativePort) {
@@ -347,6 +351,14 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
         channels.map((channel) => [channel.login.toLowerCase(), channel.id]),
       );
       channelsById = new Map(channels.map((channel) => [channel.id, channel]));
+      viewerLogin = typeof message.viewer_login === "string"
+        ? message.viewer_login.trim().toLowerCase()
+        : "";
+      for (const record of TwitchManagedTabs.recordValues()) {
+        for (const [, tabId] of TwitchManagedTabs.managedSurfaceTabs(record)) {
+          setMonitoring(tabId, "start_monitoring");
+        }
+      }
       try {
         await TwitchManagedTabs.setCloseOnRaidRedirect(
           message.close_on_raid_redirect === true,
@@ -702,6 +714,10 @@ async function forwardChannelState(message, sender) {
         : { chat_state: message.chat_state }),
       ...(surface === "player" && record.layout === "combined_window"
         ? { chat_state: message.chat_state }
+        : {}),
+      ...(typeof message.chat_message_author_login === "string"
+        && message.chat_message_author_login.toLowerCase() === viewerLogin
+        ? { chat_message_author_login: viewerLogin }
         : {}),
     });
     return;

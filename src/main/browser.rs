@@ -391,7 +391,22 @@ impl Dashboard {
                 surface,
                 player_state,
                 chat_state,
+                chat_message_author_login,
             } => {
+                let chat_message_from_rust_user = match (
+                    &self.connection_status,
+                    chat_message_author_login.as_deref(),
+                ) {
+                    (TwitchConnectionStatus::Connected(login), Some(author_login)) => {
+                        login.eq_ignore_ascii_case(author_login)
+                    }
+                    _ => false,
+                };
+                if chat_message_from_rust_user && self.automation_enabled {
+                    self.points_rotation.exclude_channel(channel_id.clone());
+                    self.streak_rotation.exclude_channel(channel_id.clone());
+                }
+
                 self.handle_browser_tab(
                     channel_id,
                     tab_id,
@@ -838,6 +853,10 @@ impl Dashboard {
             channels,
             close_on_raid_redirect: self.close_on_raid_redirect,
             adopt_existing_twitch_tabs: self.adopt_existing_twitch_tabs,
+            viewer_login: match &self.connection_status {
+                TwitchConnectionStatus::Connected(login) => Some(login.clone()),
+                _ => None,
+            },
         });
     }
 

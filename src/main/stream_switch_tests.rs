@@ -1082,3 +1082,155 @@ fn adopted_browser_tabs_are_tracked_without_logging_an_app_open_and_release_clea
     assert!(!dashboard.manual_open_channels.contains("new"));
     assert!(dashboard.activity_log.is_empty());
 }
+#[test]
+fn sent_chat_message_removes_streamer_from_both_sixteen_minute_rotations() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.automation_enabled = true;
+    dashboard.connection_status = TwitchConnectionStatus::Connected("viewer".to_owned());
+    dashboard.pending_stream_switch = None;
+    let eligibility = super::TurnEligibility {
+        player_playing: true,
+        chat_ready: true,
+        capacity_available: true,
+    };
+    let sessions = [
+        super::StreamSession {
+            channel_id: "old".to_owned(),
+            eligibility: eligibility.clone(),
+        },
+        super::StreamSession {
+            channel_id: "new".to_owned(),
+            eligibility,
+        },
+    ];
+
+    dashboard
+        .points_rotation
+        .observe_active_sessions(&sessions, std::time::Duration::ZERO)
+        .unwrap();
+    dashboard
+        .streak_rotation
+        .observe_active_sessions(&sessions, std::time::Duration::ZERO)
+        .unwrap();
+
+    dashboard.handle_browser_message(KnownBrowserMessage::ChannelStatus {
+        channel_id: "old".to_owned(),
+        tab_id: 1,
+        surface: BrowserSurface::Player,
+        player_state: Some(super::PlayerState::Playing),
+        chat_state: Some(super::ChatState::Ready),
+        chat_message_author_login: Some("viewer".to_owned()),
+    });
+
+    let turn_end = std::time::Duration::from_secs(16 * 60);
+    assert_eq!(
+        dashboard
+            .points_rotation
+            .observe_active_sessions(&sessions, turn_end)
+            .unwrap(),
+        ["new"],
+    );
+    assert_eq!(
+        dashboard
+            .streak_rotation
+            .observe_active_sessions(&sessions, turn_end)
+            .unwrap(),
+        ["new"],
+    );
+}
+#[test]
+fn chat_message_received_while_automation_is_stopped_does_not_exclude_next_turn() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.pending_stream_switch = None;
+    dashboard.connection_status = TwitchConnectionStatus::Connected("viewer".to_owned());
+    dashboard.automation_enabled = false;
+    let session = super::StreamSession {
+        channel_id: "old".to_owned(),
+        eligibility: super::TurnEligibility {
+            player_playing: true,
+            chat_ready: true,
+            capacity_available: true,
+        },
+    };
+
+    dashboard.handle_browser_message(KnownBrowserMessage::ChannelStatus {
+        channel_id: "old".to_owned(),
+        tab_id: 1,
+        surface: BrowserSurface::Player,
+        player_state: Some(super::PlayerState::Playing),
+        chat_state: Some(super::ChatState::Ready),
+        chat_message_author_login: Some("viewer".to_owned()),
+    });
+
+    dashboard
+        .points_rotation
+        .observe_active_sessions(std::slice::from_ref(&session), std::time::Duration::ZERO)
+        .unwrap();
+    dashboard
+        .streak_rotation
+        .observe_active_sessions(std::slice::from_ref(&session), std::time::Duration::ZERO)
+        .unwrap();
+    let turn_end = std::time::Duration::from_secs(16 * 60);
+    assert_eq!(
+        dashboard
+            .points_rotation
+            .observe_active_sessions(std::slice::from_ref(&session), turn_end)
+            .unwrap(),
+        ["old"],
+    );
+    assert_eq!(
+        dashboard
+            .streak_rotation
+            .observe_active_sessions(std::slice::from_ref(&session), turn_end)
+            .unwrap(),
+        ["old"],
+    );
+}
+#[test]
+fn chat_message_from_other_rust_account_does_not_exclude_streamer() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.automation_enabled = true;
+    dashboard.pending_stream_switch = None;
+    dashboard.connection_status = TwitchConnectionStatus::Connected("viewer".to_owned());
+    let session = super::StreamSession {
+        channel_id: "old".to_owned(),
+        eligibility: super::TurnEligibility {
+            player_playing: true,
+            chat_ready: true,
+            capacity_available: true,
+        },
+    };
+
+    dashboard.handle_browser_message(KnownBrowserMessage::ChannelStatus {
+        channel_id: "old".to_owned(),
+        tab_id: 1,
+        surface: BrowserSurface::Player,
+        player_state: Some(super::PlayerState::Playing),
+        chat_state: Some(super::ChatState::Ready),
+        chat_message_author_login: Some("another_viewer".to_owned()),
+    });
+
+    dashboard
+        .points_rotation
+        .observe_active_sessions(std::slice::from_ref(&session), std::time::Duration::ZERO)
+        .unwrap();
+    dashboard
+        .streak_rotation
+        .observe_active_sessions(std::slice::from_ref(&session), std::time::Duration::ZERO)
+        .unwrap();
+    let turn_end = std::time::Duration::from_secs(16 * 60);
+    assert_eq!(
+        dashboard
+            .points_rotation
+            .observe_active_sessions(std::slice::from_ref(&session), turn_end)
+            .unwrap(),
+        ["old"],
+    );
+    assert_eq!(
+        dashboard
+            .streak_rotation
+            .observe_active_sessions(std::slice::from_ref(&session), turn_end)
+            .unwrap(),
+        ["old"],
+    );
+}
