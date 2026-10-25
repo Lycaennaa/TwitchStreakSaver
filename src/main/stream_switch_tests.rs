@@ -961,3 +961,93 @@ fn channel_snooze_skips_automation_until_its_expiry_without_changing_selection()
         original_selection
     );
 }
+#[test]
+fn followed_channel_list_ends_with_right_settings_in_compact_view() {
+    let context = eframe::egui::Context::default();
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let screen_size = eframe::egui::vec2(748.0, 394.0);
+    let make_input = || eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            screen_size,
+        )),
+        ..Default::default()
+    };
+    let mut initial_list_rect = None;
+    let mut initial_viewport_top = 0.0;
+    let mut initial_panel_ends = (0.0, 0.0);
+
+    let _ = context.run(make_input(), |context| {
+        eframe::egui::TopBottomPanel::top("app_header").show(context, |ui| {
+            ui.add_space(50.0);
+        });
+        eframe::egui::CentralPanel::default().show(context, |ui| {
+            let available_height = ui.available_height();
+            let reserved_log_height = (available_height * 0.3).max(48.0);
+            let content_max_height = (available_height - reserved_log_height).max(0.0);
+            initial_viewport_top = ui.available_rect_before_wrap().min.y;
+            eframe::egui::ScrollArea::vertical()
+                .max_height(content_max_height)
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.columns(2, |columns| {
+                        dashboard.watch_settings(&mut columns[1]);
+                        let right_panel_bottom = columns[1].min_rect().max.y;
+                        initial_list_rect =
+                            Some(dashboard.channel_list(&mut columns[0], right_panel_bottom));
+                        initial_panel_ends = (columns[0].min_rect().max.y, right_panel_bottom);
+                    });
+                });
+        });
+    });
+
+    let initial_list_rect = initial_list_rect.expect("followed-channel list was not rendered");
+    let initial_end_gap = initial_panel_ends.0 - initial_panel_ends.1;
+    assert!(
+        initial_end_gap.abs() <= 2.0,
+        "initial left panel ends {} points from right settings",
+        initial_end_gap
+    );
+    let scroll_offset = (initial_list_rect.min.y - initial_viewport_top).max(0.0);
+    let mut list_rect = None;
+    let mut viewport_top = 0.0;
+    let mut panel_ends = (0.0, 0.0);
+
+    let _ = context.run(make_input(), |context| {
+        eframe::egui::TopBottomPanel::top("app_header").show(context, |ui| {
+            ui.add_space(50.0);
+        });
+        eframe::egui::CentralPanel::default().show(context, |ui| {
+            let available_height = ui.available_height();
+            let reserved_log_height = (available_height * 0.3).max(48.0);
+            let content_max_height = (available_height - reserved_log_height).max(0.0);
+            viewport_top = ui.available_rect_before_wrap().min.y;
+            eframe::egui::ScrollArea::vertical()
+                .max_height(content_max_height)
+                .vertical_scroll_offset(scroll_offset)
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.columns(2, |columns| {
+                        dashboard.watch_settings(&mut columns[1]);
+                        let right_panel_bottom = columns[1].min_rect().max.y;
+                        list_rect =
+                            Some(dashboard.channel_list(&mut columns[0], right_panel_bottom));
+                        panel_ends = (columns[0].min_rect().max.y, right_panel_bottom);
+                    });
+                });
+        });
+    });
+
+    let list_rect = list_rect.expect("followed-channel list was not rendered");
+    let top_gap = list_rect.min.y - viewport_top;
+    let panel_end_gap = panel_ends.0 - panel_ends.1;
+    assert!(
+        top_gap.abs() <= 2.0,
+        "list top differs from viewport top by {top_gap} points"
+    );
+    assert!(
+        panel_end_gap.abs() <= 2.0,
+        "scrolled left panel ends {} points from right settings",
+        panel_end_gap
+    );
+}

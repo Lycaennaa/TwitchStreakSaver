@@ -79,8 +79,9 @@ impl eframe::App for Dashboard {
                 .show(ui, |ui| {
                     ui.add_space(8.0);
                     ui.columns(2, |columns| {
-                        self.channel_list(&mut columns[0]);
                         self.watch_settings(&mut columns[1]);
+                        let right_bottom_y = columns[1].min_rect().max.y;
+                        let _ = self.channel_list(&mut columns[0], right_bottom_y);
                     });
 
                     if let Some(error) = &self.connection_error {
@@ -205,7 +206,7 @@ impl Dashboard {
         .response
     }
 
-    fn watch_settings(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn watch_settings(&mut self, ui: &mut egui::Ui) {
         let browser_notice = self.browser_notice.clone();
         let detected_browsers = browser_setup::detected_setup_browsers();
         let port_check_in_flight = self.browser_port_check_in_flight;

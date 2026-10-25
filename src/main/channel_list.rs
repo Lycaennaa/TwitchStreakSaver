@@ -18,7 +18,11 @@ fn freshness_age(confirmed_at: Option<Instant>) -> String {
 }
 
 impl Dashboard {
-    pub(super) fn channel_list(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn channel_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        right_panel_bottom_y: f32,
+    ) -> egui::Rect {
         let connected = matches!(
             &self.connection_status,
             TwitchConnectionStatus::Connected(_)
@@ -44,6 +48,9 @@ impl Dashboard {
         let mut open_selected = false;
         let mut unmuted_changed = false;
 
+        let mut list_rect = egui::Rect::NOTHING;
+        let list_content_bottom_y =
+            right_panel_bottom_y - egui::Frame::group(ui.style()).inner_margin.bottom as f32;
         self.show_queue_visibility(ui);
         {
             let channels = &mut self.channels;
@@ -131,9 +138,18 @@ impl Dashboard {
                     ui.label("No followed channels match the search.");
                 }
 
-                egui::ScrollArea::vertical()
-                    .max_height(480.0)
-                    .show(ui, |ui| {
+                // Match the bottom of the right-hand settings group.
+                let list_height =
+                    (list_content_bottom_y - ui.available_rect_before_wrap().min.y).max(0.0);
+                let list_output = ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), list_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                    .max_height(list_height)
+                    .min_scrolled_height(0.0)
+                .auto_shrink([true, false])
+                .show(ui, |ui| {
                         for index in filtered_indices {
                             let channel = &mut channels[index];
                             ui.group(|ui| {
@@ -245,7 +261,11 @@ impl Dashboard {
                             });
                             ui.add_space(4.0);
                         }
-                    });
+                            })
+                            .inner_rect
+                    },
+                );
+                list_rect = list_output.inner;
             });
         }
         if unmuted_changed {
@@ -254,6 +274,7 @@ impl Dashboard {
         if open_selected {
             self.open_selected_twitch_channels();
         }
+        list_rect
     }
 }
 
