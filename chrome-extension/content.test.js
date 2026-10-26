@@ -245,11 +245,12 @@ test("automatically applies the stored default and reacts to quality preference 
   assert.equal(menuState, "");
   assert.deepEqual([video.videoWidth, video.videoHeight], [1280, 720]);
 });
-test("applies managed player audio without carrying it across routes", () => {
+test("uses the player mute control without carrying preferences across routes", () => {
   const preferenceKey = "__twitch_streak_saver_player_unmuted__";
   const session = new Map([[preferenceKey, JSON.stringify({ login: "streamer", unmuted: false })]]);
   const makeVideo = (muted) => ({
     muted,
+    volume: 0.5,
     ended: false,
     paused: false,
     readyState: 3,
@@ -258,12 +259,33 @@ test("applies managed player audio without carrying it across routes", () => {
     getClientRects: () => [1],
     getBoundingClientRect: () => ({ width: 1280, height: 720 }),
   });
-  const createPage = (initialVideos, opener = null) => {
+  const createPage = (initialVideos, opener = null, muteButton = null, volumeSlider = null) => {
     let onMessage;
     let routeLogin = "streamer";
     let routeSurface = "player";
     let videos = initialVideos;
     const pageIntervals = [];
+    const documentListeners = new Map();
+    const defaultPlayerControls = { muteButton, volumeSlider };
+    const playerContainers = new Map();
+    const attachPlayer = (video, controls = defaultPlayerControls) => {
+      const player = {
+        querySelector(selector) {
+          if (selector === 'button[data-a-target="player-mute-unmute-button"]') {
+            return controls.muteButton;
+          }
+          if (selector === 'input[data-a-target="player-volume-slider"]') {
+            return controls.volumeSlider;
+          }
+          return null;
+        },
+      };
+      playerContainers.set(video, player);
+      video.closest = (selector) => (
+        selector === '[data-a-target="video-player"]' ? player : null
+      );
+    };
+    initialVideos.forEach((video) => attachPlayer(video));
     const context = vm.createContext({
       chrome: {
         runtime: {
@@ -280,7 +302,24 @@ test("applies managed player audio without carrying it across routes", () => {
         },
       },
       document: {
-        querySelectorAll: (selector) => selector === "video" ? videos : [],
+        addEventListener(type, listener) {
+          const listeners = documentListeners.get(type) || [];
+          listeners.push(listener);
+          documentListeners.set(type, listeners);
+        },
+        querySelector: (selector) => {
+          for (const video of videos) {
+            const control = playerContainers.get(video)?.querySelector(selector);
+            if (control) return control;
+          }
+          return null;
+        },
+        querySelectorAll: (selector) => {
+          if (selector === "video") return videos;
+          return videos
+            .map((video) => playerContainers.get(video)?.querySelector(selector))
+            .filter(Boolean);
+        },
       },
       location: {
         get href() { return `https://www.twitch.tv/${routeLogin}`; },
@@ -310,9 +349,40 @@ test("applies managed player audio without carrying it across routes", () => {
     const source = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
     vm.runInContext(source, context, { filename: "content.js" });
     return {
+      setMuteButton(nextMuteButton) {
+        muteButton = nextMuteButton;
+        defaultPlayerControls.muteButton = nextMuteButton;
+      },
+      setVolumeSlider(nextVolumeSlider) {
+        volumeSlider = nextVolumeSlider;
+        defaultPlayerControls.volumeSlider = nextVolumeSlider;
+      },
+      setPlayerControls(video, nextMuteButton, nextVolumeSlider) {
+        attachPlayer(video, {
+          muteButton: nextMuteButton,
+          volumeSlider: nextVolumeSlider,
+        });
+      },
+      signalManualAudioChange() {
+        const event = {
+          isTrusted: true,
+          target: {
+            closest: (selector) => (
+              selector === 'button[data-a-target="player-mute-unmute-button"]'
+                ? muteButton
+                : null
+            ),
+            matches: () => false,
+          },
+        };
+        for (const listener of documentListeners.get("click") || []) listener(event);
+      },
       onMessage,
       intervals: pageIntervals,
       replaceVideos(nextVideos) {
+        nextVideos.forEach((video) => {
+          if (!playerContainers.has(video)) attachPlayer(video);
+        });
         videos = nextVideos;
       },
       setLogin(login) {
@@ -329,6 +399,19 @@ test("applies managed player audio without carrying it across routes", () => {
   assert.equal(forgedVideo.muted, true);
 
   const videoA = makeVideo(true);
+  let muteButtonLabel = "Unmute";
+  let muteButtonClicks = 0;
+  let activeVideo = videoA;
+  const muteButton = {
+    getAttribute(name) {
+      return name === "aria-label" ? muteButtonLabel : null;
+    },
+    click() {
+      muteButtonClicks += 1;
+      muteButtonLabel = muteButtonLabel === "Unmute" ? "Mute" : "Unmute";
+      activeVideo.muted = muteButtonLabel === "Unmute";
+    },
+  };
   const page = createPage([videoA]);
   let response;
   page.onMessage(
@@ -338,23 +421,43 @@ test("applies managed player audio without carrying it across routes", () => {
   );
   assert.equal(response.unmuted, true);
   assert.equal(videoA.muted, false);
+  assert.equal(muteButtonClicks, 0);
+  page.setMuteButton(muteButton);
+  page.intervals[0].callback();
+  assert.equal(muteButtonClicks, 1);
+  assert.equal(muteButtonLabel, "Mute");
   assert.equal(
     session.get(preferenceKey),
     JSON.stringify({ login: "streamer", unmuted: false }),
   );
 
-  videoA.muted = true;
+  muteButton.click();
+  page.signalManualAudioChange();
   page.intervals[0].callback();
   assert.equal(videoA.muted, true);
+  assert.equal(muteButtonClicks, 2);
 
   const replacementA = makeVideo(true);
+  activeVideo = replacementA;
   page.replaceVideos([replacementA]);
   page.intervals[0].callback();
+  assert.equal(muteButtonClicks, 3);
   assert.equal(replacementA.muted, false);
+  const replacementB = makeVideo(true);
+  replacementB.volume = 0;
+  const volumeSlider = { valueAsNumber: 0 };
+  activeVideo = replacementB;
+  page.replaceVideos([replacementB]);
+  page.setVolumeSlider(volumeSlider);
+  page.intervals[0].callback();
+  assert.equal(muteButtonClicks, 3);
+  assert.equal(replacementB.muted, false);
+  assert.equal(replacementB.volume, 0.5);
 
   page.setLogin("another");
   const videoB = makeVideo(true);
   page.replaceVideos([videoB]);
+  activeVideo = videoB;
   page.intervals[0].callback();
   assert.equal(videoB.muted, true);
   page.onMessage(
@@ -376,8 +479,86 @@ test("applies managed player audio without carrying it across routes", () => {
     {},
     () => {},
   );
+  assert.equal(chatVideo.muted, false);
   chatPage.setSurface("chat");
   chatPage.intervals[0].callback();
+  const nonSelectedVideo = makeVideo(true);
+  nonSelectedVideo.getBoundingClientRect = () => ({ width: 320, height: 180 });
+  const selectedVideo = makeVideo(true);
+  selectedVideo.volume = 0;
+  let nonSelectedButtonClicks = 0;
+  let selectedButtonClicks = 0;
+  let nonSelectedButtonLabel = "Unmute";
+  const nonSelectedButton = {
+    getAttribute: (name) => name === "aria-label" ? nonSelectedButtonLabel : null,
+    click() {
+      nonSelectedButtonClicks += 1;
+      nonSelectedButtonLabel = "Mute";
+      nonSelectedVideo.muted = false;
+    },
+  };
+  let selectedButtonLabel = "Unmute";
+  const selectedButton = {
+    getAttribute: (name) => name === "aria-label" ? selectedButtonLabel : null,
+    click() {
+      selectedButtonClicks += 1;
+      selectedButtonLabel = "Mute";
+      selectedVideo.muted = false;
+    },
+  };
+  let nonSelectedSliderReads = 0;
+  let selectedSliderReads = 0;
+  const nonSelectedSlider = {
+    get valueAsNumber() {
+      nonSelectedSliderReads += 1;
+      return 0.9;
+    },
+  };
+  const selectedSlider = {
+    get valueAsNumber() {
+      selectedSliderReads += 1;
+      return 0.35;
+    },
+  };
+  const multiPlayerPage = createPage(
+    [nonSelectedVideo, selectedVideo],
+    null,
+    nonSelectedButton,
+    nonSelectedSlider,
+  );
+  multiPlayerPage.setPlayerControls(
+    nonSelectedVideo,
+    nonSelectedButton,
+    nonSelectedSlider,
+  );
+  multiPlayerPage.setPlayerControls(
+    selectedVideo,
+    selectedButton,
+    selectedSlider,
+  );
+  let multiPlayerResponse;
+  multiPlayerPage.onMessage(
+    { type: "set_player_audio_preference", login: "streamer", unmuted: true },
+    {},
+    (value) => { multiPlayerResponse = value; },
+  );
+  assert.equal(multiPlayerResponse.unmuted, true);
+  assert.equal(nonSelectedButtonClicks, 0);
+  assert.equal(selectedButtonClicks, 1);
+  assert.equal(nonSelectedVideo.muted, true);
+  assert.equal(selectedVideo.muted, false);
+  assert.equal(nonSelectedSliderReads, 0);
+  assert.ok(selectedSliderReads > 0);
+  assert.equal(selectedVideo.volume, 0.35);
+  nonSelectedButton.click();
+  multiPlayerPage.signalManualAudioChange();
+  assert.equal(nonSelectedButtonClicks, 1);
+  selectedVideo.muted = true;
+  selectedButtonLabel = "Unmute";
+  multiPlayerPage.intervals[0].callback();
+  assert.equal(nonSelectedButtonClicks, 1);
+  assert.equal(selectedButtonClicks, 2);
+  assert.equal(selectedVideo.muted, false);
   chatPage.setSurface("player");
   const returnedVideo = makeVideo(true);
   chatPage.replaceVideos([returnedVideo]);

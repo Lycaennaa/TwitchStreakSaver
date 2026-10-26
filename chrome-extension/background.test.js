@@ -1231,6 +1231,30 @@ test("keeps a user's unmuted state when reopening a managed channel", async () =
     audioPreferenceMessages,
   );
 });
+test("updates managed player audio when the channel preference changes", async () => {
+  const extension = await createExtension();
+  await extension.open({
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "channel-audio-change", login: "streamer", unmuted: false }],
+  });
+  const [tab] = [...extension.tabsById.values()];
+  assert.ok(tab);
+  assert.equal(tab.muted, true);
+
+  await extension.open({
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "channel-audio-change", login: "streamer", unmuted: true }],
+  });
+
+  assert.equal(tab.muted, false);
+  const audioMessages = extension.calls.contentMessages.filter(
+    (message) => message.type === "set_player_audio_preference",
+  );
+  assert.equal(audioMessages.length, 2);
+  assert.equal(audioMessages.at(-1)?.unmuted, true);
+});
 test("opens subsequent stream windows while an earlier Twitch page is still loading", async () => {
   const extension = await createExtension({ pauseFirstNavigation: true });
   const opening = extension.open({

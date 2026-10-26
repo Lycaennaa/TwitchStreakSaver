@@ -843,6 +843,7 @@ async function finishChannelOpen(channelId) {
 async function openManagedTab(channelId, url, wakeBrowser, unmuted) {
   const record = managedTabs.get(channelId);
   if (!record) throw new Error("Managed channel record was not prepared for opening.");
+  const audioPreferenceChanged = record.unmuted !== unmuted;
   record.unmuted = unmuted;
   let tabId = record.playerTabId;
   let isNewTab = tabId === null || tabId === undefined;
@@ -868,7 +869,7 @@ async function openManagedTab(channelId, url, wakeBrowser, unmuted) {
     await ensureDedicatedTabWindow(tabId);
   }
   const tabChanges = { autoDiscardable: false };
-  if (isNewTab) tabChanges.muted = !unmuted;
+  if (isNewTab || audioPreferenceChanged) tabChanges.muted = !unmuted;
   await chrome.tabs.update(tabId, tabChanges);
   if (isNewTab) await saveManagedTabs();
   await rememberManagedTabOwner(tabId, channelId);
@@ -894,7 +895,7 @@ async function openManagedTab(channelId, url, wakeBrowser, unmuted) {
   record.contentVersion = contentVersion;
   managedTabs.set(channelId, record);
   await saveManagedTabs();
-  if (isNewTab || forceReload) {
+  if (isNewTab || forceReload || audioPreferenceChanged) {
     await setPlayerAudioPreference(tabId, unmuted, record.login.toLowerCase());
   }
   return tabId;

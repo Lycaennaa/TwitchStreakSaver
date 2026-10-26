@@ -35,6 +35,9 @@
   let playerAudioPreference = null;
   let appliedPlayerAudioVideo = null;
   let appliedPlayerAudioLogin = "";
+  let appliedPlayerAudioControl = false;
+  let lastPlayerAudioVolume = 0.5;
+  let manuallyControlledPlayerAudioVideo = null;
 
 
   function readManagedTabIdentity() {
@@ -61,12 +64,24 @@
         return rightRect.width * rightRect.height - leftRect.width * leftRect.height;
       })[0] || null;
   }
+  function playerAudioControl(video, selector) {
+    const player = video.closest?.('[data-a-target="video-player"]');
+    if (player) return player.querySelector(selector);
+    const visibleVideos = Array.from(document.querySelectorAll("video"))
+      .filter((item) => item.getClientRects().length > 0);
+    if (visibleVideos.length !== 1 || visibleVideos[0] !== video) return null;
+    const visibleControls = Array.from(document.querySelectorAll(selector))
+      .filter((item) => item.getClientRects().length > 0);
+    return visibleControls.length === 1 ? visibleControls[0] : null;
+  }
   function checkPlayerAudioPreference() {
     const route = channelRoute();
     if (route.surface !== "player" || !route.login) {
       playerAudioPreference = null;
       appliedPlayerAudioVideo = null;
       appliedPlayerAudioLogin = "";
+      appliedPlayerAudioControl = false;
+      manuallyControlledPlayerAudioVideo = null;
       return;
     }
     const login = route.login.toLowerCase();
@@ -74,12 +89,65 @@
       playerAudioPreference = null;
       appliedPlayerAudioVideo = null;
       appliedPlayerAudioLogin = "";
+      appliedPlayerAudioControl = false;
+      manuallyControlledPlayerAudioVideo = null;
       return;
     }
     const video = visiblePlayerVideo();
     if (!video) return;
-    if (video === appliedPlayerAudioVideo && login === appliedPlayerAudioLogin) return;
-    video.muted = !playerAudioPreference.unmuted;
+    const sameApplication =
+      video === appliedPlayerAudioVideo
+      && login === appliedPlayerAudioLogin;
+    const shouldMute = !playerAudioPreference.unmuted;
+    const volumeSlider = playerAudioControl(
+      video,
+      'input[data-a-target="player-volume-slider"]',
+    );
+    const sliderVolume = volumeSlider?.valueAsNumber;
+    if (video.volume > 0) {
+      lastPlayerAudioVolume = video.volume;
+    } else if (Number.isFinite(sliderVolume) && sliderVolume > 0) {
+      lastPlayerAudioVolume = sliderVolume;
+    }
+    const muteButton = playerAudioControl(
+      video,
+      'button[data-a-target="player-mute-unmute-button"]',
+    );
+    const buttonLabel = (
+      muteButton?.getAttribute("aria-label")
+      || muteButton?.getAttribute("title")
+      || ""
+    ).trim().toLowerCase();
+    const playerMuted = buttonLabel.startsWith("unmute")
+      ? true
+      : buttonLabel.startsWith("mute")
+      ? false
+      : null;
+    const volumeMatches = !playerAudioPreference.unmuted
+      || (
+        video.volume > 0
+        && (!Number.isFinite(sliderVolume) || sliderVolume > 0)
+      );
+    const buttonMatches = playerMuted === null || playerMuted === shouldMute;
+    if (sameApplication && manuallyControlledPlayerAudioVideo === video) return;
+    if (
+      sameApplication
+      && video.muted === shouldMute
+      && volumeMatches
+      && buttonMatches
+      && (appliedPlayerAudioControl || playerMuted === null)
+    ) return;
+    if (playerMuted !== null) {
+      if (playerMuted !== shouldMute) muteButton.click();
+      appliedPlayerAudioControl = true;
+    } else {
+      appliedPlayerAudioControl = false;
+    }
+    if (
+      playerAudioPreference.unmuted
+      && (video.volume === 0 || sliderVolume === 0)
+    ) video.volume = lastPlayerAudioVolume;
+    if (video.muted !== shouldMute) video.muted = shouldMute;
     appliedPlayerAudioVideo = video;
     appliedPlayerAudioLogin = login;
   }
@@ -95,8 +163,35 @@
     playerAudioPreference = { login: normalizedLogin, unmuted };
     appliedPlayerAudioVideo = null;
     appliedPlayerAudioLogin = "";
+    appliedPlayerAudioControl = false;
+    manuallyControlledPlayerAudioVideo = null;
     checkPlayerAudioPreference();
     return true;
+  }
+  function rememberManualPlayerAudioChange(event) {
+    if (!event.isTrusted) return;
+    const target = event.target;
+    const video = visiblePlayerVideo();
+    if (!video) return;
+    const muteButtonSelector = 'button[data-a-target="player-mute-unmute-button"]';
+    const volumeSliderSelector = 'input[data-a-target="player-volume-slider"]';
+    const clickedMuteButton = target?.closest?.(muteButtonSelector);
+    if (
+      clickedMuteButton
+      && clickedMuteButton === playerAudioControl(video, muteButtonSelector)
+    ) {
+      manuallyControlledPlayerAudioVideo = video;
+      return;
+    }
+    if (
+      target?.matches?.(volumeSliderSelector)
+      && target === playerAudioControl(video, volumeSliderSelector)
+    ) manuallyControlledPlayerAudioVideo = video;
+  }
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("click", rememberManualPlayerAudioChange, true);
+    document.addEventListener("input", rememberManualPlayerAudioChange, true);
+    document.addEventListener("change", rememberManualPlayerAudioChange, true);
   }
   function playerState() {
     const video = visiblePlayerVideo();
