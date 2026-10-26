@@ -65,8 +65,16 @@
       })[0] || null;
   }
   function playerAudioControl(video, selector) {
-    const player = video.closest?.('[data-a-target="video-player"]');
-    if (player) return player.querySelector(selector);
+    for (
+      let container = video.parentElement;
+      container;
+      container = container.parentElement
+    ) {
+      const videos = container.querySelectorAll("video");
+      if (videos.length !== 1 || videos[0] !== video) continue;
+      const controls = container.querySelectorAll(selector);
+      if (controls.length === 1) return controls[0];
+    }
     const visibleVideos = Array.from(document.querySelectorAll("video"))
       .filter((item) => item.getClientRects().length > 0);
     if (visibleVideos.length !== 1 || visibleVideos[0] !== video) return null;

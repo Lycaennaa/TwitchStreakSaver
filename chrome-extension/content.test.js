@@ -266,9 +266,8 @@ test("uses the player mute control without carrying preferences across routes", 
     let videos = initialVideos;
     const pageIntervals = [];
     const documentListeners = new Map();
-    const defaultPlayerControls = { muteButton, volumeSlider };
     const playerContainers = new Map();
-    const attachPlayer = (video, controls = defaultPlayerControls) => {
+    const attachPlayer = (video, controls) => {
       const player = {
         querySelector(selector) {
           if (selector === 'button[data-a-target="player-mute-unmute-button"]') {
@@ -279,13 +278,28 @@ test("uses the player mute control without carrying preferences across routes", 
           }
           return null;
         },
+        querySelectorAll(selector) {
+          if (selector === "video") return [video];
+          const control = this.querySelector(selector);
+          return control ? [control] : [];
+        },
       };
       playerContainers.set(video, player);
-      video.closest = (selector) => (
-        selector === '[data-a-target="video-player"]' ? player : null
-      );
+      video.parentElement = player;
     };
-    initialVideos.forEach((video) => attachPlayer(video));
+    const controlsForSelector = (selector) => {
+      const controls = videos
+        .map((video) => playerContainers.get(video)?.querySelector(selector))
+        .filter(Boolean);
+      if (controls.length > 0) return controls;
+      if (selector === 'button[data-a-target="player-mute-unmute-button"]' && muteButton) {
+        return [muteButton];
+      }
+      if (selector === 'input[data-a-target="player-volume-slider"]' && volumeSlider) {
+        return [volumeSlider];
+      }
+      return [];
+    };
     const context = vm.createContext({
       chrome: {
         runtime: {
@@ -307,19 +321,14 @@ test("uses the player mute control without carrying preferences across routes", 
           listeners.push(listener);
           documentListeners.set(type, listeners);
         },
-        querySelector: (selector) => {
-          for (const video of videos) {
-            const control = playerContainers.get(video)?.querySelector(selector);
-            if (control) return control;
-          }
-          return null;
-        },
-        querySelectorAll: (selector) => {
-          if (selector === "video") return videos;
-          return videos
-            .map((video) => playerContainers.get(video)?.querySelector(selector))
-            .filter(Boolean);
-        },
+        querySelector: (selector) => (
+          selector === "video"
+            ? videos[0] ?? null
+            : controlsForSelector(selector)[0] ?? null
+        ),
+        querySelectorAll: (selector) => (
+          selector === "video" ? videos : controlsForSelector(selector)
+        ),
       },
       location: {
         get href() { return `https://www.twitch.tv/${routeLogin}`; },
@@ -351,11 +360,9 @@ test("uses the player mute control without carrying preferences across routes", 
     return {
       setMuteButton(nextMuteButton) {
         muteButton = nextMuteButton;
-        defaultPlayerControls.muteButton = nextMuteButton;
       },
       setVolumeSlider(nextVolumeSlider) {
         volumeSlider = nextVolumeSlider;
-        defaultPlayerControls.volumeSlider = nextVolumeSlider;
       },
       setPlayerControls(video, nextMuteButton, nextVolumeSlider) {
         attachPlayer(video, {
@@ -380,9 +387,6 @@ test("uses the player mute control without carrying preferences across routes", 
       onMessage,
       intervals: pageIntervals,
       replaceVideos(nextVideos) {
-        nextVideos.forEach((video) => {
-          if (!playerContainers.has(video)) attachPlayer(video);
-        });
         videos = nextVideos;
       },
       setLogin(login) {
@@ -403,6 +407,7 @@ test("uses the player mute control without carrying preferences across routes", 
   let muteButtonClicks = 0;
   let activeVideo = videoA;
   const muteButton = {
+    getClientRects: () => [1],
     getAttribute(name) {
       return name === "aria-label" ? muteButtonLabel : null;
     },
@@ -445,7 +450,10 @@ test("uses the player mute control without carrying preferences across routes", 
   assert.equal(replacementA.muted, false);
   const replacementB = makeVideo(true);
   replacementB.volume = 0;
-  const volumeSlider = { valueAsNumber: 0 };
+  const volumeSlider = {
+    getClientRects: () => [1],
+    valueAsNumber: 0,
+  };
   activeVideo = replacementB;
   page.replaceVideos([replacementB]);
   page.setVolumeSlider(volumeSlider);
