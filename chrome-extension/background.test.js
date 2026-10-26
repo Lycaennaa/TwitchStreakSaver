@@ -474,6 +474,14 @@ async function createExtension({
       port.onMessage.dispatch(message);
       return vm.runInContext("nativeCommandQueue", context);
     },
+    blockNativeCommandQueue() {
+      let release;
+      context.commandQueueGate = new Promise((resolve) => {
+        release = resolve;
+      });
+      vm.runInContext("nativeCommandQueue = commandQueueGate", context);
+      return release;
+    },
     reportExternalStreams() {
       return vm.runInContext("reportExternalStreams()", context);
     },
@@ -499,6 +507,29 @@ async function createExtension({
     },
     openPopup() {
       const statusWaiters = [];
+      const managedStreamWaiters = [];
+      const actionStatusWaiters = [];
+      const actionStatus = {
+        value: "",
+        get textContent() {
+          return this.value;
+        },
+        set textContent(value) {
+          this.value = value;
+          actionStatusWaiters.shift()?.(value);
+        },
+      };
+      const managedStreams = {
+        value: "",
+        get textContent() {
+          return this.value;
+        },
+        set textContent(value) {
+          const changed = value !== this.value;
+          this.value = value;
+          if (changed) managedStreamWaiters.shift()?.(value);
+        },
+      };
       const status = {
         value: "Waking the extension worker…",
         get textContent() {
@@ -510,7 +541,7 @@ async function createExtension({
           if (changed && !value.startsWith("Waking")) statusWaiters.shift()?.(value);
         },
       };
-      const wakeButton = {
+      const makeButton = () => ({
         disabled: false,
         onClick: null,
         addEventListener(_name, listener) {
@@ -519,11 +550,18 @@ async function createExtension({
         click() {
           if (!this.disabled) this.onClick?.();
         },
-      };
+      });
+      const wakeButton = makeButton();
+      const pauseButton = makeButton();
+      const openSelectedButton = makeButton();
       context.document = {
         querySelector(selector) {
           if (selector === "#status") return status;
           if (selector === "#wake") return wakeButton;
+          if (selector === "#managed-streams") return managedStreams;
+          if (selector === "#action-status") return actionStatus;
+          if (selector === "#pause") return pauseButton;
+          if (selector === "#open-selected") return openSelectedButton;
           return null;
         },
       };
@@ -532,10 +570,20 @@ async function createExtension({
       vm.runInContext(popupSource, context, { filename: "popup.js" });
       return {
         status,
+        managedStreams,
+        actionStatus,
+        pauseButton,
+        openSelectedButton,
         wakeButton,
         firstStatus,
         nextStatus() {
           return new Promise((resolve) => statusWaiters.push(resolve));
+        },
+        nextActionStatus() {
+          return new Promise((resolve) => actionStatusWaiters.push(resolve));
+        },
+        nextManagedStreams() {
+          return new Promise((resolve) => managedStreamWaiters.push(resolve));
         },
       };
     },
@@ -2671,6 +2719,31 @@ test("opt-in adopts only one eligible followed player tab and closes only that t
   assert.equal(extension.tabsById.has(214), true);
   assert.equal(extension.tabsById.has(215), true);
 });
+test("popup refreshes managed streams after an existing player tab is adopted", async () => {
+  const extension = await createExtension({
+    initialTabs: [
+      {
+        id: 216,
+        windowId: 17,
+        status: "complete",
+        active: true,
+        url: "https://www.twitch.tv/popup_streamer",
+      },
+    ],
+  });
+  const popup = extension.openPopup();
+  await popup.firstStatus;
+  const updatedStreams = popup.nextManagedStreams();
+
+  await extension.send({
+    type: "sync_channels",
+    adopt_existing_twitch_tabs: true,
+    channels: [{ id: "popup-channel", login: "popup_streamer", unmuted: false }],
+  });
+  await extension.reportExternalStreams();
+
+  assert.equal(await updatedStreams, "1: popup_streamer");
+});
 
 test("disabling adoption releases existing tabs without closing them", async () => {
   const extension = await createExtension({
@@ -2999,4 +3072,135 @@ test("failed opt-out does not restore an adopted tab that has navigated away", a
       && message.channel_id === "channel-streamer"
       && message.tab_id === 291,
   ));
+});
+test("popup shows managed streams and reports actions that cannot be applied", async () => {
+  const extension = await createExtension();
+  const popup = extension.openPopup();
+  await popup.firstStatus;
+  assert.equal(popup.managedStreams.textContent, "No managed streams are open.");
+
+  const waiting = popup.nextActionStatus();
+  const result = popup.nextActionStatus();
+  popup.pauseButton.click();
+  assert.equal(await waiting, "Waiting for the app…");
+  assert.match(await result, /^Could not apply action: The app is not connected/);
+});
+test("popup displays the app-reported reason an action was not applied", async () => {
+  const extension = await createExtension();
+  const popup = extension.openPopup();
+  await popup.firstStatus;
+  await extension.send({ type: "bridge_ready" });
+
+  const waiting = popup.nextActionStatus();
+  const result = popup.nextActionStatus();
+  popup.openSelectedButton.click();
+  const request = extension.calls.nativeMessages
+    .filter((message) => message.type === "popup_action")
+    .at(-1);
+  assert.ok(request);
+  extension.send({
+    type: "popup_action_result",
+    request_id: request.request_id,
+    success: false,
+    message: "Select followed Twitch channels to open.",
+  });
+
+  assert.equal(await waiting, "Waiting for the app…");
+  assert.equal(
+    await result,
+    "Could not apply action: Select followed Twitch channels to open.",
+  );
+});
+test("popup confirms open-selected and refreshes its managed-stream summary", async () => {
+  const extension = await createExtension();
+  const popup = extension.openPopup();
+  await popup.firstStatus;
+  const connected = popup.nextStatus();
+  await extension.send({ type: "bridge_ready" });
+  assert.equal(await connected, "Connected to Twitch Streak Saver.");
+
+  const waiting = popup.nextActionStatus();
+  const opened = popup.nextActionStatus();
+  const managed = popup.nextManagedStreams();
+  popup.openSelectedButton.click();
+  const request = extension.calls.nativeMessages
+    .filter((message) => message.type === "popup_action")
+    .at(-1);
+  assert.ok(request);
+
+  const openCommand = extension.send({
+    type: "open_selected",
+    wake_browser: false,
+    channels: [{ id: "popup-channel", login: "popup_streamer", unmuted: true }],
+    command_id: "popup-open",
+  });
+  extension.send({
+    type: "popup_action_result",
+    request_id: request.request_id,
+    success: true,
+    message: "Open-selected request sent to the browser.",
+  });
+
+  assert.equal(await waiting, "Waiting for the app…");
+  assert.equal(await opened, "Open-selected request sent to the browser.");
+  await openCommand;
+  assert.equal(await managed, "1: popup_streamer");
+});
+
+test("popup reports a pending action when the native bridge disconnects", async () => {
+  const extension = await createExtension();
+  const popup = extension.openPopup();
+  await popup.firstStatus;
+  const connected = popup.nextStatus();
+  await extension.send({ type: "bridge_ready" });
+  assert.equal(await connected, "Connected to Twitch Streak Saver.");
+
+  const waiting = popup.nextActionStatus();
+  const failed = popup.nextActionStatus();
+  popup.pauseButton.click();
+  assert.equal(await waiting, "Waiting for the app…");
+  extension.disconnectHost(new Error("native bridge disconnected"));
+  extension.cancelReconnect();
+  assert.equal(
+    await failed,
+    "Could not apply action: The app disconnected before it could apply the action.",
+  );
+});
+test("popup action results arrive while open-selected is still queued", async () => {
+  const extension = await createExtension();
+  const popup = extension.openPopup();
+  await popup.firstStatus;
+  const connected = popup.nextStatus();
+  await extension.send({ type: "bridge_ready" });
+  assert.equal(await connected, "Connected to Twitch Streak Saver.");
+
+  const waiting = popup.nextActionStatus();
+  const applied = popup.nextActionStatus();
+  popup.openSelectedButton.click();
+  const request = extension.calls.nativeMessages
+    .filter((message) => message.type === "popup_action")
+    .at(-1);
+  assert.ok(request);
+
+  const releaseQueue = extension.blockNativeCommandQueue();
+  let openCommand;
+  try {
+    openCommand = extension.send({
+      type: "open_selected",
+      wake_browser: false,
+      channels: [{ id: "slow-channel", login: "slow_streamer", unmuted: true }],
+      command_id: "slow-open",
+    });
+    extension.send({
+      type: "popup_action_result",
+      request_id: request.request_id,
+      success: true,
+      message: "Open-selected request sent to the browser.",
+    });
+    assert.equal(await waiting, "Waiting for the app…");
+    assert.equal(await applied, "Open-selected request sent to the browser.");
+  } finally {
+    releaseQueue();
+  }
+  await openCommand;
 });

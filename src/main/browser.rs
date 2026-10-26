@@ -15,6 +15,9 @@ const MANUAL_OPEN_INVENTORY_ERROR: &str =
     "Browser extension is connected but has not reported Twitch-tab inventory. Reload or update the extension.";
 const COMMAND_ACK_REQUIRED_EXTENSION_ERROR: &str =
     "Reload the browser extension (version 0.3.18 or newer) to enable reliable stream recovery.";
+const OPEN_SELECTED_NO_CHANNELS_ERROR: &str = "Select followed Twitch channels to open.";
+const OPEN_SELECTED_NO_STREAM_SLOTS_ERROR: &str =
+    "No stream slots are available after counting existing Twitch tabs.";
 const BRIDGE_COMMAND_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn browser_bridge_retry_due(retry_after: Option<Instant>, now: Instant) -> bool {
@@ -247,6 +250,17 @@ impl Dashboard {
         match message {
             KnownBrowserMessage::CommandAcknowledged { command_id } => {
                 self.acknowledge_browser_command(command_id);
+            }
+            KnownBrowserMessage::PopupAction { request_id, action } => {
+                let (success, message) = self
+                    .apply_popup_action_with(action, |dashboard, command| {
+                        dashboard.send_bridge_command(command)
+                    });
+                self.send_bridge_command(BrowserCommand::PopupActionResult {
+                    request_id,
+                    success,
+                    message,
+                });
             }
             KnownBrowserMessage::ExternalStreams {
                 channel_counts,
@@ -886,6 +900,62 @@ impl Dashboard {
         }
     }
 
+    pub(super) fn apply_popup_action_with(
+        &mut self,
+        action: BrowserPopupAction,
+        mut send: impl FnMut(&mut Self, BrowserCommand) -> bool,
+    ) -> (bool, String) {
+        match action {
+            BrowserPopupAction::PauseAutomation => {
+                if !self.automation_enabled {
+                    return (false, "Automatic opening is stopped.".to_owned());
+                }
+                let (duration, label) = automation::TEMPORARY_AUTOMATION_DURATIONS[0];
+                self.automation_delays
+                    .pause_for(self.started_at.elapsed(), duration);
+                (true, format!("Automatic opening paused for {label}."))
+            }
+            BrowserPopupAction::OpenSelected => {
+                if self.browser_error.as_deref() == Some(COMMAND_ACK_REQUIRED_EXTENSION_ERROR) {
+                    return (false, COMMAND_ACK_REQUIRED_EXTENSION_ERROR.to_owned());
+                }
+                if self.browser_connected && !self.browser_command_ack_supported {
+                    return (false, COMMAND_ACK_REQUIRED_EXTENSION_ERROR.to_owned());
+                }
+                if matches!(
+                    self.browser_error.as_deref(),
+                    Some(OPEN_SELECTED_NO_CHANNELS_ERROR)
+                        | Some(OPEN_SELECTED_NO_STREAM_SLOTS_ERROR)
+                ) {
+                    self.browser_error = None;
+                }
+                self.pending_manual_open_command = None;
+                self.open_selected_twitch_channels_with(&mut send);
+                if let Some(message) = self.browser_error.as_deref() {
+                    (false, message.to_owned())
+                } else if self.pending_manual_open_command.is_some() {
+                    (
+                        true,
+                        "Open-selected request sent to the browser.".to_owned(),
+                    )
+                } else if self.pending_manual_open {
+                    (
+                        false,
+                        "Open-selected request is queued until the app, browser, and Twitch are ready."
+                            .to_owned(),
+                    )
+                } else if let Some(message) = self.browser_error.as_deref() {
+                    (false, message.to_owned())
+                } else {
+                    (
+                        false,
+                        "No selected channels are available to open.".to_owned(),
+                    )
+                }
+            }
+        }
+    }
+
     pub(super) fn open_selected_twitch_channels(&mut self) {
         self.pending_manual_open_command = None;
         self.open_selected_twitch_channels_with(|dashboard, command| {
@@ -985,9 +1055,9 @@ impl Dashboard {
             .collect::<Vec<_>>();
         if selected_indices.is_empty() {
             self.browser_error = Some(if selected_count == 0 {
-                "Select followed Twitch channels to open.".to_owned()
+                OPEN_SELECTED_NO_CHANNELS_ERROR.to_owned()
             } else {
-                "No stream slots are available after counting existing Twitch tabs.".to_owned()
+                OPEN_SELECTED_NO_STREAM_SLOTS_ERROR.to_owned()
             });
             return;
         }

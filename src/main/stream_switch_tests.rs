@@ -1234,3 +1234,105 @@ fn chat_message_from_other_rust_account_does_not_exclude_streamer() {
         ["old"],
     );
 }
+#[test]
+fn popup_pause_uses_the_existing_fifteen_minute_pause_contract() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.automation_enabled = true;
+    let (applied, message) =
+        dashboard.apply_popup_action_with(super::BrowserPopupAction::PauseAutomation, |_, _| false);
+    let now = dashboard.started_at.elapsed();
+
+    assert!(applied);
+    assert!(message.contains("15 minutes"));
+    let remaining = dashboard
+        .automation_delays
+        .global_pause_remaining(now)
+        .expect("the popup pause should be active");
+    assert!(remaining <= std::time::Duration::from_secs(15 * 60));
+    assert!(dashboard
+        .automation_delays
+        .global_pause_remaining(now + std::time::Duration::from_secs(15 * 60))
+        .is_none());
+
+    dashboard.automation_enabled = false;
+    let (applied, message) =
+        dashboard.apply_popup_action_with(super::BrowserPopupAction::PauseAutomation, |_, _| false);
+    assert!(!applied);
+    assert_eq!(message, "Automatic opening is stopped.");
+}
+
+#[test]
+fn popup_open_selected_reports_sent_and_unavailable_requests() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.automation_enabled = true;
+    dashboard.browser_connected = true;
+    dashboard.external_inventory_received = true;
+    dashboard.browser_command_ack_supported = true;
+    dashboard.channels[0].login = "new".to_owned();
+    let mut sent_command = None;
+    let (applied, message) =
+        dashboard.apply_popup_action_with(super::BrowserPopupAction::OpenSelected, |_, command| {
+            sent_command = Some(command);
+            true
+        });
+
+    assert!(applied);
+    assert_eq!(message, "Open-selected request sent to the browser.");
+    let Some(super::BrowserCommand::OpenSelected {
+        channels,
+        manual_request,
+        ..
+    }) = sent_command
+    else {
+        panic!("the popup should send an open-selected command");
+    };
+    assert!(manual_request);
+    assert_eq!(channels.len(), 1);
+
+    let mut unavailable = dashboard_with_pending_stream_switch(true);
+    unavailable.browser_connected = false;
+    let (applied, message) =
+        unavailable.apply_popup_action_with(super::BrowserPopupAction::OpenSelected, |_, _| false);
+    assert!(!applied);
+    assert!(unavailable.pending_manual_open);
+    assert!(message.contains("queued"));
+}
+#[test]
+fn popup_open_selected_fails_when_extension_cannot_acknowledge_commands() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.browser_connected = true;
+    dashboard.browser_command_ack_supported = false;
+    dashboard.external_inventory_received = false;
+    dashboard.browser_error = Some(
+        "Reload the browser extension (version 0.3.18 or newer) to enable reliable stream recovery."
+            .to_owned(),
+    );
+
+    let mut sent = false;
+    let (applied, message) =
+        dashboard.apply_popup_action_with(super::BrowserPopupAction::OpenSelected, |_, _| {
+            sent = true;
+            false
+        });
+
+    assert!(!applied);
+    assert!(message.contains("0.3.18"));
+    assert!(!dashboard.pending_manual_open);
+    assert!(!sent);
+}
+#[test]
+fn popup_open_selected_rechecks_a_stale_selection_error() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.browser_connected = true;
+    dashboard.external_inventory_received = true;
+    dashboard.browser_command_ack_supported = true;
+    dashboard.channels[0].login = "new".to_owned();
+    dashboard.browser_error = Some("Select followed Twitch channels to open.".to_owned());
+
+    let (applied, message) =
+        dashboard.apply_popup_action_with(super::BrowserPopupAction::OpenSelected, |_, _| true);
+
+    assert!(applied);
+    assert_eq!(message, "Open-selected request sent to the browser.");
+    assert!(dashboard.browser_error.is_none());
+}

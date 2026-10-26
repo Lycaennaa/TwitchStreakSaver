@@ -9,6 +9,7 @@ let nativePort = null;
 let syncedNativePort = null;
 let nativeBridgeReadyPort = null;
 let nativeHostError = null;
+const pendingPopupActions = new Map();
 let reconnectTimer = null;
 let channelsByLogin = new Map();
 let viewerLogin = "";
@@ -83,7 +84,53 @@ function nativeHostStatus() {
     nativeConnected: nativePort !== null,
     bridgeReady: nativePort !== null && nativeBridgeReadyPort === nativePort,
     error: nativeHostError,
+    managedStreams: TwitchManagedTabs.recordValues()
+      .filter((record) => Number.isInteger(record.playerTabId))
+      .map((record) => record.login)
+      .sort(),
   };
+}
+function finishPopupAction(requestId, result) {
+  const pending = pendingPopupActions.get(requestId);
+  if (!pending) return;
+  pendingPopupActions.delete(requestId);
+  clearTimeout(pending.timeout);
+  pending.sendResponse({
+    success: result?.success === true,
+    message: typeof result?.message === "string"
+      ? result.message
+      : "The app could not apply this action.",
+  });
+}
+
+function handlePopupActionRequest(message, sendResponse) {
+  const action = message?.action;
+  if (action !== "pause_automation" && action !== "open_selected") {
+    sendResponse({ success: false, message: "Unknown popup action." });
+    return false;
+  }
+  const port = nativePort;
+  if (!port || nativeBridgeReadyPort !== port) {
+    sendResponse({ success: false, message: "The app is not connected to the browser extension." });
+    return false;
+  }
+  const requestId = `popup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const timeout = setTimeout(() => {
+    finishPopupAction(requestId, {
+      success: false,
+      message: "The app did not respond; the action could not be confirmed.",
+    });
+  }, 10000);
+  pendingPopupActions.set(requestId, { port, sendResponse, timeout });
+  try {
+    port.postMessage({ type: "popup_action", request_id: requestId, action });
+  } catch (error) {
+    finishPopupAction(requestId, {
+      success: false,
+      message: `Could not send the action to the app: ${error?.message || String(error)}`,
+    });
+  }
+  return true;
 }
 
 function resetPendingNativeHost() {
@@ -196,10 +243,16 @@ async function reportExternalStreams() {
       .map(([channelId]) => channelId),
     raid_redirected_channel_ids: TwitchManagedTabs.getRaidRedirectedChannelIds(),
   });
+  notifyPopupStatusChanged();
+}
+
+function notifyPopupStatusChanged() {
+  void chrome.runtime.sendMessage({ type: "popup_status_changed" }).catch(() => {});
 }
 
 function scheduleExternalStreamReport() {
   if (externalScanTimer !== null) return;
+  notifyPopupStatusChanged();
   externalScanTimer = setTimeout(() => {
     externalScanTimer = null;
     void reportExternalStreams();
@@ -221,6 +274,10 @@ function connectNativeHost() {
     }
     port.onMessage.addListener((message) => {
       if (nativePort !== port) return;
+      if (message?.type === "popup_action_result") {
+        finishPopupAction(message.request_id, message);
+        return;
+      }
       nativeCommandQueue = nativeCommandQueue
         .then(() => handleNativeCommand(message, port))
         .catch((error) => {
@@ -231,12 +288,14 @@ function connectNativeHost() {
       handleNativePortDisconnect(port, chrome.runtime.lastError);
     });
     port.postMessage({ type: "ready", command_acknowledgments: true });
+    notifyPopupStatusChanged();
   } catch (error) {
     if (port) {
       if (nativePort === port) handleNativePortDisconnect(port, error);
       return;
     }
     nativeHostError = error?.message || String(error);
+    notifyPopupStatusChanged();
     console.warn("Twitch Streak Saver native host is unavailable.", error);
     scheduleReconnect();
   }
@@ -247,6 +306,14 @@ function handleNativePortDisconnect(port, error) {
   nativePort = null;
   syncedNativePort = null;
   nativeBridgeReadyPort = null;
+  for (const [requestId, pending] of pendingPopupActions) {
+    if (pending.port === port) {
+      finishPopupAction(requestId, {
+        success: false,
+        message: "The app disconnected before it could apply the action.",
+      });
+    }
+  }
   externalScanGeneration += 1;
   syncedExistingTabAdoption = false;
   channelSyncInProgress = false;
@@ -340,6 +407,7 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
     case "bridge_ready":
       nativeBridgeReadyPort = sourcePort;
       nativeHostError = null;
+      notifyPopupStatusChanged();
       break;
     case "sync_channels": {
       externalScanGeneration += 1;
@@ -446,12 +514,19 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
       }
       await acknowledgeNativeCommand(message, sourcePort);
       break;
+    case "popup_action_result":
+      finishPopupAction(message.request_id, {
+        success: message.success,
+        message: message.message,
+      });
+      break;
     case "open_selected":
       await openChannels(
         message.channels || [],
         message.wake_browser === true,
         sourcePort,
       );
+      notifyPopupStatusChanged();
       await acknowledgeNativeCommand(message, sourcePort);
       break;
     case "close_all":
@@ -731,6 +806,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "native_host_status") {
     sendResponse(nativeHostStatus());
     return false;
+  }
+  if (message?.type === "popup_action") {
+    return handlePopupActionRequest(message, sendResponse);
   }
   if (message?.type === "channel_status") {
     void forwardChannelState(message, sender).catch((error) => {

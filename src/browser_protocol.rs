@@ -29,6 +29,11 @@ pub enum BrowserCommand {
     ReloadManagedPlayerTabs {
         command_id: String,
     },
+    PopupActionResult {
+        request_id: String,
+        success: bool,
+        message: String,
+    },
     CloseChannels {
         channel_ids: Vec<String>,
     },
@@ -58,12 +63,23 @@ pub enum BrowserMessage {
     Unknown(Value),
 }
 
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPopupAction {
+    PauseAutomation,
+    OpenSelected,
+}
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KnownBrowserMessage {
     Ready {
         #[serde(default)]
         command_acknowledgments: bool,
+    },
+    PopupAction {
+        request_id: String,
+        action: BrowserPopupAction,
     },
     CommandAcknowledged {
         command_id: String,
@@ -528,6 +544,38 @@ mod tests {
                 channel_id: "channel-1".to_owned(),
                 tab_id: 7,
                 surface: BrowserSurface::Player,
+            }),
+        );
+    }
+    #[test]
+    fn popup_action_requests_deserialize_and_results_serialize() {
+        let request = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "popup_action",
+            "request_id": "popup-1",
+            "action": "pause_automation",
+        }))
+        .unwrap();
+        assert_eq!(
+            request,
+            BrowserMessage::Known(KnownBrowserMessage::PopupAction {
+                request_id: "popup-1".to_owned(),
+                action: super::BrowserPopupAction::PauseAutomation,
+            }),
+        );
+
+        let result = serde_json::to_value(BrowserCommand::PopupActionResult {
+            request_id: "popup-1".to_owned(),
+            success: false,
+            message: "No selected channels are available to open.".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "type": "popup_action_result",
+                "request_id": "popup-1",
+                "success": false,
+                "message": "No selected channels are available to open.",
             }),
         );
     }

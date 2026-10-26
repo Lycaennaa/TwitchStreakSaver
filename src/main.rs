@@ -9,8 +9,8 @@ use twitch_streak_saver::browser_bridge::{
     BridgeEvent, BrowserBridge, EXTENSION_REGISTRATION_ADDRESS,
 };
 use twitch_streak_saver::browser_protocol::{
-    BrowserChannel, BrowserCommand, BrowserMessage, BrowserSurface, BrowserTabCloseReason,
-    ChatState, KnownBrowserMessage, PlayerState,
+    BrowserChannel, BrowserCommand, BrowserMessage, BrowserPopupAction, BrowserSurface,
+    BrowserTabCloseReason, ChatState, KnownBrowserMessage, PlayerState,
 };
 use twitch_streak_saver::model::{
     AppPreferences, BrowserKind, BrowserLaunchTarget, FollowedChannel, PreferredQuality,

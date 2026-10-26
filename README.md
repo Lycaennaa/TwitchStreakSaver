@@ -55,6 +55,8 @@ The extension revalidates tab identity and player route after async adoption and
 
 Offline selected channels are omitted from the upcoming managed-channel list until Twitch reports them live.
 
+The extension popup shows bridge connectivity and managed player streams, can pause automatic opening for 15 minutes, and can request the app to open selected channels. It reports when the app cannot apply an action.
+
 Build incrementally with:
 
 ```sh

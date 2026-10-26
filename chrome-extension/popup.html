@@ -3,18 +3,38 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Twitch Streak Saver connection</title>
+    <title>Twitch Streak Saver</title>
     <style>
-      body { font: 14px system-ui, sans-serif; margin: 14px; min-width: 260px; }
+      body {
+        box-sizing: border-box;
+        color: #202124;
+        font: 14px system-ui, sans-serif;
+        margin: 0;
+        padding: 16px;
+        width: 340px;
+      }
       h1 { font-size: 16px; margin: 0 0 10px; }
-      p { min-height: 36px; }
-      button { width: 100%; padding: 7px; }
+      p { line-height: 1.4; margin: 6px 0; }
+      section { border-top: 1px solid #dadce0; margin-top: 12px; padding-top: 10px; }
+      .actions { display: grid; gap: 8px; margin-top: 14px; }
+      button { cursor: pointer; min-height: 34px; }
+      button:disabled { cursor: wait; }
+      #action-status { min-height: 1.4em; }
     </style>
   </head>
   <body>
     <main>
-      <h1>Browser connection</h1>
+      <h1>Twitch Streak Saver</h1>
       <p id="status" role="status" aria-live="polite">Waking the extension worker…</p>
+      <section aria-labelledby="managed-heading">
+        <strong id="managed-heading">Managed streams</strong>
+        <p id="managed-streams">Checking managed streams…</p>
+      </section>
+      <div class="actions">
+        <button id="pause" type="button">Pause automation · 15 min</button>
+        <button id="open-selected" type="button">Open selected channels</button>
+      </div>
+      <p id="action-status" role="status" aria-live="polite"></p>
       <button id="wake" type="button">Wake / reconnect</button>
     </main>
     <script src="popup.js"></script>
