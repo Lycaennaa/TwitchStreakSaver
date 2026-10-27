@@ -60,6 +60,8 @@ Offline selected channels are omitted from the upcoming managed-channel list unt
 
 The extension popup shows bridge connectivity and managed player streams, can pause automatic opening for 15 minutes, and can request the app to open selected channels. It reports when the app cannot apply an action.
 
+Screenshot privacy hides streamer and browser profile names, the connected Twitch login, activity dates and details, searches, channel-selection totals, and variable followed-channel and queue lists. Local browser paths and setup diagnostics remain visible. It changes only the app's on-screen display; it does not alter saved channel data.
+
 Build incrementally with:
 
 ```sh

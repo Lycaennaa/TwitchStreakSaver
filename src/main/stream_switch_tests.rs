@@ -33,6 +33,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         wake_browser_on_open: false,
         close_on_raid_redirect: false,
         adopt_existing_twitch_tabs: false,
+        hide_sensitive_info: false,
         preferred_quality: PreferredQuality::default(),
         browser_launch_target: None,
         browser_launch_attempted: None,
@@ -1348,4 +1349,66 @@ fn popup_open_selected_rechecks_a_stale_selection_error() {
     assert!(applied);
     assert_eq!(message, "Open-selected request sent to the browser.");
     assert!(dashboard.browser_error.is_none());
+}
+
+#[test]
+fn screenshot_privacy_hides_variable_channel_rows() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.hide_sensitive_info = true;
+    dashboard.twitch_baseline_confirmed_at = Some(Instant::now());
+    dashboard.pubsub_state_confirmed_at = Some(Instant::now());
+    dashboard.pubsub_last_event_at = Some(Instant::now());
+    dashboard.pubsub_missed_events_since = Some(Instant::now());
+    let input = eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(800.0, 600.0),
+        )),
+        ..Default::default()
+    };
+    let output = eframe::egui::Context::default().run(input, |context| {
+        eframe::egui::CentralPanel::default().show(context, |ui| {
+            dashboard.channel_list(ui, 600.0);
+        });
+    });
+    let rendered = format!("{:?}", output.shapes);
+
+    assert!(rendered.contains("Followed-channel list hidden during screenshot privacy."));
+    assert!(rendered.contains("Upcoming managed channels hidden during screenshot privacy."));
+    assert!(!rendered.contains("New Streamer"));
+    assert!(!rendered.contains("Old Streamer"));
+    assert!(!rendered.contains("Hidden streamer"));
+    assert!(!rendered.contains("Available stream slots"));
+    assert!(!rendered.contains("Stream capacity is full"));
+    assert!(!rendered.contains("Select all"));
+    assert!(!rendered.contains("Select matching"));
+    assert!(!rendered.contains("Unselect all"));
+    assert!(!rendered.contains("Unselect matching"));
+    assert!(!rendered.contains("last confirmed"));
+    assert!(!rendered.contains("Last PubSub event observed"));
+    assert!(!rendered.contains("No PubSub events observed"));
+    assert!(!rendered.contains("PubSub monitoring gap started"));
+}
+
+#[test]
+fn screenshot_privacy_hides_empty_channel_state() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.hide_sensitive_info = true;
+    dashboard.channels.clear();
+    let input = eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(800.0, 600.0),
+        )),
+        ..Default::default()
+    };
+    let output = eframe::egui::Context::default().run(input, |context| {
+        eframe::egui::CentralPanel::default().show(context, |ui| {
+            dashboard.channel_list(ui, 600.0);
+        });
+    });
+    let rendered = format!("{:?}", output.shapes);
+
+    assert!(rendered.contains("Followed-channel list hidden during screenshot privacy."));
+    assert!(!rendered.contains("No followed channels"));
 }

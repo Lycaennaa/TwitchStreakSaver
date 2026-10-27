@@ -138,6 +138,7 @@ pub struct AppPreferences {
     pub wake_browser_on_open: bool,
     pub close_on_raid_redirect: bool,
     pub adopt_existing_twitch_tabs: bool,
+    pub hide_sensitive_info: bool,
     pub preferred_quality: PreferredQuality,
     pub browser_launch_target: Option<BrowserLaunchTarget>,
     pub browser_profile_data_directories: Vec<(BrowserKind, String)>,
@@ -152,6 +153,7 @@ impl Default for AppPreferences {
             wake_browser_on_open: false,
             close_on_raid_redirect: false,
             adopt_existing_twitch_tabs: false,
+            hide_sensitive_info: false,
             preferred_quality: PreferredQuality::default(),
             browser_launch_target: None,
             browser_profile_data_directories: Vec::new(),
@@ -229,6 +231,7 @@ mod tests {
         assert!(preferences.wake_browser_on_open);
         assert!(!preferences.close_on_raid_redirect);
         assert!(!preferences.adopt_existing_twitch_tabs);
+        assert!(!preferences.hide_sensitive_info);
         assert!(preferences.channels.is_empty());
         assert_eq!(preferences.preferred_quality, PreferredQuality::P160);
     }

@@ -1,4 +1,10 @@
+#[path = "ui/privacy.rs"]
+mod privacy;
 use super::*;
+use privacy::{
+    activity_log_display_values, browser_profile_display_name, channel_selection_counts,
+    daily_activity_summary_contents,
+};
 
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -78,9 +84,16 @@ impl eframe::App for Dashboard {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.heading("Twitch Streak Saver");
+                    ui.checkbox(&mut self.hide_sensitive_info, "Screenshot privacy")
+                        .on_hover_text(
+                            "Hides your Twitch login, streamer names, browser profile names, activity dates and details, searches, channel-selection totals, and variable channel/queue lists. Local browser paths and setup diagnostics remain visible.",
+                        );
                     let status = match &self.connection_status {
                         TwitchConnectionStatus::Disconnected => "NOT CONNECTED".to_owned(),
                         TwitchConnectionStatus::Connecting => "CONNECTING TO TWITCH…".to_owned(),
+                        TwitchConnectionStatus::Connected(_) if self.hide_sensitive_info => {
+                            "CONNECTED".to_owned()
+                        }
                         TwitchConnectionStatus::Connected(login) => format!("CONNECTED · {login}"),
                     };
                     let connecting =
@@ -129,6 +142,7 @@ impl eframe::App for Dashboard {
             ui.add_space(8.0);
             Self::activity_log_panel(
                 ui,
+                self.hide_sensitive_info,
                 &self.activity_log,
                 &mut self.activity_log_kind_filter,
                 &mut self.activity_log_search,
@@ -163,6 +177,7 @@ fn activity_log_matches(
 impl Dashboard {
     fn activity_log_panel(
         ui: &mut egui::Ui,
+        hide_sensitive_info: bool,
         activity_log: &std::collections::VecDeque<ActivityLogEntry>,
         event_filter: &mut Option<ActivityLogKind>,
         search: &mut String,
@@ -172,6 +187,7 @@ impl Dashboard {
                 ui.heading("Activity log");
                 ui.add(
                     egui::TextEdit::singleline(search)
+                        .password(hide_sensitive_info)
                         .hint_text("Search event, streamer, or time")
                         .desired_width(190.0),
                 );
@@ -184,31 +200,9 @@ impl Dashboard {
                         }
                     });
             });
-                ui.collapsing("Daily summaries", |ui| {
-                    let summaries = super::activity_log::daily_activity_summaries(activity_log);
-                    if summaries.is_empty() {
-                        ui.label("No retained activity to summarize.");
-                        return;
-                    }
-                    egui::ScrollArea::vertical()
-                        .max_height(100.0)
-                        .show(ui, |ui| {
-                            for summary in summaries {
-                                ui.label(format!(
-                                    "{} — {} streak completions, {} points-earned events, {} points-spent events, {} bonus notices, {} points turns, {} streak turns, {} stream switches, {} stream openings",
-                                    summary.date,
-                                    summary.streaks_completed,
-                                    summary.points_earned_events,
-                                    summary.points_spent_events,
-                                    summary.bonuses_available,
-                                    summary.points_turns_completed,
-                                    summary.streak_turns_ended,
-                                    summary.stream_switches,
-                                    summary.streams_opened,
-                                ));
-                            }
-                        });
-                });
+            ui.collapsing("Daily summaries", |ui| {
+                daily_activity_summary_contents(ui, activity_log, hide_sensitive_info);
+            });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -218,10 +212,12 @@ impl Dashboard {
                     }
                     let mut has_matching_entries = false;
                     egui::Grid::new("activity_log_entries")
-                        .num_columns(3)
+                        .num_columns(if hide_sensitive_info { 2 } else { 3 })
                         .striped(true)
                         .show(ui, |ui| {
-                        ui.strong("Date/time");
+                            if !hide_sensitive_info {
+                                ui.strong("Date/time");
+                            }
                             ui.strong("Streamer");
                             ui.strong("Event");
                             ui.end_row();
@@ -230,9 +226,13 @@ impl Dashboard {
                                 .filter(|entry| activity_log_matches(entry, *event_filter, search))
                             {
                                 has_matching_entries = true;
-                                ui.label(egui::RichText::new(&entry.time).monospace());
-                                ui.label(&entry.streamer);
-                                ui.label(&entry.event);
+                                let (streamer_text, event_text) =
+                                    activity_log_display_values(entry, hide_sensitive_info);
+                                if !hide_sensitive_info {
+                                    ui.label(egui::RichText::new(&entry.time).monospace());
+                                }
+                                ui.label(streamer_text);
+                                ui.label(event_text);
                                 ui.end_row();
                             }
                         });
@@ -327,28 +327,18 @@ impl Dashboard {
         ui.add_space(8.0);
         self.automation_settings(ui);
 
-        let selected_streaks = self
-            .channels
-            .iter()
-            .filter(|channel| channel.selection.streak)
-            .count();
-        let selected_points = self
-            .channels
-            .iter()
-            .filter(|channel| channel.selection.points)
-            .count();
-        let selected_channels = self
-            .channels
-            .iter()
-            .filter(|channel| channel.selection.is_selected())
-            .count();
+        let selection_counts = channel_selection_counts(&self.channels, self.hide_sensitive_info);
 
         ui.add_space(8.0);
         ui.group(|ui| {
             ui.strong("Selection summary");
-            ui.label(format!("{selected_channels} selected channels"));
-            ui.label(format!("{selected_streaks} Streak channels"));
-            ui.label(format!("{selected_points} Points channels"));
+            if let Some((selected_channels, selected_streaks, selected_points)) = selection_counts {
+                ui.label(format!("{selected_channels} selected channels"));
+                ui.label(format!("{selected_streaks} Streak channels"));
+                ui.label(format!("{selected_points} Points channels"));
+            } else {
+                ui.label("Channel counts hidden");
+            }
         });
     }
     fn quality_settings(&mut self, ui: &mut egui::Ui) {
@@ -414,14 +404,26 @@ impl Dashboard {
                 .map(|target| {
                     self.browser_profiles
                         .iter()
-                        .find(|profile| profile.target == *target)
-                        .map(|profile| profile.label.clone())
-                        .unwrap_or_else(|| {
-                            format!(
-                                "Unavailable: {} — {}",
-                                target.browser.name(),
-                                target.profile_directory
+                        .enumerate()
+                        .find(|(_, profile)| profile.target == *target)
+                        .map(|(index, profile)| {
+                            browser_profile_display_name(
+                                self.hide_sensitive_info,
+                                index,
+                                &profile.label,
                             )
+                            .into_owned()
+                        })
+                        .unwrap_or_else(|| {
+                            if self.hide_sensitive_info {
+                                "Unavailable browser profile".to_owned()
+                            } else {
+                                format!(
+                                    "Unavailable: {} — {}",
+                                    target.browser.name(),
+                                    target.profile_directory
+                                )
+                            }
                         })
                 })
                 .unwrap_or_else(|| "Disabled".to_owned());
@@ -429,22 +431,32 @@ impl Dashboard {
                 .selected_text(selected_profile)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.browser_launch_target, None, "Disabled");
-                    for profile in &self.browser_profiles {
+                    for (index, profile) in self.browser_profiles.iter().enumerate() {
+                        let profile_label = browser_profile_display_name(
+                            self.hide_sensitive_info,
+                            index,
+                            &profile.label,
+                        );
                         ui.selectable_value(
                             &mut self.browser_launch_target,
                             Some(profile.target.clone()),
-                            &profile.label,
+                            profile_label.as_ref(),
                         )
                         .on_hover_text(profile.profile_root.display().to_string());
                     }
                 });
-            for profile in &self.browser_profiles {
+            for (index, profile) in self.browser_profiles.iter().enumerate() {
                 if let Some(error) = &profile.extension_scan_error {
+                    let profile_label = browser_profile_display_name(
+                        self.hide_sensitive_info,
+                        index,
+                        &profile.label,
+                    );
                     ui.colored_label(
                         egui::Color32::RED,
                         format!(
                             "Could not inspect extension status for {} at {}: {error}",
-                            profile.label,
+                            profile_label.as_ref(),
                             profile
                                 .profile_root
                                 .join(&profile.target.profile_directory)
@@ -618,6 +630,7 @@ mod tests {
                     ui.add_space(8.0);
                     panel_response = Some(Dashboard::activity_log_panel(
                         ui,
+                        false,
                         &std::collections::VecDeque::new(),
                         &mut event_filter,
                         &mut search,

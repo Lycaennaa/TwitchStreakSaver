@@ -109,7 +109,9 @@ impl Dashboard {
         let queue = self.queue_visibility();
         ui.group(|ui| {
             ui.strong("Upcoming managed channels");
-            if queue.entries.is_empty() {
+            if self.hide_sensitive_info {
+                ui.label("Upcoming managed channels hidden during screenshot privacy.");
+            } else if queue.entries.is_empty() {
                 ui.label(match queue.stage {
                     QueueStage::Idle => "No selected live channels are waiting in the queue.",
                     QueueStage::Streak | QueueStage::Points => {
@@ -135,12 +137,14 @@ impl Dashboard {
                 }
                 ui.label("Player/chat readiness affects the 16-minute turn timer only; it does not prevent opening.");
             }
+            if !self.hide_sensitive_info {
             ui.label(format!(
                 "Available stream slots: {}/{}",
                 queue.open_capacity, APP_STREAM_LIMIT
             ));
             for blocker in &queue.blockers {
                 ui.colored_label(egui::Color32::YELLOW, blocker);
+            }
             }
         });
     }

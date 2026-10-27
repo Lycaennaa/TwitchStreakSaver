@@ -60,6 +60,7 @@ impl Dashboard {
             let points_rotation = &self.points_rotation;
             let points_now = self.started_at.elapsed();
             let automation_delays = &mut self.automation_delays;
+            let hide_sensitive_info = self.hide_sensitive_info;
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.strong("Followed channels");
@@ -72,8 +73,16 @@ impl Dashboard {
                     });
                 });
                 ui.add_space(8.0);
-                ui.add(egui::TextEdit::singleline(search).hint_text("Search channels"));
-                let _ = selection_bulk_controls(ui, channels, &filtered_indices);
+                ui.add(
+                    egui::TextEdit::singleline(search)
+                        .password(hide_sensitive_info)
+                        .hint_text("Search channels"),
+                );
+                if hide_sensitive_info {
+                    ui.label("Bulk channel controls hidden during screenshot privacy.");
+                } else {
+                    let _ = selection_bulk_controls(ui, channels, &filtered_indices);
+                }
                 ui.horizontal_wrapped(|ui| {
                     open_selected = ui.button("Open selected channels").clicked();
                     ui.label(if browser_connected && external_inventory_received {
@@ -92,6 +101,9 @@ impl Dashboard {
                     });
                 });
                 ui.horizontal_wrapped(|ui| {
+                    if hide_sensitive_info {
+                        ui.label("Live-status and PubSub timing hidden during screenshot privacy.");
+                    } else {
                     ui.label(format!(
                         "Twitch live status last confirmed {}",
                         freshness_age(twitch_baseline_confirmed_at)
@@ -108,7 +120,9 @@ impl Dashboard {
                     } else {
                         ui.label("No PubSub events observed this session");
                     }
+                    }
                 });
+                if !hide_sensitive_info {
                 if let Some(gap_started_at) = pubsub_missed_events_since {
                     ui.colored_label(
                         egui::Color32::YELLOW,
@@ -117,6 +131,7 @@ impl Dashboard {
                             freshness_age(Some(gap_started_at))
                         ),
                     );
+                }
                 }
                 ui.label(
                     "Separate player tabs are muted by default; select Unmuted to start with audio.",
@@ -128,7 +143,8 @@ impl Dashboard {
                 if let Some(error) = &pubsub_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("Points events: {error}"));
                 }
-                if has_no_channels {
+                if !hide_sensitive_info {
+                    if has_no_channels {
                     ui.label(if connected {
                         "No followed channels found on this Twitch account."
                     } else {
@@ -138,6 +154,7 @@ impl Dashboard {
                     ui.label("No followed channels match the search.");
                 }
 
+                }
                 // Match the bottom of the right-hand settings group.
                 let list_height =
                     (list_content_bottom_y - ui.available_rect_before_wrap().min.y).max(0.0);
@@ -150,6 +167,9 @@ impl Dashboard {
                     .min_scrolled_height(0.0)
                 .auto_shrink([true, false])
                 .show(ui, |ui| {
+                        if hide_sensitive_info {
+                            ui.label("Followed-channel list hidden during screenshot privacy.");
+                        } else {
                         for index in filtered_indices {
                             let channel = &mut channels[index];
                             ui.group(|ui| {
@@ -260,6 +280,7 @@ impl Dashboard {
                                 });
                             });
                             ui.add_space(4.0);
+                        }
                         }
                             })
                             .inner_rect
