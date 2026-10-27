@@ -23,6 +23,9 @@ keyring = { version = "3", default-features = false, features = ["apple-native"]
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 winreg = "0.55"
 
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tray-icon = "0.21"
+
 [dev-dependencies]
 ron = "0.8"
 

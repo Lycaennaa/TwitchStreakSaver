@@ -134,6 +134,7 @@ pub struct BrowserLaunchTarget {
 #[serde(default)]
 pub struct AppPreferences {
     pub auto_start_on_launch: bool,
+    pub close_to_tray_on_close: bool,
     pub wake_browser_on_open: bool,
     pub close_on_raid_redirect: bool,
     pub adopt_existing_twitch_tabs: bool,
@@ -147,6 +148,7 @@ impl Default for AppPreferences {
     fn default() -> Self {
         Self {
             auto_start_on_launch: true,
+            close_to_tray_on_close: false,
             wake_browser_on_open: false,
             close_on_raid_redirect: false,
             adopt_existing_twitch_tabs: false,
@@ -223,6 +225,7 @@ mod tests {
         .unwrap();
 
         assert!(!preferences.auto_start_on_launch);
+        assert!(!preferences.close_to_tray_on_close);
         assert!(preferences.wake_browser_on_open);
         assert!(!preferences.close_on_raid_redirect);
         assert!(!preferences.adopt_existing_twitch_tabs);

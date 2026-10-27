@@ -46,6 +46,13 @@ mod twitch;
 mod ui;
 #[path = "main/windows_startup.rs"]
 mod windows_startup;
+
+#[cfg(target_os = "macos")]
+#[path = "main/macos_startup.rs"]
+mod macos_startup;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[path = "main/system_tray.rs"]
+mod system_tray;
 const AUTO_TAB_RETRY_DELAY: Duration = Duration::from_secs(30);
 fn queue_candidates<'a>(
     channels: &'a [FollowedChannel],
@@ -338,19 +345,29 @@ const PREFERENCES_KEY: &str = "preferences";
 const ACTIVITY_LOG_KEY: &str = "activity_log";
 const BROWSER_EXTENSION_ID: &str = include_str!("../chrome-extension/trusted-extension-id");
 const BROWSER_BRIDGE_RETRY_DELAY: Duration = Duration::from_secs(5);
-
 fn main() -> eframe::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let launch_in_background = std::env::args().any(|argument| argument == "--background");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let launch_in_background = false;
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([800.0, 600.0]),
+            .with_min_inner_size([800.0, 600.0])
+            .with_visible(!launch_in_background),
         ..Default::default()
     };
 
     eframe::run_native(
         "Twitch Streak Saver",
         options,
-        Box::new(|creation_context| Ok(Box::new(Dashboard::new(creation_context)))),
+        Box::new(|creation_context| {
+            Ok(Box::new(Dashboard::new(
+                creation_context,
+                launch_in_background,
+            )))
+        }),
     )
 }
 
@@ -368,6 +385,19 @@ struct Dashboard {
     #[cfg(target_os = "windows")]
     windows_startup_error: Option<String>,
     auto_start_on_launch: bool,
+    close_to_tray_on_close: bool,
+    #[cfg(target_os = "macos")]
+    start_at_macos_login: bool,
+    #[cfg(target_os = "macos")]
+    macos_startup_error: Option<String>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    system_tray: Option<system_tray::SystemTray>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    system_tray_error: Option<String>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    background_launch: bool,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    exit_requested: bool,
     browser_launch_target: Option<BrowserLaunchTarget>,
     browser_launch_attempted: Option<BrowserLaunchTarget>,
     browser_profiles: Vec<browser_setup::DetectedBrowserProfile>,
@@ -435,7 +465,7 @@ struct Dashboard {
     auto_open_retry_after: HashMap<String, Instant>,
 }
 impl Dashboard {
-    fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
+    fn new(creation_context: &eframe::CreationContext<'_>, _launch_in_background: bool) -> Self {
         let preferences = creation_context
             .storage
             .and_then(|storage| eframe::get_value::<AppPreferences>(storage, PREFERENCES_KEY))
@@ -454,6 +484,13 @@ impl Dashboard {
             browser_setup::detected_browser_profiles_for_roots(&browser_profile_roots);
         #[cfg(target_os = "windows")]
         let (start_with_windows, windows_startup_error) = windows_startup::initialize();
+        #[cfg(target_os = "macos")]
+        let (start_at_macos_login, macos_startup_error) = macos_startup::initialize();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let (system_tray, system_tray_error) = match system_tray::SystemTray::new() {
+            Ok(tray) => (Some(tray), None),
+            Err(error) => (None, Some(error)),
+        };
         let (browser_bridge, browser_error) = match BrowserBridge::start() {
             Ok(bridge) => (Some(bridge), None),
             Err(error) => (None, Some(error)),
@@ -472,6 +509,19 @@ impl Dashboard {
             start_with_windows,
             #[cfg(target_os = "windows")]
             windows_startup_error,
+            close_to_tray_on_close: preferences.close_to_tray_on_close,
+            #[cfg(target_os = "macos")]
+            start_at_macos_login,
+            #[cfg(target_os = "macos")]
+            macos_startup_error,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            system_tray,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            system_tray_error,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            background_launch: _launch_in_background,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            exit_requested: false,
             auto_start_on_launch: preferences.auto_start_on_launch,
             browser_launch_target: preferences.browser_launch_target,
             browser_launch_attempted: None,
@@ -550,6 +600,7 @@ impl Dashboard {
     fn preferences(&self) -> AppPreferences {
         AppPreferences {
             auto_start_on_launch: self.auto_start_on_launch,
+            close_to_tray_on_close: self.close_to_tray_on_close,
             wake_browser_on_open: self.wake_browser_on_open,
             close_on_raid_redirect: self.close_on_raid_redirect,
             adopt_existing_twitch_tabs: self.adopt_existing_twitch_tabs,

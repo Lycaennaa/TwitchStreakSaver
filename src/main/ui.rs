@@ -7,6 +7,44 @@ impl eframe::App for Dashboard {
     }
 
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            if self.background_launch {
+                if self.system_tray.is_none() {
+                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                self.background_launch = false;
+            }
+
+            let mut open_requested = false;
+            let mut quit_requested = false;
+            if let Some(tray) = &self.system_tray {
+                tray.drain_events(|action| match action {
+                    super::system_tray::TrayAction::Open => open_requested = true,
+                    super::system_tray::TrayAction::Quit => quit_requested = true,
+                });
+            }
+            if quit_requested {
+                self.exit_requested = true;
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if open_requested {
+                self.exit_requested = false;
+                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                context.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+
+            if context.input(|input| input.viewport().close_requested())
+                && super::system_tray::should_hide_on_close(
+                    self.close_to_tray_on_close,
+                    self.system_tray.is_some(),
+                    self.exit_requested,
+                )
+            {
+                context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
         self.poll_twitch_updates();
         self.poll_browser_port_check();
         self.poll_browser_bridge();
@@ -460,6 +498,41 @@ impl Dashboard {
                 ui.label("Applies to the current Windows user.");
                 if let Some(error) = &self.windows_startup_error {
                     ui.colored_label(egui::Color32::RED, error);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let changed = ui
+                    .checkbox(&mut self.start_at_macos_login, "Launch at macOS sign-in")
+                    .changed();
+                if changed {
+                    match macos_startup::set_enabled(self.start_at_macos_login) {
+                        Ok(()) => self.macos_startup_error = None,
+                        Err(error) => {
+                            self.start_at_macos_login = !self.start_at_macos_login;
+                            self.macos_startup_error = Some(error);
+                        }
+                    }
+                }
+                ui.label("The sign-in item starts the app hidden in the menu bar.");
+                if let Some(error) = &self.macos_startup_error {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
+            }
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                ui.checkbox(
+                    &mut self.close_to_tray_on_close,
+                    "Keep running in the menu bar/tray when the window closes",
+                );
+                ui.label(
+                    "Close hides the window only when enabled; minimize behaves normally. Use the menu-bar/tray Quit action to exit while hidden.",
+                );
+                if let Some(error) = &self.system_tray_error {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Menu-bar/tray controls are unavailable: {error}"),
+                    );
                 }
             }
             ui.label("Twitch and browser connections are required for automatic opening.");

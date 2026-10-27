@@ -7,7 +7,7 @@ fn run_command(executable: &Path) -> Result<String, String> {
         "The app executable path is not valid Unicode and cannot be registered for Windows startup."
             .to_owned()
     })?;
-    Ok(format!("\"{executable}\""))
+    Ok(format!("\"{executable}\" --background"))
 }
 #[cfg(target_os = "windows")]
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -98,7 +98,7 @@ mod tests {
 
         assert_eq!(
             run_command(executable).unwrap(),
-            r#""C:\Users\Example User\AppData\Local\Twitch Streak Saver\twitch-streak-saver.exe""#
+            r#""C:\Users\Example User\AppData\Local\Twitch Streak Saver\twitch-streak-saver.exe" --background"#
         );
     }
     #[cfg(unix)]

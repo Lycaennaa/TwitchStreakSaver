@@ -40,6 +40,8 @@ The per-channel **Unmuted** preference also synchronizes the Twitch player's own
 
 On Windows, **Launch at Windows sign-in** adds or removes this app's per-user startup entry.
 
+On macOS, **Launch at macOS sign-in** registers a per-user LaunchAgent that starts the app hidden. On Windows, the existing sign-in control also starts it hidden. The menu-bar/tray icon provides **Open Twitch Streak Saver** and **Quit** actions. Closing the window exits by default; enable **Keep running in the menu bar/tray when the window closes** to hide it instead. Minimize continues to use the normal Dock/taskbar behavior.
+
 The extension inventories external Twitch channel/player tabs separately from app-managed players; VOD, non-channel, and chat-only pages are ignored. It reports player status and combined-page chat UI readiness, though UI readiness does not prove a live chat connection. External tabs count toward capacity but are not rotated by the app; unknown managed channels reserve capacity conservatively. Reload extension version 0.3.18 after updating. Older extensions cannot report restored app-managed streams, so the app pauses stream opening until inventory is available.
 By default, manually opened Twitch tabs remain external and under your control. Enabling **Adopt existing Twitch player tabs** lets the extension adopt at most one eligible existing player tab per followed channel, preferring the active tab; unmatched, chat-only, or identity-unverifiable tabs remain external. Turning the option off releases adopted tabs without closing them.
 
