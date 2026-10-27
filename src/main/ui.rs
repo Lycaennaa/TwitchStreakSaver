@@ -463,19 +463,13 @@ impl Dashboard {
                     .iter()
                     .any(|profile| profile.target.browser == root.browser)
                 {
-                    let message = match &root.scan_error {
-                        Some(error) => format!(
-                            "{} profile scan failed at {}: {error}",
-                            root.browser.name(),
-                            root.path.display()
-                        ),
-                        None => format!(
+                    if root.scan_error.is_none() {
+                        ui.label(format!(
                             "{}: no profiles found under {}",
                             root.browser.name(),
                             root.path.display()
-                        ),
-                    };
-                    ui.label(message);
+                        ));
+                    }
                 }
             }
             ui.label(
