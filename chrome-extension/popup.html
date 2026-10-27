@@ -5,9 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Twitch Streak Saver</title>
     <style>
+      :root {
+        color-scheme: dark;
+        background: #000;
+      }
       body {
         box-sizing: border-box;
-        color: #202124;
+        color: #fff;
+        background: #000;
         font: 14px system-ui, sans-serif;
         margin: 0;
         padding: 16px;
@@ -15,11 +20,24 @@
       }
       h1 { font-size: 16px; margin: 0 0 10px; }
       p { line-height: 1.4; margin: 6px 0; }
-      section { border-top: 1px solid #dadce0; margin-top: 12px; padding-top: 10px; }
+      section { border-top: 1px solid #333; margin-top: 12px; padding-top: 10px; }
       .actions { display: grid; gap: 8px; margin-top: 14px; }
       button { cursor: pointer; min-height: 34px; }
-      button:disabled { cursor: wait; }
+      button:disabled {
+        color: #888;
+        border-color: #444;
+        cursor: wait;
+      }
       #action-status { min-height: 1.4em; }
+      button {
+        background: #000;
+        border: 1px solid #666;
+        color: inherit;
+      }
+      button:focus-visible {
+        outline: 2px solid #fff;
+        outline-offset: 2px;
+      }
     </style>
   </head>
   <body>
