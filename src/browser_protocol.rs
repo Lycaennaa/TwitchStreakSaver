@@ -89,6 +89,8 @@ pub enum KnownBrowserMessage {
         channel_counts: HashMap<String, usize>,
         unmatched_count: usize,
         #[serde(default)]
+        open_streamer_logins: Option<Vec<String>>,
+        #[serde(default)]
         managed_channel_ids: Option<Vec<String>>,
         #[serde(default)]
         raid_redirected_channel_ids: Option<Vec<String>>,
@@ -471,6 +473,7 @@ mod tests {
             "type": "external_streams",
             "channel_counts": {"live": 2, "invalid": "many", "zero": 0},
             "unmatched_count": 3,
+            "open_streamer_logins": ["live", "unmatched"],
             "managed_channel_ids": ["managed-channel"],
             "raid_redirected_channel_ids": ["raid-channel"],
         }))
@@ -479,6 +482,7 @@ mod tests {
         let BrowserMessage::Known(KnownBrowserMessage::ExternalStreams {
             channel_counts,
             unmatched_count,
+            open_streamer_logins,
             managed_channel_ids,
             raid_redirected_channel_ids,
         }) = message
@@ -490,6 +494,10 @@ mod tests {
             HashMap::from([("live".to_owned(), 2), ("zero".to_owned(), 0)]),
         );
         assert_eq!(unmatched_count, 3);
+        assert_eq!(
+            open_streamer_logins,
+            Some(vec!["live".to_owned(), "unmatched".to_owned()])
+        );
         assert_eq!(
             managed_channel_ids,
             Some(vec!["managed-channel".to_owned()])
@@ -509,6 +517,7 @@ mod tests {
             BrowserMessage::Known(KnownBrowserMessage::ExternalStreams {
                 managed_channel_ids: None,
                 raid_redirected_channel_ids: None,
+                open_streamer_logins: None,
                 ..
             })
         ));

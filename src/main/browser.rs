@@ -71,6 +71,8 @@ impl Dashboard {
                     self.browser_command_ack_supported = false;
                     self.browser_launch_attempted = None;
                     self.external_stream_counts.clear();
+                    self.browser_open_streamer_names.clear();
+                    self.browser_open_streamer_names_complete = false;
                     self.external_unmatched_streams = 0;
                     self.external_inventory_received = false;
                     self.pending_manual_open_inventory_wait_since = None;
@@ -85,6 +87,8 @@ impl Dashboard {
                     self.browser_connected = false;
                     self.browser_command_ack_supported = false;
                     self.external_stream_counts.clear();
+                    self.browser_open_streamer_names.clear();
+                    self.browser_open_streamer_names_complete = false;
                     self.external_unmatched_streams = 0;
                     self.external_inventory_received = false;
                     self.pending_manual_open_inventory_wait_since = None;
@@ -264,6 +268,7 @@ impl Dashboard {
             }
             KnownBrowserMessage::ExternalStreams {
                 channel_counts,
+                open_streamer_logins,
                 unmatched_count,
                 managed_channel_ids,
                 raid_redirected_channel_ids,
@@ -273,6 +278,47 @@ impl Dashboard {
                     .iter()
                     .map(|channel| channel.id.as_str())
                     .collect::<HashSet<_>>();
+                let open_streamer_names_complete = open_streamer_logins.is_some();
+                let mut open_streamer_logins = open_streamer_logins.unwrap_or_default();
+                for login in &mut open_streamer_logins {
+                    login.make_ascii_lowercase();
+                }
+                open_streamer_logins.sort_unstable();
+                open_streamer_logins.dedup();
+
+                let mut open_channel_ids = HashSet::new();
+                let mut open_streamer_names = Vec::new();
+                for channel_id in channel_counts
+                    .iter()
+                    .filter(|(_, count)| **count > 0)
+                    .map(|(channel_id, _)| channel_id)
+                    .chain(managed_channel_ids.iter().flatten())
+                {
+                    if let Some(channel) = self
+                        .channels
+                        .iter()
+                        .find(|channel| &channel.id == channel_id)
+                    {
+                        if open_channel_ids.insert(channel.id.clone()) {
+                            open_streamer_names.push(channel.display_name.clone());
+                        }
+                    }
+                }
+                for login in open_streamer_logins {
+                    if let Some(channel) = self.channels.iter().find(|channel| {
+                        channel.login.eq_ignore_ascii_case(&login)
+                            || channel.id.eq_ignore_ascii_case(&login)
+                    }) {
+                        if open_channel_ids.insert(channel.id.clone()) {
+                            open_streamer_names.push(channel.display_name.clone());
+                        }
+                    } else {
+                        open_streamer_names.push(login);
+                    }
+                }
+                open_streamer_names.sort_unstable();
+                self.browser_open_streamer_names = open_streamer_names;
+                self.browser_open_streamer_names_complete = open_streamer_names_complete;
                 self.external_stream_counts = channel_counts
                     .into_iter()
                     .filter(|(channel_id, count)| {

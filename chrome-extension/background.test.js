@@ -1858,6 +1858,7 @@ test("external inventory reports restored app-managed player channels separately
   assert.deepEqual(JSON.parse(JSON.stringify(inventory)), {
     type: "external_streams",
     channel_counts: {},
+    open_streamer_logins: ["deselected", "external"],
     unmatched_count: 1,
     managed_channel_ids: ["deselected-channel"],
     raid_redirected_channel_ids: [],
@@ -3227,4 +3228,66 @@ test("popup action results arrive while open-selected is still queued", async ()
     releaseQueue();
   }
   await openCommand;
+});
+
+test("unmanaged Twitch player navigation refreshes open streamer inventory", async () => {
+  const scheduled = [];
+  const extension = await createExtension({
+    storedManagedTabs: [
+      [
+        "managed-channel",
+        {
+          login: "managed",
+          layout: "combined_window",
+          playerTabId: 402,
+          chatTabId: 402,
+          contentVersion: "0.3.4",
+        },
+      ],
+    ],
+    initialTabs: [
+      { id: 401, url: "https://www.twitch.tv/first" },
+      { id: 402, url: "https://www.twitch.tv/managed" },
+    ],
+    setTimeoutImpl(callback, delay) {
+      const timer = { callback, delay, cancelled: false };
+      scheduled.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl(timer) {
+      if (timer) timer.cancelled = true;
+    },
+  });
+
+  async function flushInventory() {
+    const timer = scheduled.find(
+      (candidate) => !candidate.cancelled && candidate.delay === 100,
+    );
+    assert.ok(timer);
+    timer.cancelled = true;
+    await timer.callback();
+  }
+
+  await extension.send({
+    type: "sync_channels",
+    channels: [{ id: "managed-channel", login: "managed", unmuted: false }],
+  });
+  while (scheduled.some((candidate) => !candidate.cancelled && candidate.delay === 100)) {
+    await flushInventory();
+  }
+  await extension.reportExternalStreams();
+  const priorReportCount = extension.calls.nativeMessages.filter(
+    (message) => message.type === "external_streams",
+  ).length;
+  await extension.updateTabUrl(401, "https://www.twitch.tv/second");
+  await flushInventory();
+
+  const inventories = extension.calls.nativeMessages.filter(
+    (message) => message.type === "external_streams",
+  );
+  assert.equal(inventories.length, priorReportCount + 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(inventories.at(-1).open_streamer_logins)),
+    ["managed", "second"],
+  );
 });

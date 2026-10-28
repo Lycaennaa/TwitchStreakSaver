@@ -112,6 +112,37 @@ impl Dashboard {
         let queue = self.queue_visibility();
         ui.group(|ui| {
             ui.set_min_width(ui.available_width());
+            super::ui::section_heading(ui, "Currently open");
+            if self.hide_sensitive_info {
+                ui.label("Streamer names hidden during screenshot privacy.");
+            } else if !self.external_inventory_received {
+                ui.label("Twitch-tab inventory is unavailable.");
+            } else {
+                let mut open_streamer_names = self.open_streamer_names().peekable();
+                let has_open_streamer_names = open_streamer_names.peek().is_some();
+                if has_open_streamer_names {
+                    ui.horizontal_wrapped(|ui| {
+                        for name in open_streamer_names {
+                            ui.strong(name);
+                        }
+                    });
+                } else if self.external_unmatched_streams > 0 {
+                    ui.label(
+                        "Open Twitch tabs are present, but their names are unavailable. Update the browser extension.",
+                    );
+                } else {
+                    ui.label("No streamers are currently open.");
+                }
+                if has_open_streamer_names
+                    && !self.browser_open_streamer_names_complete
+                    && self.external_unmatched_streams > 0
+                {
+                    ui.label(
+                        "Some open Twitch tabs could not be named. Update the browser extension.",
+                    );
+                }
+            }
+            ui.add_space(8.0);
             super::ui::section_heading(ui, "Upcoming managed channels");
             if self.hide_sensitive_info {
                 ui.label("Upcoming managed channels hidden during screenshot privacy.");
@@ -153,5 +184,11 @@ impl Dashboard {
         })
         .response
         .rect
+    }
+}
+
+impl Dashboard {
+    pub(super) fn open_streamer_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.browser_open_streamer_names.iter().map(String::as_str)
     }
 }

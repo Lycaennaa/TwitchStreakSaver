@@ -62,7 +62,7 @@ The extension popup shows bridge connectivity and managed player streams, can pa
 
 Screenshot privacy hides streamer and browser profile names, the connected Twitch login, activity dates and details, searches, channel-selection totals, and variable followed-channel and queue lists. Local browser paths and setup diagnostics remain visible. It changes only the app's on-screen display; it does not alter saved channel data.
 
-In the desktop app, browser and Points & Streak connection statuses are shown on Watch queue; Screenshot privacy is in Settings.
+In the desktop app, browser and Points & Streak connection statuses are shown on Watch queue; Screenshot privacy is in Settings. Watch queue also lists currently open Twitch player streamers, including tabs not managed by the app; followed channels use display names and other channels use their Twitch login. If the browser extension cannot provide names for open tabs, Watch queue shows that instead of claiming no streams are open.
 
 Build incrementally with:
 

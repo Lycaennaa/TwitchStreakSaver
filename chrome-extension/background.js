@@ -255,7 +255,7 @@ function scheduleExternalStreamReport() {
   notifyPopupStatusChanged();
   externalScanTimer = setTimeout(() => {
     externalScanTimer = null;
-    void reportExternalStreams();
+    return reportExternalStreams();
   }, 100);
 }
 
@@ -884,6 +884,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 
   await restorePromise;
+  if (changeInfo.url) scheduleExternalStreamReport();
   if (changeInfo.status === "complete" && TwitchManagedTabs.hasPendingIdentityCheck(tabId)) {
     const identity = await TwitchManagedTabs.readManagedTabIdentity(tabId);
     if (identity !== undefined) await TwitchManagedTabs.resolvePendingStartupIdentity(tabId, identity);

@@ -37,5 +37,6 @@ test("counts external player tabs once and excludes managed and chat tabs", () =
   assert.deepEqual(inventory, {
     channel_counts: { "channel-1": 1 },
     unmatched_count: 1,
+    open_streamer_logins: ["followed", "other"],
   });
 });

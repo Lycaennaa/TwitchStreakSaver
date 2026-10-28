@@ -57,11 +57,14 @@
 
   function externalStreamInventory(tabs, managedTabIds, channelsByLogin) {
     const channelCounts = {};
+    const openStreamerLogins = new Set();
     let unmatchedCount = 0;
     for (const tab of tabs) {
-      if (!Number.isInteger(tab.id) || managedTabIds.has(tab.id)) continue;
+      if (!Number.isInteger(tab.id)) continue;
       const route = channelRoute(tab.url || "");
       if (route.surface !== "player") continue;
+      openStreamerLogins.add(route.login.toLowerCase());
+      if (managedTabIds.has(tab.id)) continue;
       const channelId = channelsByLogin.get(route.login);
       if (channelId) {
         channelCounts[channelId] = (channelCounts[channelId] || 0) + 1;
@@ -69,8 +72,13 @@
         unmatchedCount += 1;
       }
     }
-    return { channel_counts: channelCounts, unmatched_count: unmatchedCount };
-  }
+    return {
+      channel_counts: channelCounts,
+      unmatched_count: unmatchedCount,
+      open_streamer_logins: Array.from(openStreamerLogins).sort(),
+    };
+
+    }
 
   const api = Object.freeze({ channelRoute, externalStreamInventory });
   globalThis.TwitchTabUtils = api;

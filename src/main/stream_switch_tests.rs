@@ -75,6 +75,8 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
             HashMap::new()
         },
         external_stream_counts: HashMap::new(),
+        browser_open_streamer_names: Vec::new(),
+        browser_open_streamer_names_complete: false,
         external_unmatched_streams: 0,
         external_inventory_received: true,
         pubsub_connected: false,
@@ -367,6 +369,7 @@ fn raid_redirect_retires_a_live_auto_channel_until_extension_confirms_offline() 
     dashboard.handle_browser_message(KnownBrowserMessage::ExternalStreams {
         channel_counts: HashMap::new(),
         unmatched_count: 0,
+        open_streamer_logins: Some(Vec::new()),
         managed_channel_ids: Some(Vec::new()),
         raid_redirected_channel_ids: Some(Vec::new()),
     });
@@ -387,6 +390,7 @@ fn external_inventory_restores_raid_suppression_before_reconciliation() {
     dashboard.handle_browser_message(KnownBrowserMessage::ExternalStreams {
         channel_counts: HashMap::new(),
         unmatched_count: 0,
+        open_streamer_logins: Some(Vec::new()),
         managed_channel_ids: Some(Vec::new()),
         raid_redirected_channel_ids: Some(vec!["new".to_owned()]),
     });
@@ -1503,4 +1507,107 @@ fn browser_setup_errors_remain_visible_on_settings_page() {
     let rendered = format!("{:?}", output.shapes);
 
     assert!(rendered.contains("Browser: setup failed"));
+}
+
+#[test]
+fn queue_lists_open_streamers_from_managed_and_external_tabs() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard
+        .channels
+        .push(FollowedChannel::new("external", "External Streamer"));
+    dashboard
+        .channels
+        .push(FollowedChannel::new("zero", "Zero Streamer"));
+
+    dashboard.handle_browser_message(KnownBrowserMessage::ExternalStreams {
+        channel_counts: HashMap::from([("external".to_owned(), 1), ("zero".to_owned(), 0)]),
+        unmatched_count: 0,
+        open_streamer_logins: Some(vec!["external".to_owned(), "new".to_owned()]),
+        managed_channel_ids: Some(vec!["new".to_owned()]),
+        raid_redirected_channel_ids: Some(Vec::new()),
+    });
+
+    assert_eq!(
+        dashboard.open_streamer_names().collect::<Vec<_>>(),
+        vec!["External Streamer", "New Streamer"]
+    );
+}
+
+#[test]
+fn watch_queue_masks_open_streamer_names_during_screenshot_privacy() {
+    fn render_queue(
+        hide_sensitive_info: bool,
+        inventory_received: bool,
+        streamer_open: bool,
+    ) -> String {
+        let mut dashboard = dashboard_with_pending_stream_switch(true);
+        dashboard.hide_sensitive_info = hide_sensitive_info;
+        dashboard.external_inventory_received = inventory_received;
+        dashboard.browser_open_streamer_names_complete = inventory_received;
+        dashboard.browser_open_streamer_names = if streamer_open {
+            vec!["SensitiveStreamer".to_owned()]
+        } else {
+            Vec::new()
+        };
+
+        let context = eframe::egui::Context::default();
+        let input = eframe::egui::RawInput {
+            screen_rect: Some(eframe::egui::Rect::from_min_size(
+                eframe::egui::Pos2::ZERO,
+                eframe::egui::vec2(800.0, 600.0),
+            )),
+            ..eframe::egui::RawInput::default()
+        };
+        let output = context.run(input, |context| {
+            eframe::egui::CentralPanel::default().show(context, |ui| {
+                dashboard.show_queue_visibility_card(ui);
+            });
+        });
+        format!("{:?}", output.shapes)
+    }
+
+    assert!(render_queue(false, true, true).contains("SensitiveStreamer"));
+
+    let hidden = render_queue(true, true, true);
+    assert!(!hidden.contains("SensitiveStreamer"));
+    assert!(hidden.contains("Streamer names hidden during screenshot privacy."));
+    let unavailable = render_queue(false, false, true);
+    assert!(!unavailable.contains("SensitiveStreamer"));
+    assert!(unavailable.contains("Twitch-tab inventory is unavailable."));
+    assert!(!unavailable.contains("No streamers are currently open."));
+
+    let empty = render_queue(false, true, false);
+    assert!(empty.contains("No streamers are currently open."));
+}
+
+#[test]
+fn legacy_unmatched_inventory_is_not_reported_as_empty() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.handle_browser_message(KnownBrowserMessage::ExternalStreams {
+        channel_counts: HashMap::new(),
+        unmatched_count: 1,
+        open_streamer_logins: None,
+        managed_channel_ids: Some(Vec::new()),
+        raid_redirected_channel_ids: Some(Vec::new()),
+    });
+
+    let context = eframe::egui::Context::default();
+    let input = eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(800.0, 600.0),
+        )),
+        ..eframe::egui::RawInput::default()
+    };
+    let output = context.run(input, |context| {
+        eframe::egui::CentralPanel::default().show(context, |ui| {
+            dashboard.show_queue_visibility_card(ui);
+        });
+    });
+    let rendered = format!("{:?}", output.shapes);
+
+    assert!(rendered.contains(
+        "Open Twitch tabs are present, but their names are unavailable. Update the browser extension."
+    ));
+    assert!(!rendered.contains("No streamers are currently open."));
 }
