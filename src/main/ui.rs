@@ -1,10 +1,97 @@
+#[path = "ui/activity.rs"]
+mod activity;
+use activity::activity_log_matches;
+#[path = "ui/pages.rs"]
+mod pages;
 #[path = "ui/privacy.rs"]
 mod privacy;
+#[path = "ui/settings.rs"]
+mod settings;
 use super::*;
 use privacy::{
     activity_log_display_values, browser_profile_display_name, channel_selection_counts,
     daily_activity_summary_contents,
 };
+pub(super) fn section_heading(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .strong()
+            .color(egui::Color32::from_rgb(185, 120, 255)),
+    );
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DashboardTab {
+    Queue,
+    FollowedChannels,
+    Activity,
+    Settings,
+}
+
+impl Default for DashboardTab {
+    fn default() -> Self {
+        Self::Queue
+    }
+}
+
+impl DashboardTab {
+    const ALL: [Self; 4] = [
+        Self::Queue,
+        Self::FollowedChannels,
+        Self::Activity,
+        Self::Settings,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Queue => "Watch queue",
+            Self::FollowedChannels => "Followed channels",
+            Self::Activity => "Activity",
+            Self::Settings => "Settings",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Queue => "LIVE CHANNELS & STREAM AUTOMATION",
+            Self::FollowedChannels => "FOLLOWED CHANNELS & SELECTION",
+            Self::Activity => "RECENT EVENTS & STREAM HISTORY",
+            Self::Settings => "PREFERENCES & BROWSER SETUP",
+        }
+    }
+}
+
+const DASHBOARD_TAB_ID: &str = "primary_navigation.active_tab";
+
+pub(super) fn sidebar_tabs(ui: &mut egui::Ui, mut active_tab: DashboardTab) -> DashboardTab {
+    for tab in DashboardTab::ALL {
+        let _ = sidebar_tab(ui, &mut active_tab, tab);
+        ui.add_space(5.0);
+    }
+    active_tab
+}
+
+pub(super) fn sidebar_tab(
+    ui: &mut egui::Ui,
+    active_tab: &mut DashboardTab,
+    tab: DashboardTab,
+) -> egui::Response {
+    let selected = tab == *active_tab;
+    let text_color = if selected {
+        egui::Color32::from_rgb(210, 180, 255)
+    } else {
+        egui::Color32::from_rgb(190, 190, 198)
+    };
+    let response = ui.add_sized(
+        egui::vec2(ui.available_width(), 44.0),
+        egui::Button::new(egui::RichText::new(tab.label()).color(text_color).strong())
+            .fill(egui::Color32::BLACK)
+            .stroke(egui::Stroke::NONE),
+    );
+    if response.clicked() {
+        *active_tab = tab;
+    }
+    response
+}
 
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -61,29 +148,73 @@ impl eframe::App for Dashboard {
         self.reconcile_automatic_tabs(now);
         context.request_repaint_after(poll_interval);
         let mut visuals = egui::Visuals::dark();
+        let text = egui::Color32::from_rgb(235, 235, 235);
         visuals.panel_fill = egui::Color32::BLACK;
         visuals.window_fill = egui::Color32::BLACK;
         visuals.faint_bg_color = egui::Color32::BLACK;
         visuals.extreme_bg_color = egui::Color32::BLACK;
         visuals.code_bg_color = egui::Color32::BLACK;
-        for widget in [
-            &mut visuals.widgets.noninteractive,
-            &mut visuals.widgets.inactive,
-            &mut visuals.widgets.hovered,
-            &mut visuals.widgets.active,
-            &mut visuals.widgets.open,
-        ] {
-            widget.bg_fill = egui::Color32::BLACK;
-            widget.weak_bg_fill = egui::Color32::BLACK;
-        }
+        visuals.hyperlink_color = egui::Color32::from_rgb(192, 151, 255);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(82, 44, 128);
+        visuals.selection.stroke =
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(205, 173, 255));
+        visuals.window_stroke = egui::Stroke::NONE;
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.noninteractive.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.inactive.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.inactive.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.hovered.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.hovered.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.active.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.active.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+        visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.open.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
         context.set_visuals(visuals);
+        context.style_mut(|style| {
+            style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+            style.spacing.button_padding = egui::vec2(12.0, 8.0);
+            style.spacing.interact_size = egui::vec2(44.0, 34.0);
+            if let Some(font) = style.text_styles.get_mut(&egui::TextStyle::Body) {
+                font.size = 19.0;
+            }
+            if let Some(font) = style.text_styles.get_mut(&egui::TextStyle::Small) {
+                font.size = 16.0;
+            }
+            if let Some(font) = style.text_styles.get_mut(&egui::TextStyle::Heading) {
+                font.size = 28.0;
+            }
+        });
 
+        let tab_id = egui::Id::new(DASHBOARD_TAB_ID);
+        let mut active_tab = context
+            .data_mut(|data| data.get_temp::<DashboardTab>(tab_id))
+            .unwrap_or_default();
         egui::TopBottomPanel::top("app_header")
             .show_separator_line(false)
             .show(context, |ui| {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.heading("Twitch Streak Saver");
+                    ui.label(
+                        egui::RichText::new("TS")
+                            .strong()
+                            .size(18.0)
+                            .color(egui::Color32::from_rgb(145, 70, 255)),
+                    );
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.heading("Twitch Streak Saver");
+                    ui.label(egui::RichText::new(active_tab.subtitle()).small().weak());
+                    });
                     ui.checkbox(&mut self.hide_sensitive_info, "Screenshot privacy")
                         .on_hover_text(
                             "Hides your Twitch login, streamer names, browser profile names, activity dates and details, searches, channel-selection totals, and variable channel/queue lists. Local browser paths and setup diagnostics remain visible.",
@@ -103,7 +234,15 @@ impl eframe::App for Dashboard {
                         TwitchConnectionStatus::Connected(_)
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(status).strong());
+                        ui.label(
+                            egui::RichText::new(status).strong().color(if connected {
+                                egui::Color32::from_rgb(80, 210, 140)
+                            } else if connecting {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(255, 120, 120)
+                            }),
+                        );
                         if self.twitch_network_unavailable {
                             ui.colored_label(egui::Color32::YELLOW, "NETWORK RECOVERING");
                         }
@@ -115,7 +254,13 @@ impl eframe::App for Dashboard {
                             if ui.button("Disconnect").clicked() {
                                 self.disconnect_twitch();
                             }
-                        } else if ui.button("Connect Twitch").clicked() {
+                        } else if ui
+                            .add(
+                                egui::Button::new("Connect Twitch")
+                                    .fill(egui::Color32::from_rgb(145, 70, 255)),
+                            )
+                            .clicked()
+                        {
                             self.start_twitch_connection();
                         }
                     });
@@ -123,445 +268,30 @@ impl eframe::App for Dashboard {
                 ui.add_space(8.0);
             });
 
+        egui::SidePanel::left("primary_navigation")
+            .resizable(false)
+            .exact_width(220.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::BLACK)
+                    .stroke(egui::Stroke::NONE)
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(context, |ui| {
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("NAVIGATION").small().weak());
+                ui.add_space(12.0);
+                active_tab = sidebar_tabs(ui, active_tab);
+            });
+        context.data_mut(|data| data.insert_temp(tab_id, active_tab));
+
         egui::CentralPanel::default().show(context, |ui| {
-            let content_max_height = dashboard_content_max_height(ui.available_height());
-            egui::ScrollArea::vertical()
-                .max_height(content_max_height)
-                .show(ui, |ui| {
-                    ui.add_space(8.0);
-                    ui.columns(2, |columns| {
-                        self.watch_settings(&mut columns[1]);
-                        let right_bottom_y = columns[1].min_rect().max.y;
-                        let _ = self.channel_list(&mut columns[0], right_bottom_y);
-                    });
-
-                    if let Some(error) = &self.connection_error {
-                        ui.colored_label(egui::Color32::LIGHT_RED, format!("Twitch: {error}"));
-                    }
-                });
-            ui.add_space(8.0);
-            Self::activity_log_panel(
-                ui,
-                self.hide_sensitive_info,
-                &self.activity_log,
-                &mut self.activity_log_kind_filter,
-                &mut self.activity_log_search,
-            );
-        });
-    }
-}
-
-const MIN_ACTIVITY_LOG_HEIGHT: f32 = 48.0;
-const ACTIVITY_LOG_HEIGHT_FRACTION: f32 = 0.3;
-
-fn dashboard_content_max_height(available_height: f32) -> f32 {
-    let reserved_log_height =
-        (available_height * ACTIVITY_LOG_HEIGHT_FRACTION).max(MIN_ACTIVITY_LOG_HEIGHT);
-    (available_height - reserved_log_height).max(0.0)
-}
-
-fn activity_log_matches(
-    entry: &ActivityLogEntry,
-    event_filter: Option<ActivityLogKind>,
-    search: &str,
-) -> bool {
-    let query = search.trim();
-    event_filter.map_or(true, |kind| entry.kind == kind)
-        && (query.is_empty()
-            || fuzzy_contains(&entry.time, query)
-            || fuzzy_contains(&entry.streamer, query)
-            || fuzzy_contains(&entry.event, query)
-            || fuzzy_contains(entry.kind.label(), query))
-}
-
-impl Dashboard {
-    fn activity_log_panel(
-        ui: &mut egui::Ui,
-        hide_sensitive_info: bool,
-        activity_log: &std::collections::VecDeque<ActivityLogEntry>,
-        event_filter: &mut Option<ActivityLogKind>,
-        search: &mut String,
-    ) -> egui::Response {
-        ui.group(|ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.heading("Activity log");
-                ui.add(
-                    egui::TextEdit::singleline(search)
-                        .password(hide_sensitive_info)
-                        .hint_text("Search event, streamer, or time")
-                        .desired_width(190.0),
-                );
-                egui::ComboBox::from_id_salt("activity_log_event_filter")
-                    .selected_text((*event_filter).map_or("All events", ActivityLogKind::label))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(event_filter, None, "All events");
-                        for kind in ActivityLogKind::ALL {
-                            ui.selectable_value(event_filter, Some(kind), kind.label());
-                        }
-                    });
-            });
-            ui.collapsing("Daily summaries", |ui| {
-                daily_activity_summary_contents(ui, activity_log, hide_sensitive_info);
-            });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if activity_log.is_empty() {
-                        ui.label("Point, Streak, and stream-switch events will appear here.");
-                        return;
-                    }
-                    let mut has_matching_entries = false;
-                    egui::Grid::new("activity_log_entries")
-                        .num_columns(if hide_sensitive_info { 2 } else { 3 })
-                        .striped(true)
-                        .show(ui, |ui| {
-                            if !hide_sensitive_info {
-                                ui.strong("Date/time");
-                            }
-                            ui.strong("Streamer");
-                            ui.strong("Event");
-                            ui.end_row();
-                            for entry in activity_log
-                                .iter()
-                                .filter(|entry| activity_log_matches(entry, *event_filter, search))
-                            {
-                                has_matching_entries = true;
-                                let (streamer_text, event_text) =
-                                    activity_log_display_values(entry, hide_sensitive_info);
-                                if !hide_sensitive_info {
-                                    ui.label(egui::RichText::new(&entry.time).monospace());
-                                }
-                                ui.label(streamer_text);
-                                ui.label(event_text);
-                                ui.end_row();
-                            }
-                        });
-                    if !has_matching_entries {
-                        ui.label("No activity log entries match these filters.");
-                    }
+                    self.show_dashboard_content(ui, active_tab);
                 });
-        })
-        .response
-    }
-
-    pub(super) fn watch_settings(&mut self, ui: &mut egui::Ui) {
-        let browser_notice = self.browser_notice.clone();
-        let detected_browsers = browser_setup::detected_setup_browsers();
-        let port_check_in_flight = self.browser_port_check_in_flight;
-        let mut connect_browser = false;
-        let mut setup_browser = None;
-        ui.group(|ui| {
-            ui.strong("Browser integration");
-            ui.label(if self.browser_connected {
-                "Native host connected."
-            } else {
-                "Pairing is automatic. Click the extension toolbar icon to wake and retry its worker."
-            });
-            let button_label = if port_check_in_flight {
-                "Checking browser connection…"
-            } else {
-                "Check app bridge"
-            };
-            if ui
-                .add_enabled(!port_check_in_flight, egui::Button::new(button_label))
-                .clicked()
-            {
-                connect_browser = true;
-            }
-            ui.menu_button("Set up browser extension", |ui| {
-                if detected_browsers.is_empty() {
-                    ui.label("No supported browsers detected.");
-                }
-                for browser in detected_browsers.iter().copied() {
-                    if ui.button(browser.name()).clicked() {
-                        setup_browser = Some(browser);
-                        ui.close_menu();
-                    }
-                }
-            });
-            if let Some(notice) = &browser_notice {
-                ui.label(egui::RichText::new(notice).small().weak());
-            }
         });
-        if connect_browser {
-            self.connect_to_browser();
-        }
-        if let Some(target) = setup_browser {
-            self.open_extension_setup(target);
-        }
-        let mut close_on_raid_redirect_changed = false;
-        let mut adopt_existing_twitch_tabs_changed = false;
-        ui.group(|ui| {
-            ui.strong("Twitch tab opening");
-            ui.label(
-                "Each stream opens as a combined Twitch page in its own window.",
-            );
-            ui.checkbox(
-                &mut self.wake_browser_on_open,
-                "Restore and focus browser when opening",
-            );
-            ui.label(
-                "Enabling this brings each stream window to the foreground as it opens and may interrupt other work. Twitch and the browser can still throttle or freeze background pages.",
-            );
-            close_on_raid_redirect_changed = ui
-                .checkbox(
-                    &mut self.close_on_raid_redirect,
-                    "Close app-opened stream tabs on Twitch raid redirects",
-                )
-                .changed();
-            ui.label("Closes a managed stream when its URL includes referrer=raid.");
-            adopt_existing_twitch_tabs_changed = ui
-                .checkbox(
-                    &mut self.adopt_existing_twitch_tabs,
-                    "Adopt eligible existing Twitch player tabs",
-                )
-                .changed();
-            ui.label("Turning this off releases adopted tabs without closing them.");
-        });
-        if close_on_raid_redirect_changed || adopt_existing_twitch_tabs_changed {
-            self.sync_extension_channels();
-        }
-
-        ui.add_space(8.0);
-        self.quality_settings(ui);
-        ui.add_space(8.0);
-        self.automation_settings(ui);
-
-        let selection_counts = channel_selection_counts(&self.channels, self.hide_sensitive_info);
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.strong("Selection summary");
-            if let Some((selected_channels, selected_streaks, selected_points)) = selection_counts {
-                ui.label(format!("{selected_channels} selected channels"));
-                ui.label(format!("{selected_streaks} Streak channels"));
-                ui.label(format!("{selected_points} Points channels"));
-            } else {
-                ui.label("Channel counts hidden");
-            }
-        });
-    }
-    fn quality_settings(&mut self, ui: &mut egui::Ui) {
-        let mut changed = false;
-        ui.group(|ui| {
-            ui.strong("Stream quality");
-            ui.label("Automatically choose this quality on Twitch players.");
-            egui::ComboBox::from_id_salt("preferred_stream_quality")
-                .selected_text(self.preferred_quality.label())
-                .show_ui(ui, |ui| {
-                    for quality in PreferredQuality::ALL {
-                        changed |= ui
-                            .selectable_value(&mut self.preferred_quality, quality, quality.label())
-                            .changed();
-                    }
-                });
-            ui.label("Unavailable choices use the lowest available video quality.");
-        });
-        if changed && self.browser_connected {
-            self.set_extension_preferred_quality();
-        }
-    }
-}
-impl Dashboard {
-    fn automation_settings(&mut self, ui: &mut egui::Ui) {
-        let mut start = false;
-        let mut stop = false;
-        let mut profile_folder_reset: Option<BrowserKind> = None;
-        let now = self.started_at.elapsed();
-        ui.group(|ui| {
-            ui.strong("Automation");
-            ui.label(if self.automation_enabled {
-                "Automation enabled."
-            } else {
-                "Automation stopped."
-            });
-            draw_automation_pause_controls(
-                ui,
-                &mut self.automation_delays,
-                now,
-                self.automation_enabled,
-            );
-            ui.checkbox(&mut self.auto_start_on_launch, "Auto-start on app launch");
-            if ui.button("Refresh browser profiles").clicked() {
-                self.refresh_browser_profiles();
-            }
-                ui.menu_button("Browser data folders", |ui| {
-                    ui.label("Detected browser user-data folders:");
-                    for root in &self.browser_profile_roots {
-                        ui.horizontal(|ui| {
-                            ui.label(root.browser.name());
-                            ui.label(root.path.display().to_string());
-                            if root.overridden && ui.button("Reset").clicked() {
-                                profile_folder_reset = Some(root.browser);
-                                ui.close_menu();
-                            }
-                        });
-                    }
-                });
-            let selected_profile = self
-                .browser_launch_target
-                .as_ref()
-                .map(|target| {
-                    self.browser_profiles
-                        .iter()
-                        .enumerate()
-                        .find(|(_, profile)| profile.target == *target)
-                        .map(|(index, profile)| {
-                            browser_profile_display_name(
-                                self.hide_sensitive_info,
-                                index,
-                                &profile.label,
-                            )
-                            .into_owned()
-                        })
-                        .unwrap_or_else(|| {
-                            if self.hide_sensitive_info {
-                                "Unavailable browser profile".to_owned()
-                            } else {
-                                format!(
-                                    "Unavailable: {} — {}",
-                                    target.browser.name(),
-                                    target.profile_directory
-                                )
-                            }
-                        })
-                })
-                .unwrap_or_else(|| "Disabled".to_owned());
-            egui::ComboBox::from_id_salt("automatic_browser_profile")
-                .selected_text(selected_profile)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.browser_launch_target, None, "Disabled");
-                    for (index, profile) in self.browser_profiles.iter().enumerate() {
-                        let profile_label = browser_profile_display_name(
-                            self.hide_sensitive_info,
-                            index,
-                            &profile.label,
-                        );
-                        ui.selectable_value(
-                            &mut self.browser_launch_target,
-                            Some(profile.target.clone()),
-                            profile_label.as_ref(),
-                        )
-                        .on_hover_text(profile.profile_root.display().to_string());
-                    }
-                });
-            for (index, profile) in self.browser_profiles.iter().enumerate() {
-                if let Some(error) = &profile.extension_scan_error {
-                    let profile_label = browser_profile_display_name(
-                        self.hide_sensitive_info,
-                        index,
-                        &profile.label,
-                    );
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        format!(
-                            "Could not inspect extension status for {} at {}: {error}",
-                            profile_label.as_ref(),
-                            profile
-                                .profile_root
-                                .join(&profile.target.profile_directory)
-                                .join("Preferences")
-                                .display()
-                        ),
-                    );
-                }
-            }
-            if self.browser_profiles.is_empty() {
-                ui.label("No profiles were found in the readable browser data folders.");
-            }
-            for root in &self.browser_profile_roots {
-                if !self
-                    .browser_profiles
-                    .iter()
-                    .any(|profile| profile.target.browser == root.browser)
-                {
-                    if root.scan_error.is_none() {
-                        ui.label(format!(
-                            "{}: no profiles found under {}",
-                            root.browser.name(),
-                            root.path.display()
-                        ));
-                    }
-                }
-            }
-            ui.label(
-                "Hover a profile for its detected folder. Profiles with the extension enabled are marked; if multiple are enabled, the bridge cannot identify the connected one.",
-            );
-            #[cfg(target_os = "windows")]
-            {
-                let changed = ui
-                    .checkbox(&mut self.start_with_windows, "Launch at Windows sign-in")
-                    .changed();
-                if changed {
-                    match windows_startup::set_enabled(self.start_with_windows) {
-                        Ok(()) => self.windows_startup_error = None,
-                        Err(error) => {
-                            self.start_with_windows = !self.start_with_windows;
-                            self.windows_startup_error = Some(error);
-                        }
-                    }
-                }
-                ui.label("Applies to the current Windows user.");
-                if let Some(error) = &self.windows_startup_error {
-                    ui.colored_label(egui::Color32::RED, error);
-                }
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let changed = ui
-                    .checkbox(&mut self.start_at_macos_login, "Launch at macOS sign-in")
-                    .changed();
-                if changed {
-                    match macos_startup::set_enabled(self.start_at_macos_login) {
-                        Ok(()) => self.macos_startup_error = None,
-                        Err(error) => {
-                            self.start_at_macos_login = !self.start_at_macos_login;
-                            self.macos_startup_error = Some(error);
-                        }
-                    }
-                }
-                ui.label("The sign-in item starts the app hidden in the menu bar.");
-                if let Some(error) = &self.macos_startup_error {
-                    ui.colored_label(egui::Color32::RED, error);
-                }
-            }
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            {
-                ui.checkbox(
-                    &mut self.close_to_tray_on_close,
-                    "Keep running in the menu bar/tray when the window closes",
-                );
-                ui.label(
-                    "Close hides the window only when enabled; minimize behaves normally. Use the menu-bar/tray Quit action to exit while hidden.",
-                );
-                if let Some(error) = &self.system_tray_error {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        format!("Menu-bar/tray controls are unavailable: {error}"),
-                    );
-                }
-            }
-            ui.label("Twitch and browser connections are required for automatic opening.");
-            ui.horizontal(|ui| {
-                start = ui
-                    .add_enabled(!self.automation_enabled, egui::Button::new("Start"))
-                    .clicked();
-                stop = ui
-                    .add_enabled(self.automation_enabled, egui::Button::new("Stop All"))
-                    .clicked();
-            });
-        });
-        if let Some(browser) = profile_folder_reset {
-            if let Err(error) = self.set_browser_profile_data_directory(browser, None) {
-                self.browser_error = Some(error);
-            }
-        }
-        if start {
-            self.start_automation();
-        }
-        if stop {
-            self.stop_automation();
-        }
     }
 }
 
@@ -602,56 +332,6 @@ mod tests {
             Some(ActivityLogKind::WatchStreak),
             "missing"
         ));
-    }
-
-    #[test]
-    fn empty_activity_log_fills_the_reserved_bottom_region() {
-        for screen_size in [egui::vec2(1471.0, 274.0), egui::vec2(800.0, 600.0)] {
-            let context = egui::Context::default();
-            let mut panel_response = None;
-            let mut minimum_panel_height = 0.0;
-            let mut event_filter = None;
-            let mut search = String::new();
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
-                ..Default::default()
-            };
-
-            let _ = context.run(input, |context| {
-                egui::CentralPanel::default().show(context, |ui| {
-                    let available_height = ui.available_height();
-                    let content_max_height = dashboard_content_max_height(available_height);
-                    minimum_panel_height = (available_height - content_max_height - 16.0).max(0.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(content_max_height)
-                        .show(ui, |ui| {
-                            ui.add_space(content_max_height + 200.0);
-                        });
-                    ui.add_space(8.0);
-                    panel_response = Some(Dashboard::activity_log_panel(
-                        ui,
-                        false,
-                        &std::collections::VecDeque::new(),
-                        &mut event_filter,
-                        &mut search,
-                    ));
-                });
-            });
-
-            let panel_response = panel_response.expect("activity log panel was not rendered");
-            assert!(
-                panel_response.rect.height() >= minimum_panel_height,
-                "activity log only used {} points instead of the reserved {}",
-                panel_response.rect.height(),
-                minimum_panel_height
-            );
-            assert!(
-                panel_response.rect.bottom() >= screen_size.y - 15.0,
-                "activity log ended at {} in a {}-point viewport",
-                panel_response.rect.bottom(),
-                screen_size.y
-            );
-        }
     }
 }
 fn draw_automation_pause_controls(

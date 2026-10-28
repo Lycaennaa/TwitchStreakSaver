@@ -977,94 +977,44 @@ fn channel_snooze_skips_automation_until_its_expiry_without_changing_selection()
     );
 }
 #[test]
-fn followed_channel_list_ends_with_right_settings_in_compact_view() {
-    let context = eframe::egui::Context::default();
+fn dashboard_queue_page_renders_without_followed_channels() {
     let mut dashboard = dashboard_with_pending_stream_switch(true);
-    let screen_size = eframe::egui::vec2(748.0, 394.0);
-    let make_input = || eframe::egui::RawInput {
+    let mut bounds = None;
+    let input = eframe::egui::RawInput {
         screen_rect: Some(eframe::egui::Rect::from_min_size(
             eframe::egui::Pos2::ZERO,
-            screen_size,
+            eframe::egui::vec2(1120.0, 760.0),
         )),
         ..Default::default()
     };
-    let mut initial_list_rect = None;
-    let mut initial_viewport_top = 0.0;
-    let mut initial_panel_ends = (0.0, 0.0);
-
-    let _ = context.run(make_input(), |context| {
-        eframe::egui::TopBottomPanel::top("app_header").show(context, |ui| {
-            ui.add_space(50.0);
-        });
+    let output = eframe::egui::Context::default().run(input, |context| {
         eframe::egui::CentralPanel::default().show(context, |ui| {
-            let available_height = ui.available_height();
-            let reserved_log_height = (available_height * 0.3).max(48.0);
-            let content_max_height = (available_height - reserved_log_height).max(0.0);
-            initial_viewport_top = ui.available_rect_before_wrap().min.y;
-            eframe::egui::ScrollArea::vertical()
-                .max_height(content_max_height)
+            let _ = eframe::egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add_space(8.0);
-                    ui.columns(2, |columns| {
-                        dashboard.watch_settings(&mut columns[1]);
-                        let right_panel_bottom = columns[1].min_rect().max.y;
-                        initial_list_rect =
-                            Some(dashboard.channel_list(&mut columns[0], right_panel_bottom));
-                        initial_panel_ends = (columns[0].min_rect().max.y, right_panel_bottom);
-                    });
+                    bounds = Some(dashboard.show_dashboard_content_with_bounds(ui));
                 });
         });
     });
-
-    let initial_list_rect = initial_list_rect.expect("followed-channel list was not rendered");
-    let initial_end_gap = initial_panel_ends.0 - initial_panel_ends.1;
-    assert!(
-        initial_end_gap.abs() <= 2.0,
-        "initial left panel ends {} points from right settings",
-        initial_end_gap
-    );
-    let scroll_offset = (initial_list_rect.min.y - initial_viewport_top).max(0.0);
-    let mut list_rect = None;
-    let mut viewport_top = 0.0;
-    let mut panel_ends = (0.0, 0.0);
-
-    let _ = context.run(make_input(), |context| {
-        eframe::egui::TopBottomPanel::top("app_header").show(context, |ui| {
-            ui.add_space(50.0);
-        });
-        eframe::egui::CentralPanel::default().show(context, |ui| {
-            let available_height = ui.available_height();
-            let reserved_log_height = (available_height * 0.3).max(48.0);
-            let content_max_height = (available_height - reserved_log_height).max(0.0);
-            viewport_top = ui.available_rect_before_wrap().min.y;
-            eframe::egui::ScrollArea::vertical()
-                .max_height(content_max_height)
-                .vertical_scroll_offset(scroll_offset)
-                .show(ui, |ui| {
-                    ui.add_space(8.0);
-                    ui.columns(2, |columns| {
-                        dashboard.watch_settings(&mut columns[1]);
-                        let right_panel_bottom = columns[1].min_rect().max.y;
-                        list_rect =
-                            Some(dashboard.channel_list(&mut columns[0], right_panel_bottom));
-                        panel_ends = (columns[0].min_rect().max.y, right_panel_bottom);
-                    });
-                });
-        });
-    });
-
-    let list_rect = list_rect.expect("followed-channel list was not rendered");
-    let top_gap = list_rect.min.y - viewport_top;
-    let panel_end_gap = panel_ends.0 - panel_ends.1;
-    assert!(
-        top_gap.abs() <= 2.0,
-        "list top differs from viewport top by {top_gap} points"
-    );
-    assert!(
-        panel_end_gap.abs() <= 2.0,
-        "scrolled left panel ends {} points from right settings",
-        panel_end_gap
-    );
+    let rendered = format!("{:?}", output.shapes);
+    let (queue, automation, summary, queue_page) =
+        bounds.expect("dashboard workspace was not rendered");
+    for (name, rect) in [
+        ("queue", queue),
+        ("automation", automation),
+        ("selection summary", summary),
+        ("queue page", queue_page),
+    ] {
+        assert!(
+            rect.width() >= 1000.0,
+            "{name} panel is only {} points wide at a 1120-point viewport",
+            rect.width()
+        );
+    }
+    assert_eq!(rendered.matches("Upcoming managed channels").count(), 1);
+    assert!(!rendered.contains("Open selected channels"));
+    assert!(rendered.contains("Stop All"));
+    assert!(!rendered.contains("Followed channels"));
 }
 #[test]
 fn adopted_browser_tabs_are_tracked_without_logging_an_app_open_and_release_clears_state() {
@@ -1368,6 +1318,7 @@ fn screenshot_privacy_hides_variable_channel_rows() {
     };
     let output = eframe::egui::Context::default().run(input, |context| {
         eframe::egui::CentralPanel::default().show(context, |ui| {
+            dashboard.show_queue_visibility(ui);
             dashboard.channel_list(ui, 600.0);
         });
     });
@@ -1411,4 +1362,145 @@ fn screenshot_privacy_hides_empty_channel_state() {
 
     assert!(rendered.contains("Followed-channel list hidden during screenshot privacy."));
     assert!(!rendered.contains("No followed channels"));
+}
+#[test]
+fn sidebar_navigation_renders_distinct_pages() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let tabs = [
+        (
+            super::ui::DashboardTab::Queue,
+            "Upcoming managed channels",
+            "Activity log",
+        ),
+        (
+            super::ui::DashboardTab::FollowedChannels,
+            "New Streamer",
+            "Upcoming managed channels",
+        ),
+        (
+            super::ui::DashboardTab::Activity,
+            "Activity log",
+            "Upcoming managed channels",
+        ),
+        (
+            super::ui::DashboardTab::Settings,
+            "Twitch tab opening",
+            "Upcoming managed channels",
+        ),
+    ];
+    for (tab, expected, absent) in tabs {
+        let input = eframe::egui::RawInput {
+            screen_rect: Some(eframe::egui::Rect::from_min_size(
+                eframe::egui::Pos2::ZERO,
+                eframe::egui::vec2(1400.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        let mut selected_tab = tab;
+        let output = eframe::egui::Context::default().run(input, |context| {
+            eframe::egui::SidePanel::left("primary_navigation_test")
+                .resizable(false)
+                .exact_width(220.0)
+                .show(context, |ui| {
+                    selected_tab = super::ui::sidebar_tabs(ui, selected_tab);
+                });
+            eframe::egui::CentralPanel::default().show(context, |ui| {
+                dashboard.show_dashboard_content(ui, selected_tab);
+            });
+        });
+        let rendered = format!("{:?}", output.shapes);
+
+        assert!(rendered.contains("Watch queue"));
+        assert!(rendered.contains("Activity"));
+        assert!(rendered.contains("Settings"));
+        assert!(rendered.contains("Followed channels"));
+        assert!(rendered.contains(expected), "missing {expected} in {tab:?}");
+        assert!(!rendered.contains(absent), "unexpected {absent} in {tab:?}");
+        assert_eq!(
+            rendered.contains("Open selected channels"),
+            tab == super::ui::DashboardTab::FollowedChannels
+        );
+    }
+}
+#[test]
+fn sidebar_click_updates_active_tab() {
+    let context = eframe::egui::Context::default();
+    let screen_rect = eframe::egui::Rect::from_min_size(
+        eframe::egui::Pos2::ZERO,
+        eframe::egui::vec2(800.0, 600.0),
+    );
+    let mut active_tab = super::ui::DashboardTab::Queue;
+    let activity_rect = std::cell::Cell::new(eframe::egui::Rect::NOTHING);
+    let mut draw_sidebar = |context: &eframe::egui::Context| {
+        eframe::egui::CentralPanel::default().show(context, |ui| {
+            let response =
+                super::ui::sidebar_tab(ui, &mut active_tab, super::ui::DashboardTab::Activity);
+            activity_rect.set(response.rect);
+        });
+    };
+
+    let _ = context.run(
+        eframe::egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        },
+        |context| draw_sidebar(context),
+    );
+    let click_position = activity_rect.get().center();
+
+    let _ = context.run(
+        eframe::egui::RawInput {
+            screen_rect: Some(screen_rect),
+            events: vec![
+                eframe::egui::Event::PointerMoved(click_position),
+                eframe::egui::Event::PointerButton {
+                    pos: click_position,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |context| draw_sidebar(context),
+    );
+    let _ = context.run(
+        eframe::egui::RawInput {
+            screen_rect: Some(screen_rect),
+            events: vec![
+                eframe::egui::Event::PointerMoved(click_position),
+                eframe::egui::Event::PointerButton {
+                    pos: click_position,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        },
+        |context| draw_sidebar(context),
+    );
+    drop(draw_sidebar);
+
+    assert_eq!(active_tab, super::ui::DashboardTab::Activity);
+}
+#[test]
+fn browser_setup_errors_remain_visible_on_settings_page() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.browser_error = Some("setup failed".to_owned());
+    let input = eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(800.0, 600.0),
+        )),
+        ..Default::default()
+    };
+    let output = eframe::egui::Context::default().run(input, |context| {
+        eframe::egui::CentralPanel::default().show(context, |ui| {
+            dashboard.show_dashboard_content(ui, super::ui::DashboardTab::Settings);
+        });
+    });
+    let rendered = format!("{:?}", output.shapes);
+
+    assert!(rendered.contains("Browser: setup failed"));
 }

@@ -18,11 +18,7 @@ fn freshness_age(confirmed_at: Option<Instant>) -> String {
 }
 
 impl Dashboard {
-    pub(super) fn channel_list(
-        &mut self,
-        ui: &mut egui::Ui,
-        right_panel_bottom_y: f32,
-    ) -> egui::Rect {
+    pub(super) fn channel_list(&mut self, ui: &mut egui::Ui, channel_panel_bottom_y: f32) {
         let connected = matches!(
             &self.connection_status,
             TwitchConnectionStatus::Connected(_)
@@ -36,7 +32,6 @@ impl Dashboard {
         let has_no_channels = self.channels.is_empty();
         let filtered_indices =
             followed_channel_search_indices(&self.channels, &self.followed_search);
-        let browser_error = self.browser_error.clone();
         let pubsub_connected = self.pubsub_connected;
         let pubsub_error = self.pubsub_error.clone();
         let twitch_baseline_confirmed_at = self.twitch_baseline_confirmed_at;
@@ -48,10 +43,8 @@ impl Dashboard {
         let mut open_selected = false;
         let mut unmuted_changed = false;
 
-        let mut list_rect = egui::Rect::NOTHING;
         let list_content_bottom_y =
-            right_panel_bottom_y - egui::Frame::group(ui.style()).inner_margin.bottom as f32;
-        self.show_queue_visibility(ui);
+            channel_panel_bottom_y - egui::Frame::group(ui.style()).inner_margin.bottom as f32;
         {
             let channels = &mut self.channels;
             let search = &mut self.followed_search;
@@ -63,7 +56,7 @@ impl Dashboard {
             let hide_sensitive_info = self.hide_sensitive_info;
             ui.group(|ui| {
                 ui.horizontal(|ui| {
-                    ui.strong("Followed channels");
+                super::ui::section_heading(ui, "Followed channels");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if has_sample_data {
                             ui.label(egui::RichText::new("SAMPLE DATA").small().weak());
@@ -76,6 +69,7 @@ impl Dashboard {
                 ui.add(
                     egui::TextEdit::singleline(search)
                         .password(hide_sensitive_info)
+                        .desired_width(ui.available_width())
                         .hint_text("Search channels"),
                 );
                 if hide_sensitive_info {
@@ -84,7 +78,12 @@ impl Dashboard {
                     let _ = selection_bulk_controls(ui, channels, &filtered_indices);
                 }
                 ui.horizontal_wrapped(|ui| {
-                    open_selected = ui.button("Open selected channels").clicked();
+                    open_selected = ui
+                        .add(
+                            egui::Button::new("Open selected channels")
+                                .fill(egui::Color32::from_rgb(145, 70, 255)),
+                        )
+                        .clicked();
                     ui.label(if browser_connected && external_inventory_received {
                         "Browser connected"
                     } else if browser_connected {
@@ -137,9 +136,6 @@ impl Dashboard {
                     "Separate player tabs are muted by default; select Unmuted to start with audio.",
                 );
 
-                if let Some(error) = &browser_error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
                 if let Some(error) = &pubsub_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("Points events: {error}"));
                 }
@@ -155,10 +151,10 @@ impl Dashboard {
                 }
 
                 }
-                // Match the bottom of the right-hand settings group.
+                // Keep the nested list within its allocated channel-panel height.
                 let list_height =
                     (list_content_bottom_y - ui.available_rect_before_wrap().min.y).max(0.0);
-                let list_output = ui.allocate_ui_with_layout(
+                ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), list_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
@@ -176,18 +172,22 @@ impl Dashboard {
                                 ui.horizontal(|ui| {
                                     ui.vertical(|ui| {
                                         ui.horizontal(|ui| {
-                                            ui.strong(&channel.display_name);
-                                            let live_status =
+                                            ui.label(
+                                                egui::RichText::new(&channel.display_name)
+                                                    .strong()
+                                                    .size(18.0),
+                                            );
+                                            let (live_status, live_color) =
                                                 if live_channel_ids.contains(&channel.id) {
-                                                    "- live"
+                                                    ("- live", egui::Color32::from_rgb(80, 210, 140))
                                                 } else if connected {
-                                                    "- offline"
+                                                    ("- offline", egui::Color32::from_rgb(150, 150, 150))
                                                 } else if channel.id.starts_with("sample-") {
-                                                    "- sample channel"
+                                                    ("- sample channel", egui::Color32::from_rgb(192, 151, 255))
                                                 } else {
-                                                    "- not connected"
+                                                    ("- not connected", egui::Color32::from_rgb(150, 150, 150))
                                                 };
-                                            ui.label(live_status);
+                                            ui.label(egui::RichText::new(live_status).small().color(live_color));
                                         });
                                         if let Some(points) = streak_completed.get(&channel.id) {
                                             ui.colored_label(
@@ -286,7 +286,6 @@ impl Dashboard {
                             .inner_rect
                     },
                 );
-                list_rect = list_output.inner;
             });
         }
         if unmuted_changed {
@@ -295,7 +294,6 @@ impl Dashboard {
         if open_selected {
             self.open_selected_twitch_channels();
         }
-        list_rect
     }
 }
 

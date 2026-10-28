@@ -106,9 +106,13 @@ impl Dashboard {
         }
     }
     pub(super) fn show_queue_visibility(&self, ui: &mut egui::Ui) {
+        let _ = self.show_queue_visibility_card(ui);
+    }
+    pub(super) fn show_queue_visibility_card(&self, ui: &mut egui::Ui) -> egui::Rect {
         let queue = self.queue_visibility();
         ui.group(|ui| {
-            ui.strong("Upcoming managed channels");
+            ui.set_min_width(ui.available_width());
+            super::ui::section_heading(ui, "Upcoming managed channels");
             if self.hide_sensitive_info {
                 ui.label("Upcoming managed channels hidden during screenshot privacy.");
             } else if queue.entries.is_empty() {
@@ -146,6 +150,8 @@ impl Dashboard {
                 ui.colored_label(egui::Color32::YELLOW, blocker);
             }
             }
-        });
+        })
+        .response
+        .rect
     }
 }

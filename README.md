@@ -1,6 +1,6 @@
 # Twitch Streak Saver
 
-Cross-platform Rust desktop app built with egui.
+Cross-platform Rust desktop app built with egui, with sidebar pages for the watch queue, followed channels, activity history, and settings.
 
 On startup, the app immediately begins connecting to Twitch instead of waiting for **Connect Twitch**.
 
