@@ -2,6 +2,15 @@ use super::*;
 
 impl Dashboard {
     pub(super) fn watch_settings(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("Privacy");
+            ui.checkbox(&mut self.hide_sensitive_info, "Screenshot privacy")
+                .on_hover_text(
+                    "Hides your Twitch login, streamer names, browser profile names, activity dates and details, searches, channel-selection totals, and variable channel/queue lists. Local browser paths and setup diagnostics remain visible.",
+                );
+        });
+        ui.add_space(8.0);
         let browser_notice = self.browser_notice.clone();
         let detected_browsers = browser_setup::detected_setup_browsers();
         let port_check_in_flight = self.browser_port_check_in_flight;

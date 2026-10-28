@@ -204,21 +204,10 @@ impl eframe::App for Dashboard {
             .show(context, |ui| {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("TS")
-                            .strong()
-                            .size(18.0)
-                            .color(egui::Color32::from_rgb(145, 70, 255)),
-                    );
-                    ui.add_space(4.0);
                     ui.vertical(|ui| {
                         ui.heading("Twitch Streak Saver");
-                    ui.label(egui::RichText::new(active_tab.subtitle()).small().weak());
+                        ui.label(egui::RichText::new(active_tab.subtitle()).small().weak());
                     });
-                    ui.checkbox(&mut self.hide_sensitive_info, "Screenshot privacy")
-                        .on_hover_text(
-                            "Hides your Twitch login, streamer names, browser profile names, activity dates and details, searches, channel-selection totals, and variable channel/queue lists. Local browser paths and setup diagnostics remain visible.",
-                        );
                     let status = match &self.connection_status {
                         TwitchConnectionStatus::Disconnected => "NOT CONNECTED".to_owned(),
                         TwitchConnectionStatus::Connecting => "CONNECTING TO TWITCH…".to_owned(),
@@ -234,15 +223,13 @@ impl eframe::App for Dashboard {
                         TwitchConnectionStatus::Connected(_)
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(status).strong().color(if connected {
-                                egui::Color32::from_rgb(80, 210, 140)
-                            } else if connecting {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::from_rgb(255, 120, 120)
-                            }),
-                        );
+                        ui.label(egui::RichText::new(status).strong().color(if connected {
+                            egui::Color32::from_rgb(80, 210, 140)
+                        } else if connecting {
+                            egui::Color32::YELLOW
+                        } else {
+                            egui::Color32::from_rgb(255, 120, 120)
+                        }));
                         if self.twitch_network_unavailable {
                             ui.colored_label(egui::Color32::YELLOW, "NETWORK RECOVERING");
                         }

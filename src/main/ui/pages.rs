@@ -35,6 +35,27 @@ impl Dashboard {
     ) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
         ui.add_space(8.0);
         let queue_rect = self.show_queue_visibility_card(ui);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                if self.browser_connected && self.external_inventory_received {
+                    "Browser connected"
+                } else if self.browser_connected {
+                    "Scanning Twitch tabs"
+                } else {
+                    "Browser not connected"
+                },
+            );
+            ui.label(if self.pubsub_connected {
+                "Points & Streak events connected"
+            } else if matches!(
+                &self.connection_status,
+                TwitchConnectionStatus::Connected(_)
+            ) {
+                "Points & Streak events reconnecting"
+            } else {
+                "Points & Streak events disconnected"
+            });
+        });
         ui.add_space(8.0);
         let automation_rect = self.automation_quick_controls(ui);
         ui.add_space(8.0);

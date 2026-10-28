@@ -32,7 +32,6 @@ impl Dashboard {
         let has_no_channels = self.channels.is_empty();
         let filtered_indices =
             followed_channel_search_indices(&self.channels, &self.followed_search);
-        let pubsub_connected = self.pubsub_connected;
         let pubsub_error = self.pubsub_error.clone();
         let twitch_baseline_confirmed_at = self.twitch_baseline_confirmed_at;
         let pubsub_state_confirmed_at = self.pubsub_state_confirmed_at;
@@ -84,20 +83,6 @@ impl Dashboard {
                                 .fill(egui::Color32::from_rgb(145, 70, 255)),
                         )
                         .clicked();
-                    ui.label(if browser_connected && external_inventory_received {
-                        "Browser connected"
-                    } else if browser_connected {
-                        "Scanning Twitch tabs"
-                    } else {
-                        "Browser not connected"
-                    });
-                    ui.label(if pubsub_connected {
-                        "Points & Streak events connected"
-                    } else if connected {
-                        "Points & Streak events reconnecting"
-                    } else {
-                        "Points & Streak events disconnected"
-                    });
                 });
                 ui.horizontal_wrapped(|ui| {
                     if hide_sensitive_info {
