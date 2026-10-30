@@ -13,7 +13,7 @@ use twitch_streak_saver::browser_protocol::{
     BrowserTabCloseReason, ChatState, KnownBrowserMessage, PlayerState,
 };
 use twitch_streak_saver::model::{
-    AppPreferences, BrowserKind, BrowserLaunchTarget, FollowedChannel, PreferredQuality,
+    AppPreferences, AppTheme, BrowserKind, BrowserLaunchTarget, FollowedChannel, PreferredQuality,
 };
 use twitch_streak_saver::scheduler::{
     QueueCandidate, QueuePlanner, QueueStage, StreamRotation, StreamSession, TurnEligibility,
@@ -407,6 +407,7 @@ struct Dashboard {
     close_on_raid_redirect: bool,
     adopt_existing_twitch_tabs: bool,
     hide_sensitive_info: bool,
+    theme: AppTheme,
     preferred_quality: PreferredQuality,
     automation_enabled: bool,
     automation_delays: automation::AutomationDelays,
@@ -535,6 +536,7 @@ impl Dashboard {
             close_on_raid_redirect: preferences.close_on_raid_redirect,
             adopt_existing_twitch_tabs: preferences.adopt_existing_twitch_tabs,
             hide_sensitive_info: preferences.hide_sensitive_info,
+            theme: preferences.theme,
             preferred_quality: preferences.preferred_quality,
             automation_enabled: preferences.auto_start_on_launch,
             automation_delays: automation::AutomationDelays::default(),
@@ -611,6 +613,7 @@ impl Dashboard {
             close_on_raid_redirect: self.close_on_raid_redirect,
             adopt_existing_twitch_tabs: self.adopt_existing_twitch_tabs,
             hide_sensitive_info: self.hide_sensitive_info,
+            theme: self.theme,
             preferred_quality: self.preferred_quality,
             browser_launch_target: self.browser_launch_target.clone(),
             browser_profile_data_directories: self.browser_profile_data_directories.clone(),

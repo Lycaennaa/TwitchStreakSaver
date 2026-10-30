@@ -538,6 +538,17 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
     case "clear_raid_redirected_channels":
       await TwitchManagedTabs.clearRaidRedirectedChannelIds(message.channel_ids || []);
       break;
+    case "set_theme": {
+      const theme = ["system", "light", "dark", "amoled"].includes(message.theme)
+        ? message.theme
+        : "dark";
+      try {
+        await chrome.storage.local.set({ theme });
+      } catch (error) {
+        console.warn("Could not persist the app appearance.", error);
+      }
+      break;
+    }
     case "set_preferred_quality": {
       const preferredQuality = TwitchQuality.normalizeQuality(message.preferred_quality);
       try {

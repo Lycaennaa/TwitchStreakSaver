@@ -12,11 +12,30 @@ use privacy::{
     activity_log_display_values, browser_profile_display_name, channel_selection_counts,
     daily_activity_summary_contents,
 };
+
+#[derive(Clone, Copy)]
+enum StatusColor {
+    Success,
+    Warning,
+}
+
+fn status_color(dark_mode: bool, status: StatusColor) -> egui::Color32 {
+    match (dark_mode, status) {
+        (true, StatusColor::Success) => egui::Color32::from_rgb(80, 210, 140),
+        (false, StatusColor::Success) => egui::Color32::from_rgb(0, 110, 60),
+        (true, StatusColor::Warning) => egui::Color32::YELLOW,
+        (false, StatusColor::Warning) => egui::Color32::from_rgb(120, 80, 0),
+    }
+}
 pub(super) fn section_heading(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
             .strong()
-            .color(egui::Color32::from_rgb(185, 120, 255)),
+            .color(if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(185, 120, 255)
+            } else {
+                egui::Color32::from_rgb(107, 42, 150)
+            }),
     );
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,15 +95,15 @@ pub(super) fn sidebar_tab(
     tab: DashboardTab,
 ) -> egui::Response {
     let selected = tab == *active_tab;
-    let text_color = if selected {
-        egui::Color32::from_rgb(210, 180, 255)
-    } else {
-        egui::Color32::from_rgb(190, 190, 198)
+    let text_color = match (selected, ui.visuals().dark_mode) {
+        (true, true) => egui::Color32::from_rgb(210, 180, 255),
+        (false, true) => egui::Color32::from_rgb(190, 190, 198),
+        (true, false) => egui::Color32::from_rgb(100, 47, 153),
+        (false, false) => egui::Color32::from_rgb(75, 75, 85),
     };
     let response = ui.add_sized(
         egui::vec2(ui.available_width(), 44.0),
         egui::Button::new(egui::RichText::new(tab.label()).color(text_color).strong())
-            .fill(egui::Color32::BLACK)
             .stroke(egui::Stroke::NONE),
     );
     if response.clicked() {
@@ -93,6 +112,58 @@ pub(super) fn sidebar_tab(
     response
 }
 
+fn apply_theme_preference(context: &egui::Context, theme: twitch_streak_saver::model::AppTheme) {
+    context.options_mut(|options| {
+        options.theme_preference = match theme {
+            twitch_streak_saver::model::AppTheme::System => egui::ThemePreference::System,
+            twitch_streak_saver::model::AppTheme::Light => egui::ThemePreference::Light,
+            twitch_streak_saver::model::AppTheme::Dark
+            | twitch_streak_saver::model::AppTheme::Amoled => egui::ThemePreference::Dark,
+        };
+    });
+    let system_theme = context.input(|input| input.raw.system_theme);
+    let resolved_theme = match theme {
+        twitch_streak_saver::model::AppTheme::System => system_theme.unwrap_or(egui::Theme::Dark),
+        twitch_streak_saver::model::AppTheme::Light => egui::Theme::Light,
+        twitch_streak_saver::model::AppTheme::Dark
+        | twitch_streak_saver::model::AppTheme::Amoled => egui::Theme::Dark,
+    };
+    let mut visuals = resolved_theme.default_visuals();
+    if theme == twitch_streak_saver::model::AppTheme::Amoled {
+        let text = egui::Color32::from_rgb(235, 235, 235);
+        visuals.panel_fill = egui::Color32::BLACK;
+        visuals.window_fill = egui::Color32::BLACK;
+        visuals.faint_bg_color = egui::Color32::BLACK;
+        visuals.extreme_bg_color = egui::Color32::BLACK;
+        visuals.code_bg_color = egui::Color32::BLACK;
+        visuals.hyperlink_color = egui::Color32::from_rgb(192, 151, 255);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(82, 44, 128);
+        visuals.selection.stroke =
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(205, 173, 255));
+        visuals.window_stroke = egui::Stroke::NONE;
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.noninteractive.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.inactive.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.inactive.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.hovered.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.hovered.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.active.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.active.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+        visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.open.bg_fill = egui::Color32::BLACK;
+        visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
+        visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
+    }
+    context.set_visuals(visuals);
+}
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PREFERENCES_KEY, &self.preferences());
@@ -147,39 +218,7 @@ impl eframe::App for Dashboard {
         let poll_interval = Duration::from_secs(1);
         self.reconcile_automatic_tabs(now);
         context.request_repaint_after(poll_interval);
-        let mut visuals = egui::Visuals::dark();
-        let text = egui::Color32::from_rgb(235, 235, 235);
-        visuals.panel_fill = egui::Color32::BLACK;
-        visuals.window_fill = egui::Color32::BLACK;
-        visuals.faint_bg_color = egui::Color32::BLACK;
-        visuals.extreme_bg_color = egui::Color32::BLACK;
-        visuals.code_bg_color = egui::Color32::BLACK;
-        visuals.hyperlink_color = egui::Color32::from_rgb(192, 151, 255);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(82, 44, 128);
-        visuals.selection.stroke =
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(205, 173, 255));
-        visuals.window_stroke = egui::Stroke::NONE;
-        visuals.widgets.noninteractive.bg_fill = egui::Color32::BLACK;
-        visuals.widgets.noninteractive.weak_bg_fill = egui::Color32::BLACK;
-        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text);
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
-        visuals.widgets.inactive.bg_fill = egui::Color32::BLACK;
-        visuals.widgets.inactive.weak_bg_fill = egui::Color32::BLACK;
-        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text);
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        visuals.widgets.hovered.bg_fill = egui::Color32::BLACK;
-        visuals.widgets.hovered.weak_bg_fill = egui::Color32::BLACK;
-        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-        visuals.widgets.active.bg_fill = egui::Color32::BLACK;
-        visuals.widgets.active.weak_bg_fill = egui::Color32::BLACK;
-        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
-        visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
-        visuals.widgets.open.bg_fill = egui::Color32::BLACK;
-        visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
-        visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, text);
-        visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
-        context.set_visuals(visuals);
+        apply_theme_preference(context, self.theme);
         context.style_mut(|style| {
             style.spacing.item_spacing = egui::vec2(12.0, 10.0);
             style.spacing.button_padding = egui::vec2(12.0, 8.0);
@@ -224,14 +263,21 @@ impl eframe::App for Dashboard {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new(status).strong().color(if connected {
-                            egui::Color32::from_rgb(80, 210, 140)
+                            status_color(ui.visuals().dark_mode, StatusColor::Success)
                         } else if connecting {
-                            egui::Color32::YELLOW
+                            status_color(ui.visuals().dark_mode, StatusColor::Warning)
                         } else {
-                            egui::Color32::from_rgb(255, 120, 120)
+                            if ui.visuals().dark_mode {
+                                egui::Color32::from_rgb(255, 120, 120)
+                            } else {
+                                egui::Color32::from_rgb(153, 27, 27)
+                            }
                         }));
                         if self.twitch_network_unavailable {
-                            ui.colored_label(egui::Color32::YELLOW, "NETWORK RECOVERING");
+                            ui.colored_label(
+                                status_color(ui.visuals().dark_mode, StatusColor::Warning),
+                                "NETWORK RECOVERING",
+                            );
                         }
                         if connecting {
                             if ui.button("Cancel").clicked() {
@@ -260,7 +306,7 @@ impl eframe::App for Dashboard {
             .exact_width(220.0)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::BLACK)
+                    .fill(context.style().visuals.panel_fill)
                     .stroke(egui::Stroke::NONE)
                     .inner_margin(egui::Margin::same(14)),
             )
@@ -365,5 +411,74 @@ fn draw_automation_pause_controls(
     }
     if let Some(duration) = pause_for {
         automation_delays.pause_for(now, duration);
+    }
+}
+#[cfg(test)]
+mod theme_preference_tests {
+    use super::apply_theme_preference;
+    use eframe::egui::{self, Theme, ThemePreference};
+    use twitch_streak_saver::model::AppTheme;
+
+    fn render(context: &egui::Context, theme: AppTheme, system_theme: Theme) {
+        let input = egui::RawInput {
+            system_theme: Some(system_theme),
+            ..Default::default()
+        };
+        let _ = context.run(input, |context| apply_theme_preference(context, theme));
+    }
+
+    #[test]
+    fn system_theme_follows_os_changes() {
+        let context = egui::Context::default();
+
+        render(&context, AppTheme::System, Theme::Light);
+        render(&context, AppTheme::System, Theme::Light);
+        assert_eq!(
+            context.options(|options| options.theme_preference),
+            ThemePreference::System,
+        );
+        assert!(!context.style().visuals.dark_mode);
+
+        render(&context, AppTheme::System, Theme::Dark);
+        assert!(context.style().visuals.dark_mode);
+    }
+
+    #[test]
+    fn explicit_themes_override_os_and_amoled_uses_dark_preference() {
+        let context = egui::Context::default();
+
+        render(&context, AppTheme::Light, Theme::Dark);
+        render(&context, AppTheme::Light, Theme::Dark);
+        assert_eq!(
+            context.options(|options| options.theme_preference),
+            ThemePreference::Light,
+        );
+        assert!(!context.style().visuals.dark_mode);
+
+        render(&context, AppTheme::Dark, Theme::Light);
+        render(&context, AppTheme::Dark, Theme::Light);
+        assert_eq!(
+            context.options(|options| options.theme_preference),
+            ThemePreference::Dark,
+        );
+        assert!(context.style().visuals.dark_mode);
+
+        render(&context, AppTheme::Amoled, Theme::Light);
+        assert_eq!(
+            context.options(|options| options.theme_preference),
+            ThemePreference::Dark,
+        );
+        assert_eq!(context.style().visuals.panel_fill, egui::Color32::BLACK,);
+        assert_eq!(
+            context.style().visuals.widgets.inactive.bg_fill,
+            egui::Color32::BLACK,
+        );
+
+        render(&context, AppTheme::Dark, Theme::Dark);
+        assert_ne!(context.style().visuals.panel_fill, egui::Color32::BLACK);
+
+        render(&context, AppTheme::System, Theme::Light);
+        assert!(!context.style().visuals.dark_mode);
+        assert_ne!(context.style().visuals.panel_fill, egui::Color32::BLACK);
     }
 }

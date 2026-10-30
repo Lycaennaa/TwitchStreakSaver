@@ -2,6 +2,8 @@ use super::*;
 
 impl Dashboard {
     pub(super) fn watch_settings(&mut self, ui: &mut egui::Ui) {
+        self.theme_settings(ui);
+        ui.add_space(8.0);
         ui.group(|ui| {
             ui.set_min_width(ui.available_width());
             ui.strong("Privacy");
@@ -94,6 +96,29 @@ impl Dashboard {
         self.quality_settings(ui);
         ui.add_space(8.0);
         self.automation_settings(ui);
+    }
+    fn theme_settings(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("Appearance");
+            ui.horizontal(|ui| {
+                ui.label("Theme");
+                egui::ComboBox::from_id_salt("app_theme")
+                    .selected_text(self.theme.label())
+                    .show_ui(ui, |ui| {
+                        for theme in twitch_streak_saver::model::AppTheme::ALL {
+                            changed |= ui
+                                .selectable_value(&mut self.theme, theme, theme.label())
+                                .changed();
+                        }
+                    });
+            });
+            ui.label("Follow system matches your operating system appearance.");
+        });
+        if changed && self.browser_connected {
+            self.set_extension_theme();
+        }
     }
     fn quality_settings(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;

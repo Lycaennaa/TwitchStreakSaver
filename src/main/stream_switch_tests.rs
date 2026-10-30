@@ -13,6 +13,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
     let (browser_port_check_sender, browser_port_check_receiver) = std::sync::mpsc::channel();
     let mut dashboard = Dashboard {
         close_to_tray_on_close: false,
+        theme: twitch_streak_saver::model::AppTheme::default(),
         #[cfg(target_os = "macos")]
         start_at_macos_login: false,
         #[cfg(target_os = "macos")]

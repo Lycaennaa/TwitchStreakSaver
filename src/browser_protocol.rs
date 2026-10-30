@@ -1,4 +1,4 @@
-use crate::model::{FollowedChannel, PreferredQuality};
+use crate::model::{AppTheme, FollowedChannel, PreferredQuality};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,6 +7,9 @@ use std::collections::HashMap;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserCommand {
     BridgeReady,
+    SetTheme {
+        theme: AppTheme,
+    },
     SetPreferredQuality {
         preferred_quality: PreferredQuality,
     },
@@ -587,5 +590,19 @@ mod tests {
                 "message": "No selected channels are available to open.",
             }),
         );
+    }
+    #[test]
+    fn theme_command_matches_extension_wire_contract() {
+        for (theme, expected) in [
+            (super::AppTheme::System, "system"),
+            (super::AppTheme::Light, "light"),
+            (super::AppTheme::Dark, "dark"),
+            (super::AppTheme::Amoled, "amoled"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(super::BrowserCommand::SetTheme { theme }).unwrap(),
+                serde_json::json!({ "type": "set_theme", "theme": expected }),
+            );
+        }
     }
 }

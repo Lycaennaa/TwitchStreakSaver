@@ -66,6 +66,7 @@ async function createExtension({
   let storedCompletedCommandIds = JSON.parse(JSON.stringify(storedCompletedNativeCommandIds));
   let storedPreferredQuality;
   let managedTabSaveFailures = 0;
+  let storedTheme = "dark";
   let managedTabSavePause = null;
   let managedTabIdentityReadPause = null;
   let raidRedirectedSavePause = null;
@@ -143,6 +144,7 @@ async function createExtension({
             managedTabOwners: storedTabOwners,
             adoptExistingTwitchTabs: storedAdoptionEnabled,
             completedNativeCommandIds: storedCompletedCommandIds,
+            theme: storedTheme,
           };
           if (storedPreferredQuality !== undefined) {
             values.preferredQuality = storedPreferredQuality;
@@ -193,6 +195,9 @@ async function createExtension({
           }
           if (Object.hasOwn(value, "preferredQuality")) {
             storedPreferredQuality = value.preferredQuality;
+          }
+          if (Object.hasOwn(value, "theme")) {
+            storedTheme = value.theme;
           }
         },
       },
@@ -457,6 +462,9 @@ async function createExtension({
     preferredQuality() {
       return storedPreferredQuality;
     },
+    theme() {
+      return storedTheme;
+    },
     open(message) {
       return vm.runInContext(`handleNativeCommand(${JSON.stringify(message)})`, context);
     },
@@ -509,6 +517,7 @@ async function createExtension({
       const statusWaiters = [];
       const managedStreamWaiters = [];
       const actionStatusWaiters = [];
+      const themeWaiters = [];
       const actionStatus = {
         value: "",
         get textContent() {
@@ -554,7 +563,16 @@ async function createExtension({
       const wakeButton = makeButton();
       const pauseButton = makeButton();
       const openSelectedButton = makeButton();
+      const themeRoot = {
+        value: null,
+        setAttribute(name, value) {
+          if (name !== "data-theme") return;
+          this.value = value;
+          for (const resolve of themeWaiters.splice(0)) resolve(value);
+        },
+      };
       context.document = {
+        documentElement: themeRoot,
         querySelector(selector) {
           if (selector === "#status") return status;
           if (selector === "#wake") return wakeButton;
@@ -575,6 +593,14 @@ async function createExtension({
         pauseButton,
         openSelectedButton,
         wakeButton,
+        theme() {
+          return themeRoot.value;
+        },
+        themeApplied() {
+          return themeRoot.value === null
+            ? new Promise((resolve) => themeWaiters.push(resolve))
+            : Promise.resolve(themeRoot.value);
+        },
         firstStatus,
         nextStatus() {
           return new Promise((resolve) => statusWaiters.push(resolve));
@@ -1134,6 +1160,22 @@ test("native host quality settings reach Twitch content preferences", async () =
 
   await extension.open({ type: "set_preferred_quality", preferred_quality: "invalid" });
   assert.equal(extension.preferredQuality(), "160p");
+});
+test("app theme sync updates the extension popup and defaults to dark", async () => {
+  const freshExtension = await createExtension();
+  const freshPopup = freshExtension.openPopup();
+  assert.equal(await freshPopup.themeApplied(), "dark");
+
+  const extension = await createExtension();
+  for (const theme of ["system", "light", "dark", "amoled"]) {
+    await extension.open({ type: "set_theme", theme });
+    assert.equal(extension.theme(), theme);
+  }
+  const popup = extension.openPopup();
+  assert.equal(await popup.themeApplied(), "amoled");
+
+  await extension.open({ type: "set_theme", theme: "invalid" });
+  assert.equal(extension.theme(), "dark");
 });
 
 test("toolbar popup wakes, restarts a stalled host, and follows the app handshake", async () => {

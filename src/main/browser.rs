@@ -368,6 +368,7 @@ impl Dashboard {
                 if command_acknowledgments {
                     self.sync_extension_channels();
                     self.set_extension_preferred_quality();
+                    self.set_extension_theme();
                 }
             }
             KnownBrowserMessage::TabOpened {
@@ -924,6 +925,10 @@ impl Dashboard {
         self.send_bridge_command(BrowserCommand::SetPreferredQuality {
             preferred_quality: self.preferred_quality,
         });
+    }
+
+    pub(super) fn set_extension_theme(&mut self) {
+        self.send_bridge_command(BrowserCommand::SetTheme { theme: self.theme });
     }
 
     pub(super) fn clear_offline_raid_redirects(&mut self) {

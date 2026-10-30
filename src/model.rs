@@ -130,6 +130,29 @@ pub struct BrowserLaunchTarget {
     pub profile_directory: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppTheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+    Amoled,
+}
+
+impl AppTheme {
+    pub const ALL: [Self; 4] = [Self::System, Self::Light, Self::Dark, Self::Amoled];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "Follow system",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+            Self::Amoled => "AMOLED black",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppPreferences {
@@ -139,6 +162,7 @@ pub struct AppPreferences {
     pub close_on_raid_redirect: bool,
     pub adopt_existing_twitch_tabs: bool,
     pub hide_sensitive_info: bool,
+    pub theme: AppTheme,
     pub preferred_quality: PreferredQuality,
     pub browser_launch_target: Option<BrowserLaunchTarget>,
     pub browser_profile_data_directories: Vec<(BrowserKind, String)>,
@@ -154,8 +178,9 @@ impl Default for AppPreferences {
             close_on_raid_redirect: false,
             adopt_existing_twitch_tabs: false,
             hide_sensitive_info: false,
-            preferred_quality: PreferredQuality::default(),
+            theme: AppTheme::default(),
             browser_launch_target: None,
+            preferred_quality: PreferredQuality::default(),
             browser_profile_data_directories: Vec::new(),
             channels: vec![
                 FollowedChannel::new("sample-01", "Sample channel one"),
@@ -212,6 +237,7 @@ mod tests {
         preferences.close_on_raid_redirect = true;
         preferences.adopt_existing_twitch_tabs = true;
         preferences.preferred_quality = PreferredQuality::P720;
+        preferences.theme = super::AppTheme::Light;
 
         let encoded = ron::to_string(&preferences).unwrap();
         let decoded: AppPreferences = ron::from_str(&encoded).unwrap();
@@ -234,6 +260,7 @@ mod tests {
         assert!(!preferences.hide_sensitive_info);
         assert!(preferences.channels.is_empty());
         assert_eq!(preferences.preferred_quality, PreferredQuality::P160);
+        assert_eq!(preferences.theme, super::AppTheme::System);
     }
 
     #[test]

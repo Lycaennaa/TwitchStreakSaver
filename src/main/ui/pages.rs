@@ -2,10 +2,24 @@ use super::*;
 impl Dashboard {
     pub(crate) fn show_dashboard_content(&mut self, ui: &mut egui::Ui, active_tab: DashboardTab) {
         if let Some(error) = &self.connection_error {
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("Twitch: {error}"));
+            ui.colored_label(
+                if ui.visuals().dark_mode {
+                    egui::Color32::LIGHT_RED
+                } else {
+                    egui::Color32::from_rgb(153, 27, 27)
+                },
+                format!("Twitch: {error}"),
+            );
         }
         if let Some(error) = &self.browser_error {
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("Browser: {error}"));
+            ui.colored_label(
+                if ui.visuals().dark_mode {
+                    egui::Color32::LIGHT_RED
+                } else {
+                    egui::Color32::from_rgb(153, 27, 27)
+                },
+                format!("Browser: {error}"),
+            );
         }
 
         match active_tab {
@@ -87,9 +101,9 @@ impl Dashboard {
                     })
                     .strong()
                     .color(if automation_enabled {
-                        egui::Color32::from_rgb(80, 210, 140)
+                        super::status_color(ui.visuals().dark_mode, super::StatusColor::Success)
                     } else {
-                        egui::Color32::YELLOW
+                        super::status_color(ui.visuals().dark_mode, super::StatusColor::Warning)
                     }),
                 );
                 draw_automation_pause_controls(
@@ -102,7 +116,12 @@ impl Dashboard {
                     stop = ui.button("Stop All").clicked();
                 } else {
                     start = ui
-                        .add(egui::Button::new("Start").fill(egui::Color32::from_rgb(145, 70, 255)))
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Start").color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(145, 70, 255)),
+                        )
                         .clicked();
                 }
             });
@@ -138,7 +157,10 @@ impl Dashboard {
                             egui::RichText::new(format!("{selected_streaks}"))
                                 .size(22.0)
                                 .strong()
-                                .color(egui::Color32::from_rgb(80, 210, 140)),
+                                .color(super::status_color(
+                                    ui.visuals().dark_mode,
+                                    super::StatusColor::Success,
+                                )),
                         );
                         ui.label(egui::RichText::new("Streak channels").small().weak());
                     });
@@ -148,7 +170,11 @@ impl Dashboard {
                             egui::RichText::new(format!("{selected_points}"))
                                 .size(22.0)
                                 .strong()
-                                .color(egui::Color32::from_rgb(192, 151, 255)),
+                                .color(if ui.visuals().dark_mode {
+                                    egui::Color32::from_rgb(192, 151, 255)
+                                } else {
+                                    egui::Color32::from_rgb(110, 52, 165)
+                                }),
                         );
                         ui.label(egui::RichText::new("Points channels").small().weak());
                     });

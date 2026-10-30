@@ -1,3 +1,29 @@
+const THEME_KEY = "theme";
+const DEFAULT_THEME = "dark";
+const VALID_THEMES = new Set(["system", "light", "dark", "amoled"]);
+
+function applyTheme(theme) {
+  document.documentElement?.setAttribute(
+    "data-theme",
+    VALID_THEMES.has(theme) ? theme : DEFAULT_THEME,
+  );
+}
+
+async function loadTheme() {
+  try {
+    const stored = await chrome.storage?.local?.get({ [THEME_KEY]: DEFAULT_THEME });
+    applyTheme(stored?.[THEME_KEY] ?? DEFAULT_THEME);
+  } catch {
+    applyTheme(DEFAULT_THEME);
+  }
+}
+
+void loadTheme();
+chrome.storage?.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes[THEME_KEY]) return;
+  applyTheme(changes[THEME_KEY].newValue);
+});
+
 const status = document.querySelector("#status");
 const managedStreams = document.querySelector("#managed-streams");
 const actionStatus = document.querySelector("#action-status");
