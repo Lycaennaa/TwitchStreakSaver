@@ -1,0 +1,16 @@
+# Setup
+
+## Browser extension setup
+
+1. For an x86-64 GNU Windows bundle, run `just package-windows-x86_64` and extract the resulting ZIP while keeping `twitch-streak-saver.exe`, `twitch_streak_saver_host.exe`, and `chrome-extension/` together. The ZIP is written to `dist/twitch-streak-saver-windows-x86_64-gnu.zip`. For other builds, run `cargo build --bins`; place `chrome-extension/` beside the desktop executable on Windows/portable installs or in `Contents/Resources/` for a macOS app. Keep the native-host sidecar beside the executable (`Contents/MacOS/` in a macOS app bundle).
+2. Start the desktop app and click **Set up browser extension**. Choose a detected Chrome, Brave, Edge, or Helium browser from the list; the app opens its extensions page and reveals the shipped folder.
+3. In the selected browser, enable Developer mode, choose **Load unpacked**, and select the revealed folder. If upgrading from an earlier build, remove the old unpacked extension first; native-host pairing is automatic.
+4. Click the extension toolbar icon: its popup wakes the service worker, pairs directly through Chrome native messaging, and updates through the app handshake. The extension no longer depends on a separate localhost HTTP registration request. Use **Wake / reconnect** to restart a pending native-host connection. Chrome can suspend idle Manifest V3 workers; an open native-messaging port keeps it alive, while the 30-second alarm retries after disconnects or stalled handshakes. The desktop app's **Check app bridge** button checks/restarts only the app side. The app reports connected only after the native-messaging handshake succeeds. Then use **Open selected channels** to load the selected streams.
+5. With Twitch and the browser bridge connected, selected live Streak channels open first, followed by eligible Points channels. Each channel opens as one combined Twitch page in its own window; the tab is selected without focusing the window, and the extension asks the browser not to automatically discard it. **Restore and focus browser when opening** restores and focuses each stream window and waits for the page to load; enabling it may interrupt other work. Background tabs can still be frozen or throttled, and playback/autoplay remain browser-controlled. Manually opened tabs occupy capacity and remain under user control. The app schedules up to two streams and reserves capacity for already-open external and app-managed tabs; it leaves existing tabs open. **Start**/**Stop All** control scheduling; **Auto-start on app launch** is enabled by default. Twitch and browser connections are still required.
+
+## macOS app bundle
+
+On Apple Silicon, run `just package-macos` to build `dist/macos/Twitch Streak Saver.app` and install/overwrite `/Applications/Twitch Streak Saver.app`. It stages the replacement before removing the existing app. The bundle includes the Chromium extension in `Contents/Resources/chrome-extension` and the native-host sidecar in `Contents/MacOS`. In Chromium, use Developer mode and **Load unpacked** on the extension folder. The bundle is unsigned; direct distribution requires Developer ID signing and notarization.
+
+Chrome loads the worker's `importScripts` dependencies from `Contents/Resources/chrome-extension`; rebuild and reinstall the app after updating the extension so every imported script is present.
+
