@@ -14,5 +14,6 @@ Run the desktop app and choose **Set up browser extension**. For platform-specif
 - [Development](DEVELOPMENT.md)
 - [Privacy](PRIVACY.md)
 - [Documentation index](DOCUMENTATION.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 AI assistance was used to prepare and maintain this documentation.

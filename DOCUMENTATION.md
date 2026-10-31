@@ -8,5 +8,6 @@
 - [Architecture](ARCHITECTURE.md) — code components and runtime data flow.
 - [Privacy](PRIVACY.md) — data stored locally and services the app connects to.
 - [Security](SECURITY.md) — safe-use guidance for the desktop app and browser extension.
+- [Third-party notices](THIRD_PARTY_NOTICES.md) — direct Rust dependencies and upstream license texts
 - [Contributing](CONTRIBUTING.md) — local checks and pull-request expectations.
 - [Agent guidance](AGENTS.md) — repository-specific instructions for coding agents.
