@@ -301,6 +301,7 @@ jobs:
           done
 
       - name: Publish release
+        id: release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
           tag_name: ${{ needs.validate-and-tag.outputs.tag }}
@@ -318,10 +319,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate-and-tag.outputs.tag }}
           RELEASE_VERSION: ${{ needs.validate-and-tag.outputs.version }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
         shell: bash
         run: |
           set -euo pipefail
-          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")"
           if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ]]; then
             printf 'Release %s is not a draft; refusing to publish.\n' "$RELEASE_TAG" >&2
             exit 1
@@ -338,6 +340,5 @@ jobs:
             exit 1
           fi
 
-          release_id="$(jq -r '.id' <<<"$release_json")"
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
             -F draft=false >/dev/null
