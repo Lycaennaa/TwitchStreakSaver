@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+  extension:
+    name: Browser extension
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check extension JavaScript
+        run: |
+          taskpolicy -b node --check chrome-extension/background.js
+          taskpolicy -b node --check chrome-extension/content.js
+          taskpolicy -b node --check chrome-extension/managed_tabs.js
+          taskpolicy -b node --check chrome-extension/quality.js
+          taskpolicy -b node --check chrome-extension/popup.js
+          taskpolicy -b node --check chrome-extension/twitch_tabs.js
+          taskpolicy -b node --check chrome-extension/background.test.js
+
+      - name: Run extension tests
+        run: taskpolicy -b node --test chrome-extension/content.test.js chrome-extension/quality.test.js chrome-extension/twitch_tabs.test.js chrome-extension/background.test.js
+
+      - name: Validate extension manifest and package resources
+        run: |
+          python3 -m json.tool chrome-extension/manifest.json >/dev/null
+          python3 scripts/package_chrome_extension.py
+  windows-msvc:
+    name: Windows MSVC
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+
+      - name: Package Windows with native MSVC and static CRT
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+        run: py -3 scripts/package_windows.py
