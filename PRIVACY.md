@@ -15,14 +15,14 @@ This guide describes the desktop app and browser extension as implemented in thi
 
 - The desktop app persists preferences and its activity log through eframe storage. Preferences include followed channels, stream settings, browser launch choices, and configured browser profile paths.
 - The activity log keeps up to 500 recent entries, including event type, time, streamer, and stream activity details.
-- The browser extension uses `chrome.storage.local` for managed-tab state and settings, including stream quality, raid-redirect behavior, and adoption preferences. It also stores up to 128 completed recoverable browser-command IDs to suppress duplicates after a service-worker restart.
+- Browser-profile-local `storage.local` holds managed-tab and raid-redirect state, preferences, and up to 128 completed browser-command IDs. It is separate from app preferences and the activity log.
 - The Twitch access token is stored separately in the operating system credential service, not in the app preferences or activity log.
 
 ## Browser integration
 
 The extension's manifest grants access to Twitch player and channel pages. Its content script reads player and chat state from those pages. Chat text is inspected locally to identify messages from the connected viewer; the app bridge receives status and, when applicable, the matching author login—not the message text.
 
-The extension connects to the native host through Chrome native messaging; the host connects to the app's loopback TCP bridge at `127.0.0.1:43127`. The app also listens on `127.0.0.1:43128` for its separate registration/diagnostic endpoint; the extension pairs over native messaging and does not connect directly to that port.
+The extension connects to its browser-specific native-messaging host, which connects to the app's loopback TCP bridge at `127.0.0.1:43127`. The app also listens on `127.0.0.1:43128` for a separate registration/diagnostic endpoint; the extension does not connect directly to that port.
 
 ## Screenshot privacy
 

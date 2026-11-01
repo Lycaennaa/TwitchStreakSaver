@@ -1,9 +1,12 @@
+var browserApi = globalThis.browser ?? globalThis.chrome;
 const NATIVE_HOST = "com.twitchstreaksaver.bridge";
 const NATIVE_HOST_SYNC_ALARM = "twitch-streak-saver-native-host-sync";
 // MV3 alarms wake suspended workers; active workers retry failed native connections after 5 seconds.
 const NATIVE_HOST_SYNC_INTERVAL_MINUTES = 0.5;
 const NATIVE_HOST_RETRY_DELAY_MS = 5000;
-importScripts("twitch_tabs.js", "quality.js", "managed_tabs.js");
+if (typeof importScripts === "function") {
+  importScripts("twitch_tabs.js", "quality.js", "managed_tabs.js");
+}
 
 let nativePort = null;
 let syncedNativePort = null;
@@ -25,7 +28,7 @@ const completedNativeCommandIds = new Set();
 let completedNativeCommandIdOrder = [];
 const COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY = "completedNativeCommandIds";
 let completedNativeCommandIdSaveQueue = Promise.resolve();
-const completedNativeCommandIdsReady = chrome.storage.local
+const completedNativeCommandIdsReady = browserApi.storage.local
   .get(COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY)
   .then((stored) => {
     const storedIds = stored?.[COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY];
@@ -44,7 +47,7 @@ const completedNativeCommandIdsReady = chrome.storage.local
 let nativeSyncPromise = null;
 const BROWSER_STARTUP_EVENT_GRACE_PERIOD_MS = 100;
 let browserStartupOwnershipReset = Promise.resolve();
-chrome.runtime.onStartup.addListener(() => {
+browserApi.runtime.onStartup.addListener(() => {
   browserStartupOwnershipReset = TwitchManagedTabs.invalidateManagedTabOwners();
 });
 const restorePromise = new Promise((resolve) =>
@@ -67,7 +70,7 @@ async function synchronizeNativeHostOnce() {
 }
 
 function initializeNativeHostSync() {
-  chrome.alarms.create(NATIVE_HOST_SYNC_ALARM, {
+  browserApi.alarms.create(NATIVE_HOST_SYNC_ALARM, {
     periodInMinutes: NATIVE_HOST_SYNC_INTERVAL_MINUTES,
   });
   return synchronizeNativeHost();
@@ -166,7 +169,7 @@ async function reportExternalStreams() {
   if (!nativePort || channelSyncInProgress) return;
   const generation = ++externalScanGeneration;
   await restorePromise;
-  const tabs = await chrome.tabs.query({});
+  const tabs = await browserApi.tabs.query({});
   if (generation !== externalScanGeneration || !nativePort) return;
   if (
     nativePort
@@ -247,7 +250,7 @@ async function reportExternalStreams() {
 }
 
 function notifyPopupStatusChanged() {
-  void chrome.runtime.sendMessage({ type: "popup_status_changed" }).catch(() => {});
+  void browserApi.runtime.sendMessage({ type: "popup_status_changed" }).catch(() => {});
 }
 
 function scheduleExternalStreamReport() {
@@ -263,7 +266,7 @@ function connectNativeHost() {
   if (nativePort) return;
   let port = null;
   try {
-    port = chrome.runtime.connectNative(NATIVE_HOST);
+    port = browserApi.runtime.connectNative(NATIVE_HOST);
     nativePort = port;
     syncedNativePort = null;
     nativeBridgeReadyPort = null;
@@ -285,7 +288,7 @@ function connectNativeHost() {
         });
     });
     port.onDisconnect.addListener(() => {
-      handleNativePortDisconnect(port, chrome.runtime.lastError);
+      handleNativePortDisconnect(port, browserApi.runtime.lastError);
     });
     port.postMessage({ type: "ready", command_acknowledgments: true });
     notifyPopupStatusChanged();
@@ -368,7 +371,7 @@ async function persistCompletedNativeCommand(commandId) {
     if (completedNativeCommandIds.has(commandId)) return;
     const nextOrder = [...completedNativeCommandIdOrder, commandId]
       .slice(-MAX_COMPLETED_NATIVE_COMMAND_IDS);
-    await chrome.storage.local.set({
+    await browserApi.storage.local.set({
       [COMPLETED_NATIVE_COMMAND_IDS_STORAGE_KEY]: nextOrder,
     });
     completedNativeCommandIdOrder = nextOrder;
@@ -382,7 +385,7 @@ async function persistCompletedNativeCommand(commandId) {
 }
 
 function setMonitoring(tabId, type) {
-  void chrome.tabs.sendMessage(tabId, {
+  void browserApi.tabs.sendMessage(tabId, {
     type,
     ...(type === "start_monitoring" ? { viewer_login: viewerLogin } : {}),
   }).catch(() => {});
@@ -506,7 +509,7 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
         for (const [surface, tabId] of TwitchManagedTabs.managedSurfaceTabs(record)) {
           if (surface !== "player") continue;
           try {
-            await chrome.tabs.reload(tabId);
+            await browserApi.tabs.reload(tabId);
           } catch (error) {
             console.warn("Could not reload an app-managed Twitch player after network recovery.", error);
           }
@@ -543,7 +546,7 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
         ? message.theme
         : "dark";
       try {
-        await chrome.storage.local.set({ theme });
+        await browserApi.storage.local.set({ theme });
       } catch (error) {
         console.warn("Could not persist the app appearance.", error);
       }
@@ -552,7 +555,7 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
     case "set_preferred_quality": {
       const preferredQuality = TwitchQuality.normalizeQuality(message.preferred_quality);
       try {
-        await chrome.storage.local.set({ preferredQuality });
+        await browserApi.storage.local.set({ preferredQuality });
       } catch (error) {
         console.warn("Could not persist the preferred Twitch quality.", error);
       }
@@ -717,11 +720,11 @@ async function closeChannels(channelIds, closeReason = null) {
       TwitchManagedTabs.markClosingTab(tabId);
       let removed = false;
       try {
-        await chrome.tabs.remove(tabId);
+        await browserApi.tabs.remove(tabId);
         removed = true;
       } catch (error) {
         try {
-          removed = !(await chrome.tabs.query({})).some((tab) => tab.id === tabId);
+          removed = !(await browserApi.tabs.query({})).some((tab) => tab.id === tabId);
         } catch {
           removed = false;
         }
@@ -810,7 +813,7 @@ async function forwardChannelState(message, sender) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "wake_native_host") {
     return handleNativeHostWakeRequest(message.forceReconnect === true, sendResponse);
   }
@@ -846,15 +849,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-chrome.tabs.onCreated.addListener(() => {
+browserApi.tabs.onCreated.addListener(() => {
   scheduleExternalStreamReport();
 });
 
-chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
+browserApi.tabs.onAttached.addListener(async (tabId, attachInfo) => {
   await restorePromise;
   let tab;
   try {
-    tab = await chrome.tabs.get(tabId);
+    tab = await browserApi.tabs.get(tabId);
   } catch {
     return;
   }
@@ -872,7 +875,7 @@ chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
+browserApi.tabs.onRemoved.addListener(async (tabId) => {
   TwitchManagedTabs.deletePendingIdentityCheck(tabId);
   if (TwitchManagedTabs.isClosingTab(tabId)) return;
   void TwitchManagedTabs.forgetManagedTabOwner(tabId);
@@ -892,7 +895,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+browserApi.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 
   await restorePromise;
   if (changeInfo.url) scheduleExternalStreamReport();
@@ -901,7 +904,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
     if (identity !== undefined) await TwitchManagedTabs.resolvePendingStartupIdentity(tabId, identity);
   }
   if (TwitchManagedTabs.hasPendingIdentityCheck(tabId)) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const tab = await browserApi.tabs.get(tabId).catch(() => null);
     const url = changeInfo.url || tab?.url || "";
     if (
       !tab
@@ -951,13 +954,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   }
 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+browserApi.alarms.onAlarm.addListener((alarm) => {
   void handleNativeHostSyncAlarm(alarm);
 });
-chrome.runtime.onStartup.addListener(() => {
+browserApi.runtime.onStartup.addListener(() => {
   void initializeNativeHostSync();
 });
-chrome.runtime.onInstalled.addListener(() => {
+browserApi.runtime.onInstalled.addListener(() => {
   void initializeNativeHostSync();
 });
 const initialNativeHostSync = initializeNativeHostSync();

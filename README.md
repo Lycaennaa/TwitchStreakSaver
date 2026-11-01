@@ -1,6 +1,6 @@
 # Twitch Streak Saver
 
-A cross-platform Rust desktop app and Chromium extension for managing Twitch stream queues and tracking Channel Point Streaks.
+A cross-platform Rust desktop app with Chromium and Firefox extensions for managing Twitch stream queues and tracking Channel Point Streaks.
 
 ## Quick start
 

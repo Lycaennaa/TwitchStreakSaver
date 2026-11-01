@@ -121,8 +121,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
         run: cargo build --locked --release --target aarch64-apple-darwin --bins
 
-      - name: Package Chrome extension
-        run: python3 scripts/package_chrome_extension.py
+      - name: Package browser extensions
+        run: python3 scripts/package_extensions.py
 
       - name: Assemble and verify macOS release assets
         env:
@@ -135,23 +135,27 @@ jobs:
           assets="$RUNNER_TEMP/release-assets"
           app="$dist/macos/Twitch Streak Saver.app"
           rm -rf "$app" "$assets"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/chrome-extension" "$assets"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/chrome-extension" "$app/Contents/Resources/firefox-extension"
 
           cp "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/twitch-streak-saver" "$app/Contents/MacOS/twitch-streak-saver"
           cp "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/twitch_streak_saver_host" "$app/Contents/MacOS/twitch_streak_saver_host"
           cp packaging/macos/Info.plist "$app/Contents/Info.plist"
           cp -R "$dist/chrome-extension/." "$app/Contents/Resources/chrome-extension/"
+          cp -R "$dist/firefox-extension/." "$app/Contents/Resources/firefox-extension/"
           plutil -lint "$app/Contents/Info.plist"
           codesign --force --deep --sign - --timestamp=none "$app"
           codesign --verify --deep --strict "$app"
           ditto -c -k --sequesterRsrc --keepParent "$app" "$assets/twitch-streak-saver-${RELEASE_VERSION}-macos-aarch64.zip"
           cp "$dist/twitch-streak-saver-chrome-extension.zip" "$assets/twitch-streak-saver-chrome-extension.zip"
+          cp "$dist/twitch-streak-saver-firefox-extension.xpi" "$assets/twitch-streak-saver-firefox-extension.xpi"
 
           test -x "$app/Contents/MacOS/twitch-streak-saver"
           test -x "$app/Contents/MacOS/twitch_streak_saver_host"
           test -f "$app/Contents/Resources/chrome-extension/managed_tabs.js"
+          test -f "$app/Contents/Resources/firefox-extension/manifest.json"
           unzip -tq "$assets/twitch-streak-saver-${RELEASE_VERSION}-macos-aarch64.zip"
           unzip -tq "$assets/twitch-streak-saver-chrome-extension.zip"
+          unzip -tq "$assets/twitch-streak-saver-firefox-extension.xpi"
 
       - name: Upload macOS release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -187,8 +191,8 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --locked --release --target x86_64-pc-windows-msvc --bins
 
-      - name: Package Chrome extension
-        run: python scripts/package_chrome_extension.py
+      - name: Package browser extensions
+        run: python scripts/package_extensions.py
 
       - name: Assemble and verify Windows release asset
         env:
@@ -203,13 +207,16 @@ jobs:
           $windows = Join-Path $dist $packageName
           $packageExtension = Join-Path $windows 'chrome-extension'
           $extension = Join-Path $dist 'chrome-extension'
+          $packageFirefoxExtension = Join-Path $windows 'firefox-extension'
+          $firefoxExtension = Join-Path $dist 'firefox-extension'
           $releaseBinaries = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
 
           Remove-Item -Recurse -Force $windows, $assets -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $packageExtension, $assets | Out-Null
+          New-Item -ItemType Directory -Force -Path $packageExtension, $packageFirefoxExtension, $assets | Out-Null
           Copy-Item -LiteralPath (Join-Path $releaseBinaries 'twitch-streak-saver.exe') -Destination $windows
           Copy-Item -LiteralPath (Join-Path $releaseBinaries 'twitch_streak_saver_host.exe') -Destination $windows
           Copy-Item -Path (Join-Path $extension '*') -Destination $packageExtension -Recurse -Force
+          Copy-Item -Path (Join-Path $firefoxExtension '*') -Destination $packageFirefoxExtension -Recurse -Force
 
           $archiveName = "twitch-streak-saver-$env:RELEASE_VERSION-windows-x86_64-msvc.zip"
           $archive = Join-Path $assets $archiveName
@@ -223,7 +230,9 @@ jobs:
             'twitch-streak-saver.exe',
             'twitch_streak_saver_host.exe',
             'chrome-extension\manifest.json',
-            'chrome-extension\managed_tabs.js'
+            'chrome-extension\managed_tabs.js',
+            'firefox-extension\manifest.json',
+            'firefox-extension\managed_tabs.js'
           )) {
             if (-not (Test-Path (Join-Path $verifiedPackage $relative))) {
               throw "Missing packaged Windows release file: $relative"
@@ -289,6 +298,7 @@ jobs:
             "twitch-streak-saver-${RELEASE_VERSION}-macos-aarch64.zip"
             "twitch-streak-saver-${RELEASE_VERSION}-windows-x86_64-msvc.zip"
             "twitch-streak-saver-chrome-extension.zip"
+            "twitch-streak-saver-firefox-extension.xpi"
           )
           file_count="$(find "$assets" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
           if [[ "$file_count" != "${#expected[@]}" ]]; then
@@ -313,6 +323,7 @@ jobs:
             ${{ runner.temp }}/release-assets/twitch-streak-saver-${{ needs.validate-and-tag.outputs.version }}-macos-aarch64.zip
             ${{ runner.temp }}/release-assets/twitch-streak-saver-${{ needs.validate-and-tag.outputs.version }}-windows-x86_64-msvc.zip
             ${{ runner.temp }}/release-assets/twitch-streak-saver-chrome-extension.zip
+            ${{ runner.temp }}/release-assets/twitch-streak-saver-firefox-extension.xpi
 
       - name: Publish draft release
         env:
@@ -332,7 +343,8 @@ jobs:
           expected_assets="$(printf '%s\n' \
             "twitch-streak-saver-${RELEASE_VERSION}-macos-aarch64.zip" \
             "twitch-streak-saver-${RELEASE_VERSION}-windows-x86_64-msvc.zip" \
-            "twitch-streak-saver-chrome-extension.zip" | sort)"
+            "twitch-streak-saver-chrome-extension.zip" \
+            "twitch-streak-saver-firefox-extension.xpi" | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"$release_json" | sort)"
           if [[ "$actual_assets" != "$expected_assets" ]]; then
             printf 'Release %s has an unexpected asset set.\nExpected:\n%s\nActual:\n%s\n' \

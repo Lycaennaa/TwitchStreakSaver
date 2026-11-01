@@ -1,3 +1,4 @@
+var browserApi = globalThis.browser ?? globalThis.chrome;
 (() => {
   const MANAGED_TAB_IDENTITY_POLICY_VERSION = 1;
   let managedTabs = new Map();
@@ -57,7 +58,7 @@ function isCloseOnRaidRedirectEnabled() {
 
 async function setCloseOnRaidRedirect(enabled) {
   closeOnRaidRedirect = enabled === true;
-  return chrome.storage.local.set({ closeOnRaidRedirect });
+  return browserApi.storage.local.set({ closeOnRaidRedirect });
 }
 
 function getRaidRedirectedChannelIds() {
@@ -66,7 +67,7 @@ function getRaidRedirectedChannelIds() {
 
 function saveRaidRedirectedChannelIds() {
   const saving = raidRedirectedChannelIdsSaveQueue.then(() =>
-    chrome.storage.local.set({
+    browserApi.storage.local.set({
       raidRedirectedChannelIds: getRaidRedirectedChannelIds(),
     }),
   );
@@ -104,7 +105,7 @@ function matchesPendingRoute(record, value, surface) {
 }
 
 async function restoreManagedTabs() {
-  const stored = await chrome.storage.local.get([
+  const stored = await browserApi.storage.local.get([
     "managedTabs",
     "closeOnRaidRedirect",
     "raidRedirectedChannelIds",
@@ -125,7 +126,7 @@ async function restoreManagedTabs() {
   if (browserStartupOwnershipInvalidated) {
     for (const record of managedTabs.values()) delete record.playerWindowId;
   }
-  const tabs = await chrome.tabs.query({});
+  const tabs = await browserApi.tabs.query({});
   const tabsById = new Map(tabs.map((tab) => [tab.id, tab]));
   const raidRedirectedChannels = new Set();
   const claimedTabIds = new Set();
@@ -269,7 +270,7 @@ async function restoreManagedTabs() {
 }
 async function readManagedTabIdentity(tabId) {
   try {
-    const result = await chrome.tabs.sendMessage(tabId, {
+    const result = await browserApi.tabs.sendMessage(tabId, {
       type: "get_managed_tab_identity",
     });
     return typeof result?.identity === "string" ? result.identity : null;
@@ -286,7 +287,7 @@ async function resolvePendingStartupIdentity(tabId, identity) {
   if (!record || record.playerTabId !== tabId) return false;
   let tab;
   try {
-    tab = await chrome.tabs.get(tabId);
+    tab = await browserApi.tabs.get(tabId);
   } catch {
     record.playerTabId = null;
     if (record.chatTabId === tabId) record.chatTabId = null;
@@ -350,10 +351,10 @@ async function invalidateManagedTabOwners() {
   browserStartupOwnershipInvalidated = true;
   managedTabOwners = new Map();
   try {
-    const stored = await chrome.storage.local.get("managedTabs");
+    const stored = await browserApi.storage.local.get("managedTabs");
     const records = new Map(stored.managedTabs || []);
     for (const record of records.values()) delete record.playerWindowId;
-    await chrome.storage.local.set({
+    await browserApi.storage.local.set({
       managedTabs: Array.from(records.entries()),
       managedTabOwners: [],
     });
@@ -365,7 +366,7 @@ async function invalidateManagedTabOwners() {
 function saveManagedTabs() {
   const snapshot = Array.from(managedTabs.entries());
   const saving = managedTabsSaveQueue.then(() =>
-    chrome.storage.local.set({ managedTabs: snapshot }),
+    browserApi.storage.local.set({ managedTabs: snapshot }),
   );
   managedTabsSaveQueue = saving.catch(() => {});
   return saving;
@@ -373,7 +374,7 @@ function saveManagedTabs() {
 
 function saveManagedTabOwners() {
   const saving = managedTabOwnersSaveQueue.then(() =>
-    chrome.storage.local.set({
+    browserApi.storage.local.set({
       managedTabOwners: Array.from(managedTabOwners.entries()),
     }),
   );
@@ -382,7 +383,7 @@ function saveManagedTabOwners() {
 }
 function saveManagedTabState() {
   const saving = Promise.all([managedTabsSaveQueue, managedTabOwnersSaveQueue]).then(() =>
-    chrome.storage.local.set({
+    browserApi.storage.local.set({
       managedTabs: Array.from(managedTabs.entries()),
       managedTabOwners: Array.from(managedTabOwners.entries()),
       adoptExistingTwitchTabs,
@@ -413,7 +414,7 @@ async function forgetManagedTabOwner(tabId) {
 }
 async function setPlayerAudioPreference(tabId, unmuted, login) {
   try {
-    await chrome.tabs.sendMessage(tabId, {
+    await browserApi.tabs.sendMessage(tabId, {
       type: "set_player_audio_preference",
       login,
       unmuted,
@@ -422,7 +423,7 @@ async function setPlayerAudioPreference(tabId, unmuted, login) {
 }
 
 async function applyManagedPlayerAudioPreference(tabId, reportedIdentity) {
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const tab = await browserApi.tabs.get(tabId).catch(() => null);
   if (!tab || Number.isInteger(tab.openerTabId)) return false;
   const route = TwitchTabUtils.channelRoute(tab.url || "");
   if (route.surface !== "player" || !route.login) return false;
@@ -446,9 +447,9 @@ async function applyManagedPlayerAudioPreference(tabId, reportedIdentity) {
 }
 async function setManagedTabIdentity(tabId, identity) {
   try {
-    const tab = await chrome.tabs.get(tabId);
+    const tab = await browserApi.tabs.get(tabId);
     if (Number.isInteger(tab.openerTabId)) return false;
-    const result = await chrome.tabs.sendMessage(tabId, {
+    const result = await browserApi.tabs.sendMessage(tabId, {
       type: "set_managed_tab_identity",
       identity,
     });
@@ -549,7 +550,7 @@ async function adoptExistingPlayerTab(channel, candidate, isStillEligible) {
   pendingAdoptions.add(channelId);
   try {
     if (!adoptExistingTwitchTabs || managedTabs.has(channelId) || !isStillEligible()) return false;
-    const current = await chrome.tabs.get(candidate.id).catch(() => null);
+    const current = await browserApi.tabs.get(candidate.id).catch(() => null);
     if (!isStillEligible()) return false;
     if (
       !current
@@ -561,7 +562,7 @@ async function adoptExistingPlayerTab(channel, candidate, isStillEligible) {
     const identityToken = crypto.randomUUID();
     const identityWasSet = await setManagedTabIdentity(candidate.id, identityToken);
     if (!isStillEligible() || !identityWasSet) return false;
-    const verifiedTab = await chrome.tabs.get(candidate.id).catch(() => null);
+    const verifiedTab = await browserApi.tabs.get(candidate.id).catch(() => null);
     if (!isStillEligible()) return false;
     if (
       !adoptExistingTwitchTabs
@@ -633,7 +634,7 @@ async function verifyAdoptedTabOwnership(channelId, tabId, allowRaidRedirect = f
     || record.identityPersisted !== true
     || typeof record.identityToken !== "string"
   ) return false;
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const tab = await browserApi.tabs.get(tabId).catch(() => null);
   if (!tab || Number.isInteger(tab.openerTabId)) return false;
   const identity = await readManagedTabIdentity(tabId);
   if (
@@ -641,7 +642,7 @@ async function verifyAdoptedTabOwnership(channelId, tabId, allowRaidRedirect = f
     || managedTabs.get(channelId) !== record
     || managedTabOwners.get(tabId) !== channelId
   ) return false;
-  const latestTab = await chrome.tabs.get(tabId).catch(() => null);
+  const latestTab = await browserApi.tabs.get(tabId).catch(() => null);
   if (
     !latestTab
     || Number.isInteger(latestTab.openerTabId)
@@ -711,16 +712,16 @@ async function detachManagedTab(channelId, tabId) {
   return detachedSurfaces;
 }
 async function ensureDedicatedTabWindow(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  const window = await chrome.windows.get(tab.windowId, { populate: true });
-  const windowTabs = window.tabs || await chrome.tabs.query({ windowId: tab.windowId });
+  const tab = await browserApi.tabs.get(tabId);
+  const window = await browserApi.windows.get(tab.windowId, { populate: true });
+  const windowTabs = window.tabs || await browserApi.tabs.query({ windowId: tab.windowId });
   if (windowTabs.length > 1) {
-    await chrome.windows.create({ tabId, focused: false, type: "normal" });
+    await browserApi.windows.create({ tabId, focused: false, type: "normal" });
   }
 }
 
 async function createManagedTab() {
-  const window = await chrome.windows.create({
+  const window = await browserApi.windows.create({
     url: "about:blank",
     focused: false,
     type: "normal",
@@ -728,7 +729,7 @@ async function createManagedTab() {
   if (!Number.isInteger(window?.id)) {
     throw new Error("Could not create a dedicated Twitch window.");
   }
-  const [tab] = await chrome.tabs.query({ windowId: window.id });
+  const [tab] = await browserApi.tabs.query({ windowId: window.id });
   if (!Number.isInteger(tab?.id)) {
     throw new Error("Could not create a Twitch tab in its window.");
   }
@@ -736,11 +737,11 @@ async function createManagedTab() {
 }
 
 async function activateManagedTab(tabId, wakeBrowser, changes = {}) {
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await browserApi.tabs.get(tabId);
   if (wakeBrowser) {
-    await chrome.windows.update(tab.windowId, { state: "normal", focused: true });
+    await browserApi.windows.update(tab.windowId, { state: "normal", focused: true });
   }
-  await chrome.tabs.update(tabId, { ...changes, active: true });
+  await browserApi.tabs.update(tabId, { ...changes, active: true });
 }
 
 function waitForTabLoad(tabId) {
@@ -748,7 +749,7 @@ function waitForTabLoad(tabId) {
   const promise = new Promise((resolve) => {
     let timeout;
     const settle = (loaded) => {
-      chrome.tabs.onUpdated.removeListener(onUpdated);
+      browserApi.tabs.onUpdated.removeListener(onUpdated);
       clearTimeout(timeout);
       resolve(loaded);
     };
@@ -756,14 +757,14 @@ function waitForTabLoad(tabId) {
       if (updatedTabId === tabId && changeInfo.status === "complete") settle(true);
     };
     finish = settle;
-    chrome.tabs.onUpdated.addListener(onUpdated);
+    browserApi.tabs.onUpdated.addListener(onUpdated);
     timeout = setTimeout(() => settle(false), 30000);
   });
   return { promise, cancel: (loaded) => finish(loaded) };
 }
 
 async function loadManagedTab(tabId, url, wakeBrowser, forceReload) {
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await browserApi.tabs.get(tabId);
   if (!forceReload && !tab.discarded && tab.url === url && tab.status === "complete") {
     await activateManagedTab(tabId, wakeBrowser);
     return;
@@ -775,7 +776,7 @@ async function loadManagedTab(tabId, url, wakeBrowser, forceReload) {
       changes.url = url;
     }
     await activateManagedTab(tabId, wakeBrowser, changes);
-    const latest = await chrome.tabs.get(tabId);
+    const latest = await browserApi.tabs.get(tabId);
     if (latest.url === url && latest.status === "complete" && !latest.discarded) {
       loading.cancel(true);
     }
@@ -850,7 +851,7 @@ async function openManagedTab(channelId, url, wakeBrowser, unmuted) {
   record.identityToken = record.identityToken || crypto.randomUUID();
   if (tabId !== null && tabId !== undefined) {
     try {
-      await chrome.tabs.get(tabId);
+      await browserApi.tabs.get(tabId);
     } catch {
       record.playerTabId = null;
       record.chatTabId = null;
@@ -870,14 +871,14 @@ async function openManagedTab(channelId, url, wakeBrowser, unmuted) {
   }
   const tabChanges = { autoDiscardable: false };
   if (isNewTab || audioPreferenceChanged) tabChanges.muted = !unmuted;
-  await chrome.tabs.update(tabId, tabChanges);
+  await browserApi.tabs.update(tabId, tabChanges);
   if (isNewTab) await saveManagedTabs();
   await rememberManagedTabOwner(tabId, channelId);
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await browserApi.tabs.get(tabId);
   record.playerWindowId = tab.windowId;
   managedTabs.set(channelId, record);
   await saveManagedTabs();
-  const contentVersion = chrome.runtime.getManifest().version;
+  const contentVersion = browserApi.runtime.getManifest().version;
   const forceReload = record.contentVersion !== contentVersion;
   if (tab.url !== url || tab.discarded || tab.status !== "complete" || forceReload) {
     record.pendingUrl = url;

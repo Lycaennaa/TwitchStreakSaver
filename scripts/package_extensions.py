@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "chrome-extension"
+SOURCE = ROOT / "web-extension"
 DIST = ROOT / "dist"
 STAGING = DIST / "chrome-extension"
 ARCHIVE = DIST / "twitch-streak-saver-chrome-extension.zip"
@@ -129,10 +129,26 @@ def validate_resource_closure(manifest: dict[str, object], files: set[Path]) -> 
 
 
 def main() -> None:
-    manifest = json.loads((SOURCE / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("manifest_version") != 3:
-        raise ValueError("expected a Manifest V3 Chrome extension")
-
+    chrome_manifest = json.loads((SOURCE / "manifest.json").read_text(encoding="utf-8"))
+    firefox_manifest = json.loads(json.dumps(chrome_manifest))
+    firefox_manifest.pop("key", None)
+    firefox_manifest["background"] = {
+        "scripts": ["twitch_tabs.js", "quality.js", "managed_tabs.js", "background.js"],
+    }
+    firefox_manifest["browser_specific_settings"] = {
+        "gecko": {
+            "id": (SOURCE / "firefox-extension-id").read_text(encoding="utf-8").strip(),
+        },
+    }
+    packages = (
+        ("chrome", chrome_manifest, STAGING, ARCHIVE),
+        (
+            "firefox",
+            firefox_manifest,
+            DIST / "firefox-extension",
+            DIST / "twitch-streak-saver-firefox-extension.xpi",
+        ),
+    )
     files = {
         path.relative_to(SOURCE)
         for path in SOURCE.rglob("*")
@@ -141,23 +157,31 @@ def main() -> None:
         and path.name != ".DS_Store"
         and not path.name.endswith(TEST_SUFFIX)
     }
-    validate_resource_closure(manifest, files)
 
-    DIST.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(STAGING, ignore_errors=True)
-    ARCHIVE.unlink(missing_ok=True)
-    for relative in sorted(files):
-        destination = STAGING / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(SOURCE / relative, destination)
-
-    with zipfile.ZipFile(ARCHIVE, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as package:
+    for browser, manifest, staging, archive in packages:
+        if manifest.get("manifest_version") != 3:
+            raise ValueError(f"expected a Manifest V3 {browser} extension")
+        validate_resource_closure(manifest, files)
+        DIST.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        archive.unlink(missing_ok=True)
+        staging.mkdir(parents=True)
         for relative in sorted(files):
-            package.write(STAGING / relative, arcname=relative.as_posix())
-        if package.testzip() is not None:
-            raise ValueError("Chrome extension archive failed its integrity check")
-
-    print(f"Packaged {len(files)} extension files: {ARCHIVE}")
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if relative == Path("manifest.json"):
+                destination.write_text(
+                    json.dumps(manifest, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                shutil.copy2(SOURCE / relative, destination)
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as package:
+            for relative in sorted(files):
+                package.write(staging / relative, arcname=relative.as_posix())
+            if package.testzip() is not None:
+                raise ValueError(f"{browser} extension archive failed its integrity check")
+        print(f"Packaged {browser} extension: {archive}")
 
 
 if __name__ == "__main__":

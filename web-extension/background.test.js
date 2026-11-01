@@ -33,6 +33,7 @@ async function createExtension({
   storedAdoptExistingTwitchTabs = false,
   storedCompletedNativeCommandIds = [],
   browserStartup = false,
+  firefoxBackground = false,
   initialTabs = [],
   extensionVersion = "1.0.0",
   runtimeId = trustedExtensionId,
@@ -407,7 +408,7 @@ async function createExtension({
   };
   let startupGraceTimerUsed = false;
   const context = vm.createContext({
-    chrome,
+    ...(firefoxBackground ? { browser: chrome } : { chrome }),
     setTimeout: (callback, delay) => {
       if (
         !startupGraceTimerUsed
@@ -443,13 +444,20 @@ async function createExtension({
       },
     },
   });
-  vm.runInContext(qualitySource, context, { filename: "quality.js" });
-  context.importScripts = (...files) => {
-    for (const file of files) {
+  if (firefoxBackground) {
+    for (const file of ["twitch_tabs.js", "quality.js", "managed_tabs.js"]) {
       const source = fs.readFileSync(path.join(__dirname, file), "utf8");
       vm.runInContext(source, context, { filename: file });
     }
-  };
+  } else {
+    vm.runInContext(qualitySource, context, { filename: "quality.js" });
+    context.importScripts = (...files) => {
+      for (const file of files) {
+        const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+        vm.runInContext(source, context, { filename: file });
+      }
+    };
+  }
   const source = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
   vm.runInContext(source, context, { filename: "background.js" });
   if (browserStartup) chrome.runtime.onStartup.dispatch();
@@ -3331,5 +3339,14 @@ test("unmanaged Twitch player navigation refreshes open streamer inventory", asy
   assert.deepEqual(
     JSON.parse(JSON.stringify(inventories.at(-1).open_streamer_logins)),
     ["managed", "second"],
+  );
+});
+test("Firefox event-page background scripts connect and restore", async () => {
+  const extension = await createExtension({ firefoxBackground: true });
+  assert.equal(extension.calls.nativeConnections, 1);
+  assert.ok(
+    extension.calls.alarms.some(
+      (alarm) => alarm.name === "twitch-streak-saver-native-host-sync",
+    ),
   );
 });

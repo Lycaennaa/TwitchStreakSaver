@@ -26,6 +26,13 @@ mod activity_log;
 use activity_log::{
     record_activity, record_claim_available_once, ActivityLogEntry, ActivityLogKind,
 };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirefoxProfileLockState {
+    Running,
+    Unlocked,
+    #[cfg(any(target_os = "macos", test))]
+    Unknown,
+}
 #[path = "main/automation.rs"]
 mod automation;
 #[path = "main/browser.rs"]
@@ -38,6 +45,9 @@ mod browser_setup;
 mod channel_list;
 #[path = "main/channel_selection_controls.rs"]
 mod channel_selection_controls;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[path = "main/firefox_profile_lock.rs"]
+mod firefox_profile_lock;
 #[path = "main/queue_visibility.rs"]
 mod queue_visibility;
 #[path = "main/twitch.rs"]
@@ -343,7 +353,8 @@ fn selected_channel_indices(channels: &[FollowedChannel], limit: usize) -> Vec<u
 }
 const PREFERENCES_KEY: &str = "preferences";
 const ACTIVITY_LOG_KEY: &str = "activity_log";
-const BROWSER_EXTENSION_ID: &str = include_str!("../chrome-extension/trusted-extension-id");
+const BROWSER_EXTENSION_ID: &str = include_str!("../web-extension/trusted-extension-id");
+const FIREFOX_EXTENSION_ID: &str = include_str!("../web-extension/firefox-extension-id");
 const BROWSER_BRIDGE_RETRY_DELAY: Duration = Duration::from_secs(5);
 fn main() -> eframe::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -1,4 +1,9 @@
-use super::{BrowserKind, BrowserLaunchTarget, Dashboard, BROWSER_EXTENSION_ID};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use super::firefox_profile_lock::is_running as is_firefox_profile_running;
+use super::{
+    BrowserKind, BrowserLaunchTarget, Dashboard, FirefoxProfileLockState, BROWSER_EXTENSION_ID,
+    FIREFOX_EXTENSION_ID,
+};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +13,7 @@ fn browser_extensions_url(browser: BrowserKind) -> &'static str {
         BrowserKind::Brave => "brave://extensions/",
         BrowserKind::Edge => "edge://extensions/",
         BrowserKind::Helium => "helium://extensions/",
+        BrowserKind::Firefox => "about:debugging#/runtime/this-firefox",
     }
 }
 
@@ -17,6 +23,7 @@ pub(super) fn detected_setup_browsers() -> Vec<BrowserKind> {
         BrowserKind::Brave,
         BrowserKind::Edge,
         BrowserKind::Helium,
+        BrowserKind::Firefox,
     ]
     .into_iter()
     .filter(|browser| browser_application_path(*browser).is_some())
@@ -30,6 +37,7 @@ fn browser_application_path(browser: BrowserKind) -> Option<std::path::PathBuf> 
         BrowserKind::Brave => "Brave Browser.app",
         BrowserKind::Edge => "Microsoft Edge.app",
         BrowserKind::Helium => "Helium.app",
+        BrowserKind::Firefox => "Firefox.app",
     };
     let mut application_directories = vec![std::path::PathBuf::from("/Applications")];
     if let Some(base_dirs) = directories::BaseDirs::new() {
@@ -48,6 +56,7 @@ fn browser_application_path(browser: BrowserKind) -> Option<std::path::PathBuf> 
         BrowserKind::Brave => "BraveSoftware/Brave-Browser/Application/brave.exe",
         BrowserKind::Edge => "Microsoft/Edge/Application/msedge.exe",
         BrowserKind::Helium => "imput/Helium/Application/chrome.exe",
+        BrowserKind::Firefox => "Mozilla Firefox/firefox.exe",
     };
     [
         "LOCALAPPDATA",
@@ -137,6 +146,9 @@ pub(super) fn detected_browser_profiles_for_roots(
 }
 
 fn detected_browser_profiles_for(browser: BrowserKind, root: &Path) -> Vec<DetectedBrowserProfile> {
+    if browser == BrowserKind::Firefox {
+        return detected_firefox_profiles(root);
+    }
     let mut browser_profiles = Vec::new();
     let mut known_directories = HashSet::new();
 
@@ -183,6 +195,112 @@ fn detected_browser_profiles_for(browser: BrowserKind, root: &Path) -> Vec<Detec
 
     browser_profiles
 }
+fn detected_firefox_profiles(root: &Path) -> Vec<DetectedBrowserProfile> {
+    let Ok(profiles_ini) = fs::read_to_string(root.join("profiles.ini")) else {
+        return Vec::new();
+    };
+    let mut profiles = Vec::new();
+    let mut is_profile_section = false;
+    let mut name = None;
+    let mut path = None;
+    let mut is_relative = true;
+
+    for line in profiles_ini.lines().chain(std::iter::once("[End]")) {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            if is_profile_section {
+                append_firefox_profile(&mut profiles, root, name.take(), path.take(), is_relative);
+            }
+            is_profile_section = line[1..line.len() - 1].starts_with("Profile");
+            name = None;
+            path = None;
+            is_relative = true;
+            continue;
+        }
+        if !is_profile_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "Name" => name = Some(value.trim().to_owned()),
+            "Path" => path = Some(value.trim().to_owned()),
+            "IsRelative" => is_relative = value.trim() != "0",
+            _ => {}
+        }
+    }
+
+    profiles
+}
+
+fn append_firefox_profile(
+    profiles: &mut Vec<DetectedBrowserProfile>,
+    root: &Path,
+    name: Option<String>,
+    path: Option<String>,
+    is_relative: bool,
+) {
+    let Some(path) = path else {
+        return;
+    };
+    let Some(profile_directory) = normalize_firefox_profile_directory(&path, is_relative) else {
+        return;
+    };
+    let profile_path = if Path::new(&profile_directory).is_absolute() {
+        PathBuf::from(&profile_directory)
+    } else {
+        root.join(&profile_directory)
+    };
+    if !profile_path.is_dir() {
+        return;
+    }
+    let profile_name = name
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            Path::new(&profile_directory)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "Firefox profile".to_owned());
+    profiles.push(detected_profile(
+        BrowserKind::Firefox,
+        root,
+        &profile_directory,
+        &profile_name,
+    ));
+}
+
+fn normalize_firefox_profile_directory(path: &str, is_relative: bool) -> Option<String> {
+    let path = Path::new(path.trim());
+    if path.as_os_str().is_empty()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return None;
+    }
+    if is_relative {
+        if path.is_absolute() {
+            return None;
+        }
+        let mut components = Vec::new();
+        for component in path.components() {
+            let std::path::Component::Normal(component) = component else {
+                return None;
+            };
+            components.push(component.to_string_lossy().into_owned());
+        }
+        (!components.is_empty()).then(|| components.join("/"))
+    } else if path.is_absolute() {
+        Some(path.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
 
 fn detected_profile(
     browser: BrowserKind,
@@ -191,40 +309,74 @@ fn detected_profile(
     profile_name: &str,
 ) -> DetectedBrowserProfile {
     let (extension_enabled, extension_scan_error) =
-        match browser_extension_state(&root.join(profile_directory)) {
-            Ok(state) => (state == Some(true), None),
+        match browser_extension_state(browser, &root.join(profile_directory)) {
+            Ok(Some(enabled)) => (enabled, None),
+            Ok(None) => (false, None),
             Err(error) => (false, Some(error)),
         };
-    let extension_status = if extension_enabled {
-        " — extension enabled"
+    let label = if extension_enabled {
+        format!(
+            "{} — {} ({}) — extension enabled",
+            browser.name(),
+            profile_name,
+            profile_directory
+        )
     } else {
-        ""
+        format!(
+            "{} — {} ({})",
+            browser.name(),
+            profile_name,
+            profile_directory
+        )
     };
     DetectedBrowserProfile {
         target: BrowserLaunchTarget {
             browser,
             profile_directory: profile_directory.to_owned(),
         },
-        label: format!(
-            "{} — {} ({profile_directory}){extension_status}",
-            browser.name(),
-            profile_name
-        ),
+        label,
         extension_enabled,
         profile_root: root.to_path_buf(),
         extension_scan_error,
     }
 }
 
-fn browser_extension_state(profile_directory: &Path) -> Result<Option<bool>, String> {
-    let preferences_path = profile_directory.join("Preferences");
-    let preferences = match fs::read_to_string(&preferences_path) {
-        Ok(preferences) => preferences,
+fn browser_extension_state(
+    browser: BrowserKind,
+    profile_directory: &Path,
+) -> Result<Option<bool>, String> {
+    let file_name = if browser == BrowserKind::Firefox {
+        "extensions.json"
+    } else {
+        "Preferences"
+    };
+    let path = profile_directory.join(file_name);
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    let preferences = serde_json::from_str::<serde_json::Value>(&preferences)
-        .map_err(|error| error.to_string())?;
+    let preferences =
+        serde_json::from_str::<serde_json::Value>(&contents).map_err(|error| error.to_string())?;
+    if browser == BrowserKind::Firefox {
+        let Some(addons) = preferences
+            .get("addons")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Ok(None);
+        };
+        let Some(addon) = addons.iter().find(|addon| {
+            addon.get("id").and_then(serde_json::Value::as_str) == Some(FIREFOX_EXTENSION_ID.trim())
+        }) else {
+            return Ok(None);
+        };
+        return Ok(Some(
+            addon
+                .get("active")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        ));
+    }
     let Some(extension) = preferences
         .get("extensions")
         .and_then(|extensions| extensions.get("settings"))
@@ -245,6 +397,15 @@ fn is_valid_profile_directory(directory: &str) -> bool {
         && directory != "Guest Profile"
         && directory != "System Profile"
 }
+fn is_valid_firefox_profile_directory(directory: &str) -> bool {
+    !directory.is_empty()
+        && !Path::new(directory).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+}
 
 #[cfg(target_os = "macos")]
 fn browser_profile_root(browser: BrowserKind) -> Option<PathBuf> {
@@ -253,6 +414,7 @@ fn browser_profile_root(browser: BrowserKind) -> Option<PathBuf> {
         BrowserKind::Brave => "BraveSoftware/Brave-Browser",
         BrowserKind::Edge => "Microsoft Edge",
         BrowserKind::Helium => "net.imput.helium",
+        BrowserKind::Firefox => "Mozilla/Firefox",
     };
     Some(
         directories::BaseDirs::new()?
@@ -268,6 +430,10 @@ fn browser_profile_root(browser: BrowserKind) -> Option<PathBuf> {
         BrowserKind::Brave => "BraveSoftware/Brave-Browser",
         BrowserKind::Edge => "Microsoft/Edge",
         BrowserKind::Helium => "imput/Helium",
+        BrowserKind::Firefox => {
+            return directories::BaseDirs::new()
+                .map(|base_dirs| base_dirs.config_dir().join("Mozilla/Firefox"));
+        }
     };
     let local_app_data = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -365,30 +531,49 @@ pub(super) fn launch_browser_profile(
             profile_root.display()
         ));
     }
-    if !is_valid_profile_directory(&target.profile_directory) {
+    let profile_directory_is_valid = if target.browser == BrowserKind::Firefox {
+        is_valid_firefox_profile_directory(&target.profile_directory)
+    } else {
+        is_valid_profile_directory(&target.profile_directory)
+    };
+    if !profile_directory_is_valid {
         return Err("The selected browser profile is invalid.".to_owned());
     }
-    if target.profile_directory != "Default"
-        && !profile_root.join(&target.profile_directory).is_dir()
+    let profile_directory = Path::new(&target.profile_directory);
+    let profile_path = if target.browser == BrowserKind::Firefox && profile_directory.is_absolute()
+    {
+        profile_directory.to_path_buf()
+    } else {
+        profile_root.join(profile_directory)
+    };
+    if (target.browser == BrowserKind::Firefox || target.profile_directory != "Default")
+        && !profile_path.is_dir()
     {
         return Err(format!(
-            "The {} profile {} could not be found under {}.",
+            "The {} profile {} could not be found at {}.",
             target.browser.name(),
             target.profile_directory,
-            profile_root.display()
+            profile_path.display()
         ));
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let firefox_profile_lock_state = if target.browser == BrowserKind::Firefox {
+        is_firefox_profile_running(&profile_path)?
+    } else {
+        FirefoxProfileLockState::Unlocked
+    };
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("-n")
-            .arg("-a")
-            .arg(application)
-            .arg("--args")
-            .arg(format!("--user-data-dir={}", profile_root.display()))
-            .arg(format!("--profile-directory={}", target.profile_directory))
-            .arg("--new-window")
+        let mut command = macos_browser_command(&application, target.browser);
+        command.args(browser_profile_launch_arguments(
+            target.browser,
+            &profile_root,
+            &profile_path,
+            &target.profile_directory,
+            firefox_profile_lock_state,
+        )?);
+        command
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("Could not open {}: {error}", target.browser.name()))
@@ -396,9 +581,13 @@ pub(super) fn launch_browser_profile(
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new(application)
-            .arg(format!("--user-data-dir={}", profile_root.display()))
-            .arg(format!("--profile-directory={}", target.profile_directory))
-            .arg("--new-window")
+            .args(browser_profile_launch_arguments(
+                target.browser,
+                &profile_root,
+                &profile_path,
+                &target.profile_directory,
+                firefox_profile_lock_state,
+            )?)
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("Could not open {}: {error}", target.browser.name()))
@@ -406,6 +595,52 @@ pub(super) fn launch_browser_profile(
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Err("Automatic browser launch is supported only on macOS and Windows.".to_owned())
+    }
+}
+fn browser_profile_launch_arguments(
+    browser: BrowserKind,
+    profile_root: &Path,
+    profile_path: &Path,
+    profile_directory: &str,
+    firefox_profile_lock_state: FirefoxProfileLockState,
+) -> Result<Vec<std::ffi::OsString>, String> {
+    if browser == BrowserKind::Firefox {
+        #[cfg(any(target_os = "macos", test))]
+        if firefox_profile_lock_state == FirefoxProfileLockState::Unknown {
+            return Err(
+                "Could not safely launch Firefox because its profile lock owner is unknown."
+                    .to_owned(),
+            );
+        }
+        let mut arguments: Vec<std::ffi::OsString> = Vec::with_capacity(5);
+        if firefox_profile_lock_state == FirefoxProfileLockState::Unlocked {
+            arguments.push("-no-remote".into());
+        }
+        arguments.extend([
+            "-profile".into(),
+            profile_path.as_os_str().to_owned(),
+            "-new-window".into(),
+            browser_extensions_url(browser).into(),
+        ]);
+        Ok(arguments)
+    } else {
+        Ok(vec![
+            format!("--user-data-dir={}", profile_root.display()).into(),
+            format!("--profile-directory={profile_directory}").into(),
+            "--new-window".into(),
+            browser_extensions_url(browser).into(),
+        ])
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_browser_command(application: &Path, browser: BrowserKind) -> std::process::Command {
+    if browser == BrowserKind::Firefox {
+        std::process::Command::new(application.join("Contents/MacOS/firefox"))
+    } else {
+        let mut command = std::process::Command::new("open");
+        command.arg("-n").arg("-a").arg(application).arg("--args");
+        command
     }
 }
 
@@ -425,7 +660,7 @@ impl Dashboard {
 }
 
 fn open_browser_extension_setup(target: BrowserKind) -> Result<(), String> {
-    let extension_directory = browser_extension_directory()?;
+    let extension_directory = browser_extension_directory(target)?;
     reveal_extension_directory(&extension_directory)?;
     launch_browser_extensions(target).map_err(|error| {
         format!(
@@ -444,14 +679,19 @@ fn launch_browser_extensions(target: BrowserKind) -> Result<(), String> {
             .arg("-a")
             .arg(application)
             .arg(browser_extensions_url(target));
+    } else if target == BrowserKind::Firefox {
+        command
+            .arg("-a")
+            .arg(application)
+            .arg("--args")
+            .args(browser_extension_window_arguments(target));
     } else {
         command
             .arg("-n")
             .arg("-a")
             .arg(application)
             .arg("--args")
-            .arg("--new-window")
-            .arg(browser_extensions_url(target));
+            .args(browser_extension_window_arguments(target));
     }
     let status = command
         .status()
@@ -468,14 +708,30 @@ fn launch_browser_extensions(target: BrowserKind) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn launch_browser_extensions(target: BrowserKind) -> Result<(), String> {
-    let executable = browser_application_path(target)
+    let application = browser_application_path(target)
         .ok_or_else(|| format!("{} is no longer available.", target.name()))?;
-    std::process::Command::new(executable)
-        .arg("--new-window")
-        .arg(browser_extensions_url(target))
-        .spawn()
-        .map(|_| ())
+    std::process::Command::new(application)
+        .args(browser_extension_window_arguments(target))
+        .status()
         .map_err(|error| format!("Could not launch {}: {error}", target.name()))
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Could not launch {}. Check that it is installed.",
+                    target.name()
+                ))
+            }
+        })
+}
+fn browser_extension_window_arguments(browser: BrowserKind) -> [std::ffi::OsString; 2] {
+    let new_window = if browser == BrowserKind::Firefox {
+        "-new-window"
+    } else {
+        "--new-window"
+    };
+    [new_window.into(), browser_extensions_url(browser).into()]
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -483,37 +739,51 @@ fn launch_browser_extensions(_: BrowserKind) -> Result<(), String> {
     Err("Opening browser extension settings is supported on macOS and Windows.".to_owned())
 }
 
-fn browser_extension_directory() -> Result<std::path::PathBuf, String> {
+fn browser_extension_directory(browser: BrowserKind) -> Result<std::path::PathBuf, String> {
+    let directory_name = if browser == BrowserKind::Firefox {
+        "firefox-extension"
+    } else {
+        "chrome-extension"
+    };
     #[cfg(debug_assertions)]
     {
-        let source_directory =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chrome-extension");
+        let repository_directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let source_directory = if browser == BrowserKind::Firefox {
+            repository_directory.join("dist").join(directory_name)
+        } else {
+            repository_directory.join("web-extension")
+        };
         if source_directory.join("manifest.json").is_file() {
             return Ok(source_directory);
         }
-    }
-
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("Could not locate Twitch Streak Saver: {error}"))?;
-    let executable_directory = executable
-        .parent()
-        .ok_or_else(|| "Could not locate the desktop app folder.".to_owned())?;
-
-    #[cfg(target_os = "macos")]
-    if let Some(contents_directory) = executable_directory.parent() {
-        let bundled_directory = contents_directory.join("Resources/chrome-extension");
-        if bundled_directory.join("manifest.json").is_file() {
-            return Ok(bundled_directory);
+        if browser == BrowserKind::Firefox {
+            return Err(
+                "The Firefox extension package is missing. Run `just package-extensions` first."
+                    .to_owned(),
+            );
         }
     }
-
-    let adjacent_directory = executable_directory.join("chrome-extension");
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Could not locate the app executable: {error}"))?;
+    let executable_directory = executable
+        .parent()
+        .ok_or_else(|| "The app executable has no parent directory.".to_owned())?;
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(contents_directory) = executable_directory.parent() {
+            let bundled_directory = contents_directory.join("Resources").join(directory_name);
+            if bundled_directory.join("manifest.json").is_file() {
+                return Ok(bundled_directory);
+            }
+        }
+    }
+    let adjacent_directory = executable_directory.join(directory_name);
     if adjacent_directory.join("manifest.json").is_file() {
         return Ok(adjacent_directory);
     }
-
     Err(format!(
-        "Could not find the shipped chrome-extension folder beside {}.",
+        "Could not find the {} extension folder next to {}.",
+        browser.name(),
         executable.display()
     ))
 }
@@ -543,14 +813,14 @@ fn reveal_extension_directory(_: &std::path::Path) -> Result<(), String> {
 
 #[cfg(all(test, debug_assertions))]
 mod extension_setup_tests {
-    use super::browser_extension_directory;
+    use super::{browser_extension_directory, BrowserKind};
 
     #[test]
     fn resolves_a_complete_extension_folder_for_development() {
-        let directory = browser_extension_directory().unwrap();
+        let directory = browser_extension_directory(BrowserKind::Chrome).unwrap();
         assert_eq!(
             directory,
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chrome-extension")
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web-extension")
         );
         assert!(directory.join("manifest.json").is_file());
         assert!(directory.join("background.js").is_file());
@@ -560,10 +830,14 @@ mod extension_setup_tests {
 
 #[cfg(test)]
 mod browser_profile_tests {
+    #[cfg(target_os = "macos")]
+    use super::macos_browser_command;
     use super::{
+        browser_extension_window_arguments, browser_profile_launch_arguments,
         detected_browser_profiles_for, detected_browser_profiles_for_roots,
         replace_browser_profile_data_directory, selected_browser_profile_data_directory,
-        BrowserKind, DetectedBrowserProfileRoot, BROWSER_EXTENSION_ID,
+        BrowserKind, DetectedBrowserProfileRoot, FirefoxProfileLockState, BROWSER_EXTENSION_ID,
+        FIREFOX_EXTENSION_ID,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -744,5 +1018,182 @@ mod browser_profile_tests {
         let profiles = detected_browser_profiles_for(BrowserKind::Chrome, &root);
 
         assert!(profiles.is_empty());
+    }
+    #[test]
+    fn firefox_profiles_load_extension_state_and_reject_traversal() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("firefox-profile-test-{}", std::process::id()));
+        let _directory = ProfileTestDirectory(root.clone());
+        let default_profile = root.join("Profiles/default-release");
+        let work_profile = root.join("Profiles/work");
+        let absolute_profile = root.join("external-profile");
+        fs::create_dir_all(&default_profile).unwrap();
+        fs::create_dir_all(&work_profile).unwrap();
+        fs::create_dir_all(&absolute_profile).unwrap();
+        fs::write(
+            default_profile.join("extensions.json"),
+            serde_json::json!({
+                "addons": [{
+                    "id": FIREFOX_EXTENSION_ID.trim(),
+                    "active": true
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            work_profile.join("extensions.json"),
+            serde_json::json!({
+                "addons": [{
+                    "id": FIREFOX_EXTENSION_ID.trim(),
+                    "active": false
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let profiles_ini = format!(
+            "[Profile0]\nName=default-release\nIsRelative=1\nPath=Profiles/default-release\n\
+             \n[Profile1]\nName=Work\nIsRelative=1\nPath=Profiles/work\n\
+             \n[Profile2]\nName=External\nIsRelative=0\nPath={}\n\
+             \n[Profile3]\nName=Escaping\nIsRelative=1\nPath=../outside\n",
+            absolute_profile.display()
+        );
+        fs::write(root.join("profiles.ini"), profiles_ini).unwrap();
+
+        let profiles = detected_browser_profiles_for(BrowserKind::Firefox, &root);
+        assert_eq!(profiles.len(), 3);
+        let default = profiles
+            .iter()
+            .find(|profile| profile.target.profile_directory == "Profiles/default-release")
+            .unwrap();
+        assert!(default.extension_enabled);
+        let work = profiles
+            .iter()
+            .find(|profile| profile.target.profile_directory == "Profiles/work")
+            .unwrap();
+        assert!(!work.extension_enabled);
+        let absolute = profiles
+            .iter()
+            .find(|profile| Path::new(&profile.target.profile_directory).is_absolute())
+            .unwrap();
+        assert_eq!(
+            PathBuf::from(&absolute.target.profile_directory),
+            absolute_profile
+        );
+        assert!(profiles.iter().all(|profile| profile.label != "Escaping"));
+    }
+
+    #[test]
+    fn firefox_profile_launch_rejects_unknown_lock_owner() {
+        let error = browser_profile_launch_arguments(
+            BrowserKind::Firefox,
+            Path::new("/firefox"),
+            Path::new("/firefox/Profiles/Work Profile"),
+            "Profiles/Work Profile",
+            FirefoxProfileLockState::Unknown,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Could not safely launch Firefox because its profile lock owner is unknown."
+        );
+    }
+    #[test]
+    fn firefox_profile_launch_uses_gecko_arguments() {
+        let profile_root = Path::new("/firefox");
+        let profile_path = Path::new("/firefox/Profiles/Work Profile");
+        let arguments = browser_profile_launch_arguments(
+            BrowserKind::Firefox,
+            profile_root,
+            profile_path,
+            "Profiles/Work Profile",
+            FirefoxProfileLockState::Unlocked,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            vec![
+                "-no-remote",
+                "-profile",
+                "/firefox/Profiles/Work Profile",
+                "-new-window",
+                "about:debugging#/runtime/this-firefox",
+            ]
+        );
+    }
+    #[test]
+    fn firefox_profile_launch_reuses_running_selected_profile() {
+        let profile_root = Path::new("/firefox");
+        let profile_path = Path::new("/firefox/Profiles/Work Profile");
+        let arguments = browser_profile_launch_arguments(
+            BrowserKind::Firefox,
+            profile_root,
+            profile_path,
+            "Profiles/Work Profile",
+            FirefoxProfileLockState::Running,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            vec![
+                "-profile",
+                "/firefox/Profiles/Work Profile",
+                "-new-window",
+                "about:debugging#/runtime/this-firefox",
+            ]
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_firefox_launch_uses_bundled_binary_and_preserves_chromium_open() {
+        let firefox =
+            macos_browser_command(Path::new("/Applications/Firefox.app"), BrowserKind::Firefox);
+        assert_eq!(
+            firefox.get_program().to_string_lossy(),
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
+        );
+        assert_eq!(firefox.get_args().count(), 0);
+
+        let chrome_path = Path::new("/Applications/Google Chrome.app");
+        let chrome = macos_browser_command(chrome_path, BrowserKind::Chrome);
+        assert_eq!(chrome.get_program().to_string_lossy(), "open");
+        assert_eq!(
+            chrome
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "-n".to_owned(),
+                "-a".to_owned(),
+                "/Applications/Google Chrome.app".to_owned(),
+                "--args".to_owned(),
+            ]
+        );
+    }
+    #[test]
+    fn extension_setup_uses_browser_specific_window_flags() {
+        let firefox = browser_extension_window_arguments(BrowserKind::Firefox)
+            .map(|argument| argument.to_string_lossy().into_owned());
+        assert_eq!(
+            firefox,
+            [
+                "-new-window".to_owned(),
+                "about:debugging#/runtime/this-firefox".to_owned(),
+            ]
+        );
+        let chrome = browser_extension_window_arguments(BrowserKind::Chrome)
+            .map(|argument| argument.to_string_lossy().into_owned());
+        assert_eq!(
+            chrome,
+            ["--new-window".to_owned(), "chrome://extensions/".to_owned(),]
+        );
     }
 }

@@ -19,7 +19,8 @@ pub const NATIVE_HOST_NAME: &str = "com.twitchstreaksaver.bridge";
 pub const BRIDGE_ADDRESS: &str = "127.0.0.1:43127";
 const MAX_MESSAGE_SIZE: usize = 1_048_576;
 pub const EXTENSION_REGISTRATION_ADDRESS: &str = "127.0.0.1:43128";
-const TRUSTED_EXTENSION_ID: &str = include_str!("../chrome-extension/trusted-extension-id");
+const TRUSTED_EXTENSION_ID: &str = include_str!("../web-extension/trusted-extension-id");
+const FIREFOX_EXTENSION_ID: &str = include_str!("../web-extension/firefox-extension-id");
 
 pub enum BridgeEvent {
     Connected,
@@ -417,9 +418,32 @@ fn install_native_host() -> Result<(), String> {
             .map_err(|error| format!("Could not install native host manifest: {error}"))?;
     }
 
+    let firefox_manifest_path = firefox_native_manifest_path(&base_dirs)?;
+    let firefox_manifest = firefox_native_host_manifest(&host_path);
+    let firefox_encoded = serde_json::to_vec_pretty(&firefox_manifest)
+        .map_err(|error| format!("Could not encode Firefox native host manifest: {error}"))?;
+    let firefox_manifest_dir = firefox_manifest_path
+        .parent()
+        .ok_or_else(|| "Firefox native host manifest path is invalid.".to_owned())?;
+    fs::create_dir_all(firefox_manifest_dir)
+        .map_err(|error| format!("Could not create Firefox native host directory: {error}"))?;
+    fs::write(&firefox_manifest_path, &firefox_encoded)
+        .map_err(|error| format!("Could not install Firefox native host manifest: {error}"))?;
+
     #[cfg(target_os = "windows")]
     if let Some(manifest_path) = manifest_paths.first() {
         register_windows_hosts(manifest_path)?;
+        let firefox_registry_path = windows_firefox_native_host_registry_path();
+        register_windows_host(
+            &firefox_manifest_path,
+            &firefox_registry_path,
+            winreg::enums::KEY_WOW64_32KEY,
+        )?;
+        register_windows_host(
+            &firefox_manifest_path,
+            &firefox_registry_path,
+            winreg::enums::KEY_WOW64_64KEY,
+        )?;
     }
 
     Ok(())
@@ -434,6 +458,15 @@ fn native_host_manifest(host_path: &Path) -> NativeHostManifest {
         allowed_origins: vec![format!("chrome-extension://{TRUSTED_EXTENSION_ID}/")],
     }
 }
+fn firefox_native_host_manifest(host_path: &Path) -> FirefoxNativeHostManifest {
+    FirefoxNativeHostManifest {
+        name: NATIVE_HOST_NAME,
+        description: "Twitch Streak Saver browser bridge",
+        path: host_path.to_string_lossy().into_owned(),
+        host_type: "stdio",
+        allowed_extensions: vec![FIREFOX_EXTENSION_ID.trim().to_owned()],
+    }
+}
 
 #[derive(Serialize)]
 struct NativeHostManifest {
@@ -443,6 +476,15 @@ struct NativeHostManifest {
     #[serde(rename = "type")]
     host_type: &'static str,
     allowed_origins: Vec<String>,
+}
+#[derive(Serialize)]
+struct FirefoxNativeHostManifest {
+    name: &'static str,
+    description: &'static str,
+    path: String,
+    #[serde(rename = "type")]
+    host_type: &'static str,
+    allowed_extensions: Vec<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -516,6 +558,26 @@ fn native_manifest_paths(base_dirs: &BaseDirs) -> Result<Vec<std::path::PathBuf>
 fn native_manifest_paths(_: &BaseDirs) -> Result<Vec<std::path::PathBuf>, String> {
     Err("Browser native host installation supports macOS and Windows.".to_owned())
 }
+#[cfg(target_os = "macos")]
+fn firefox_native_manifest_path(base_dirs: &BaseDirs) -> Result<std::path::PathBuf, String> {
+    Ok(base_dirs
+        .config_dir()
+        .join("Mozilla/NativeMessagingHosts")
+        .join(format!("{NATIVE_HOST_NAME}.json")))
+}
+
+#[cfg(target_os = "windows")]
+fn firefox_native_manifest_path(base_dirs: &BaseDirs) -> Result<std::path::PathBuf, String> {
+    Ok(base_dirs
+        .data_local_dir()
+        .join("TwitchStreakSaver/firefox")
+        .join(format!("{NATIVE_HOST_NAME}.json")))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn firefox_native_manifest_path(_: &BaseDirs) -> Result<std::path::PathBuf, String> {
+    Err("Browser native host installation supports macOS and Windows.".to_owned())
+}
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_native_host_registry_paths() -> [String; 3] {
@@ -525,22 +587,38 @@ fn windows_native_host_registry_paths() -> [String; 3] {
         format!("Software\\Microsoft\\Edge\\NativeMessagingHosts\\{NATIVE_HOST_NAME}"),
     ]
 }
-
+#[cfg(any(target_os = "windows", test))]
+fn windows_firefox_native_host_registry_path() -> String {
+    format!("Software\\Mozilla\\NativeMessagingHosts\\{NATIVE_HOST_NAME}")
+}
 #[cfg(target_os = "windows")]
-fn register_windows_hosts(manifest_path: &std::path::Path) -> Result<(), String> {
-    use winreg::enums::HKEY_CURRENT_USER;
+fn register_windows_host(
+    manifest_path: &std::path::Path,
+    registry_path: &str,
+    registry_view: u32,
+) -> Result<(), String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::RegKey;
 
     let user_key = RegKey::predef(HKEY_CURRENT_USER);
-    let registry_paths = windows_native_host_registry_paths();
     let manifest_value = manifest_path.to_string_lossy().into_owned();
-    for registry_path in registry_paths {
-        let (host_key, _) = user_key
-            .create_subkey(registry_path)
-            .map_err(|error| format!("Could not register browser native host: {error}"))?;
-        host_key
-            .set_value("", &manifest_value)
-            .map_err(|error| format!("Could not register browser native host: {error}"))?;
+    let (host_key, _) = user_key
+        .create_subkey_with_flags(registry_path, KEY_READ | KEY_WRITE | registry_view)
+        .map_err(|error| format!("Could not register browser native host: {error}"))?;
+    host_key
+        .set_value("", &manifest_value)
+        .map_err(|error| format!("Could not register browser native host: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn register_windows_hosts(manifest_path: &std::path::Path) -> Result<(), String> {
+    for registry_path in windows_native_host_registry_paths() {
+        register_windows_host(
+            manifest_path,
+            &registry_path,
+            winreg::enums::KEY_WOW64_64KEY,
+        )?;
     }
     Ok(())
 }
@@ -548,9 +626,11 @@ fn register_windows_hosts(manifest_path: &std::path::Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::{
-        native_host_manifest, native_manifest_paths, read_message, send_command,
-        update_recovery_generation, windows_native_host_registry_paths, write_message, BridgeEvent,
-        BrowserCommand, QueuedBrowserCommand, NATIVE_HOST_NAME, TRUSTED_EXTENSION_ID,
+        firefox_native_host_manifest, firefox_native_manifest_path, native_host_manifest,
+        native_manifest_paths, read_message, send_command, update_recovery_generation,
+        windows_firefox_native_host_registry_path, windows_native_host_registry_paths,
+        write_message, BridgeEvent, BrowserCommand, QueuedBrowserCommand, NATIVE_HOST_NAME,
+        TRUSTED_EXTENSION_ID,
     };
     use serde_json::{json, Value};
     use std::io::Cursor;
@@ -664,6 +744,38 @@ mod tests {
             vec![format!("chrome-extension://{TRUSTED_EXTENSION_ID}/")]
         );
     }
+    #[test]
+    fn firefox_native_host_manifest_authorizes_only_its_gecko_id() {
+        let manifest = firefox_native_host_manifest(Path::new("native-host"));
+        assert_eq!(
+            manifest.allowed_extensions,
+            vec![super::FIREFOX_EXTENSION_ID.trim().to_owned()]
+        );
+        let encoded = serde_json::to_value(manifest).unwrap();
+        assert!(encoded.get("allowed_origins").is_none());
+    }
+
+    #[test]
+    fn firefox_native_host_registry_path_uses_mozilla_registration() {
+        assert_eq!(
+            windows_firefox_native_host_registry_path(),
+            format!("Software\\Mozilla\\NativeMessagingHosts\\{NATIVE_HOST_NAME}")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn firefox_native_manifest_path_uses_mozilla_registration_directory() {
+        let base_dirs = directories::BaseDirs::new().unwrap();
+        assert_eq!(
+            firefox_native_manifest_path(&base_dirs).unwrap(),
+            base_dirs
+                .config_dir()
+                .join("Mozilla/NativeMessagingHosts")
+                .join(format!("{NATIVE_HOST_NAME}.json"))
+        );
+    }
+
     #[test]
     fn windows_native_host_registration_covers_edge_and_chromium_browsers() {
         assert_eq!(

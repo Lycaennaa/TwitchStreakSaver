@@ -39,21 +39,21 @@ jobs:
 
       - name: Check extension JavaScript
         run: |
-          taskpolicy -b node --check chrome-extension/background.js
-          taskpolicy -b node --check chrome-extension/content.js
-          taskpolicy -b node --check chrome-extension/managed_tabs.js
-          taskpolicy -b node --check chrome-extension/quality.js
-          taskpolicy -b node --check chrome-extension/popup.js
-          taskpolicy -b node --check chrome-extension/twitch_tabs.js
-          taskpolicy -b node --check chrome-extension/background.test.js
+          taskpolicy -b node --check web-extension/background.js
+          taskpolicy -b node --check web-extension/content.js
+          taskpolicy -b node --check web-extension/managed_tabs.js
+          taskpolicy -b node --check web-extension/quality.js
+          taskpolicy -b node --check web-extension/popup.js
+          taskpolicy -b node --check web-extension/twitch_tabs.js
+          taskpolicy -b node --check web-extension/background.test.js
 
       - name: Run extension tests
-        run: taskpolicy -b node --test chrome-extension/content.test.js chrome-extension/quality.test.js chrome-extension/twitch_tabs.test.js chrome-extension/background.test.js
+        run: taskpolicy -b node --test web-extension/content.test.js web-extension/quality.test.js web-extension/twitch_tabs.test.js web-extension/background.test.js
 
       - name: Validate extension manifest and package resources
         run: |
-          python3 -m json.tool chrome-extension/manifest.json >/dev/null
-          python3 scripts/package_chrome_extension.py
+          python3 -m json.tool web-extension/manifest.json >/dev/null
+          python3 scripts/package_extensions.py
   windows-msvc:
     name: Windows MSVC
     runs-on: windows-latest

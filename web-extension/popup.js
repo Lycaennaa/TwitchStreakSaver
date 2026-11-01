@@ -1,3 +1,4 @@
+var browserApi = globalThis.browser ?? globalThis.chrome;
 const THEME_KEY = "theme";
 const DEFAULT_THEME = "dark";
 const VALID_THEMES = new Set(["system", "light", "dark", "amoled"]);
@@ -11,7 +12,7 @@ function applyTheme(theme) {
 
 async function loadTheme() {
   try {
-    const stored = await chrome.storage?.local?.get({ [THEME_KEY]: DEFAULT_THEME });
+    const stored = await browserApi.storage?.local?.get({ [THEME_KEY]: DEFAULT_THEME });
     applyTheme(stored?.[THEME_KEY] ?? DEFAULT_THEME);
   } catch {
     applyTheme(DEFAULT_THEME);
@@ -19,7 +20,7 @@ async function loadTheme() {
 }
 
 void loadTheme();
-chrome.storage?.onChanged?.addListener((changes, areaName) => {
+browserApi.storage?.onChanged?.addListener((changes, areaName) => {
   if (areaName !== "local" || !changes[THEME_KEY]) return;
   applyTheme(changes[THEME_KEY].newValue);
 });
@@ -59,7 +60,7 @@ function showStatus(result) {
 }
 async function refreshStatus() {
   try {
-    showStatus(await chrome.runtime.sendMessage({ type: "native_host_status" }));
+    showStatus(await browserApi.runtime.sendMessage({ type: "native_host_status" }));
   } catch (error) {
     status.textContent = `Could not refresh native-messaging status: ${error.message}`;
   }
@@ -69,7 +70,7 @@ async function refreshStatus() {
 async function pollStatus(generation, deadline) {
   if (generation !== wakeGeneration) return;
   try {
-    const result = await chrome.runtime.sendMessage({ type: "native_host_status" });
+    const result = await browserApi.runtime.sendMessage({ type: "native_host_status" });
     if (generation !== wakeGeneration) return;
     showStatus(result);
     if (result?.bridgeReady) return;
@@ -98,7 +99,7 @@ async function wakeServiceWorker(forceReconnect = false) {
   wakeButton.disabled = true;
   if (forceReconnect) status.textContent = "Restarting the pending native-host connection…";
   try {
-    const result = await chrome.runtime.sendMessage({
+    const result = await browserApi.runtime.sendMessage({
       type: "wake_native_host",
       forceReconnect,
     });
@@ -119,7 +120,7 @@ async function requestAction(action) {
   openSelectedButton.disabled = true;
   actionStatus.textContent = "Waiting for the app…";
   try {
-    const result = await chrome.runtime.sendMessage({ type: "popup_action", action });
+    const result = await browserApi.runtime.sendMessage({ type: "popup_action", action });
     actionStatus.textContent = result?.success === true
       ? result.message
       : `Could not apply action: ${result?.message || "The app did not confirm it."}`;
@@ -132,7 +133,7 @@ async function requestAction(action) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+browserApi.runtime.onMessage.addListener((message) => {
   if (message?.type === "popup_status_changed") void refreshStatus();
 });
 

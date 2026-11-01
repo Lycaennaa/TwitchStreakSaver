@@ -1,3 +1,4 @@
+var browserApi = globalThis.browser ?? globalThis.chrome;
 (() => {
   const MANAGED_TAB_IDENTITY_KEY = "__twitch_streak_saver_managed_tab_identity__";
   let previousState = "";
@@ -401,7 +402,7 @@
 
   async function loadPreferredQuality() {
     try {
-      const stored = await chrome.storage.local.get({
+      const stored = await browserApi.storage.local.get({
         [QUALITY_STORAGE_KEY]: TwitchQuality.DEFAULT_QUALITY,
       });
       if (!qualityPreferenceChangedWhileLoading) {
@@ -470,7 +471,7 @@
       lastSentAt = now;
     }
     try {
-      chrome.runtime.sendMessage(state).catch(() => {});
+      browserApi.runtime.sendMessage(state).catch(() => {});
     } catch (error) {
       if (!String(error).toLowerCase().includes("extension context invalidated")) throw error;
       stopMonitoring();
@@ -574,7 +575,7 @@
 
 
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "get_managed_tab_identity") {
       sendResponse({ identity: readManagedTabIdentity() });
       return false;
@@ -617,12 +618,12 @@
   });
   const managedTabIdentity = readManagedTabIdentity();
   try {
-    chrome.runtime.sendMessage({
+    browserApi.runtime.sendMessage({
       type: "managed_tab_identity_ready",
       identity: managedTabIdentity,
     }).catch(() => {});
   } catch {}
-  chrome.storage.onChanged.addListener(qualityPreferenceChanged);
+  browserApi.storage.onChanged.addListener(qualityPreferenceChanged);
   playerPreferenceWatcher = window.setInterval(checkPlayerPreferences, QUALITY_CHECK_INTERVAL_MS);
   checkPlayerAudioPreference();
   void loadPreferredQuality();

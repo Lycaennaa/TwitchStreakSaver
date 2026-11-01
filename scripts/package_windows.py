@@ -45,7 +45,7 @@ def main() -> None:
         check=True,
     )
     subprocess.run(
-        [sys.executable, "scripts/package_chrome_extension.py"],
+        [sys.executable, "scripts/package_extensions.py"],
         cwd=ROOT,
         check=True,
     )
@@ -61,6 +61,8 @@ def main() -> None:
         staged_package = staging / package_name
         staged_extension = staged_package / "chrome-extension"
         staged_extension.mkdir(parents=True)
+        staged_firefox_extension = staged_package / "firefox-extension"
+        staged_firefox_extension.mkdir(parents=True)
 
         for name in ("twitch-streak-saver.exe", "twitch_streak_saver_host.exe"):
             binary = binaries / name
@@ -69,8 +71,14 @@ def main() -> None:
             shutil.copy2(binary, staged_package / name)
 
         shutil.copytree(DIST / "chrome-extension", staged_extension, dirs_exist_ok=True)
+        shutil.copytree(DIST / "firefox-extension", staged_firefox_extension, dirs_exist_ok=True)
         staged_archive = staging / archive.name
-        with zipfile.ZipFile(staged_archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as package:
+        with zipfile.ZipFile(
+            staged_archive,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as package:
             for path in sorted(staged_package.rglob("*")):
                 if path.is_file():
                     package.write(path, arcname=path.relative_to(staging).as_posix())
@@ -82,6 +90,12 @@ def main() -> None:
             expected_entries.update(
                 f"{package_name}/chrome-extension/{path.relative_to(extension_source).as_posix()}"
                 for path in extension_source.rglob("*")
+                if path.is_file()
+            )
+            firefox_extension_source = DIST / "firefox-extension"
+            expected_entries.update(
+                f"{package_name}/firefox-extension/{path.relative_to(firefox_extension_source).as_posix()}"
+                for path in firefox_extension_source.rglob("*")
                 if path.is_file()
             )
             entries = set(package.namelist())

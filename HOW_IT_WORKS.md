@@ -15,7 +15,7 @@ Transient Twitch network failures during initial connection and active live/foll
 Transient sign-in callback timeouts retry with the same capped backoff. Live-status and followed-channel refreshes recover independently; successful follower updates are applied even if live status is still unavailable, and automation stays paused until every failed Twitch feed recovers. A queued manual open remains pending until the browser extension reports tab inventory; if the extension is connected but has not reported inventory within 10 seconds, the app shows an extension diagnostic while retaining the request.
 
 Managed-player reloads and `OpenSelected` commands are sent only to extension version 0.3.18 or newer, which advertises acknowledgment support. Requests stay pending until acknowledged; after a timeout or disconnect, retries reuse the same command ID and unchanged payload so a lost acknowledgment cannot reopen a user-closed tab. Manual requests that have not yet been sent use the channels selected when they are dispatched.
-The extension persists its latest 128 completed recoverable browser command IDs in `chrome.storage.local`, so duplicates received after an MV3 service-worker restart are acknowledged only from known completions.
+The extension stores its latest 128 completed command IDs and managed-tab state in browser `storage.local`; Chromium service workers and Firefox background scripts can restart and restore that state.
 
 
 
@@ -29,7 +29,7 @@ The in-app activity log retains the most recent 500 events locally across launch
 
 **Preferred stream quality** is chosen in the Rust desktop app under **Stream quality**. It defaults to 160p to save bandwidth and applies automatically to Twitch player pages. Choose 160p, 360p, 480p, 720p, 1080p, Source, or Twitch Auto; if a rendition is unavailable, the extension chooses the lowest available quality. Saved quality and per-channel **Unmuted** preferences apply to open Twitch pages and are restored after reload. Refresh already-open Twitch pages after upgrading extension version 0.3.18.
    Audio automation stops when a managed player leaves its assigned channel. Opening another channel in an app-managed player applies that channel's **Unmuted** setting.
-The per-channel **Unmuted** preference also synchronizes the Twitch player's own audio controls, not just Chrome's tab mute state.
+The per-channel **Unmuted** preference also synchronizes the Twitch player's own audio controls, not just the browser's tab mute state.
 
 
 **Close app-opened stream tabs on Twitch raid redirects** is off by default. When enabled, the extension closes a managed player tab whose URL changes to include the query parameter `referrer=raid`; external tabs are unaffected. The channel stays suppressed from automatic reopening until Twitch confirms it is offline. At browser startup, a managed tab already on a raid URL without a verifiable saved identity (including tabs created before version 0.3.13 or tabs where session storage was blocked) stays open and its channel is held from reopening until the route changes, avoiding false closure of a reused tab ID.
@@ -44,7 +44,7 @@ By default, manually opened Twitch tabs remain external and under your control. 
 The extension revalidates tab identity and player route after async adoption and raid-redirect processing; if either no longer matches, adoption is declined or the tab is left open.
 
 
-**Automatic browser opening** can launch Chrome, Brave, Edge, or Helium with the selected profile when automation is enabled, a followed Twitch channel is live, and the extension is disconnected. Profiles with the extension enabled are marked. If several are enabled, the bridge cannot identify which profile is connected, and an already-connected profile is preserved.
+**Automatic browser opening** can launch Chrome, Brave, Edge, Helium, or Firefox with the selected profile when automation is enabled, a followed Twitch channel is live, and the extension is disconnected. Profiles with the extension enabled are marked. If several are enabled, the bridge cannot identify which profile is connected, and an already-connected profile is preserved.
 
 **Queue visibility.** The followed-channel panel shows the upcoming managed Watch Streak or Channel Points queue and the player/chat readiness used for each 16-minute turn timer. Player/chat readiness does not block opening. The queue reports actionable opening blockers—including automation, Twitch/browser connection or tab-inventory state, and full stream capacity—and keeps upcoming channels visible while capacity is full.
 

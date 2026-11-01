@@ -111,6 +111,7 @@ pub enum BrowserKind {
     Brave,
     Edge,
     Helium,
+    Firefox,
 }
 
 impl BrowserKind {
@@ -120,6 +121,7 @@ impl BrowserKind {
             Self::Brave => "Brave",
             Self::Edge => "Edge",
             Self::Helium => "Helium",
+            Self::Firefox => "Firefox",
         }
     }
 }
