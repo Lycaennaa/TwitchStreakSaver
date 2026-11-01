@@ -78,6 +78,12 @@ jobs:
             exit 1
           fi
           tag="v${RELEASE_VERSION}"
+          releases="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          existing_release="$(jq -c --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | first' <<<"$releases")"
+          if [[ "$existing_release" != "null" && "$(jq -r '.draft' <<<"$existing_release")" != "true" ]]; then
+            printf 'Release %s is already published and cannot be reused; choose a new version.\n' "$tag" >&2
+            exit 1
+          fi
           if existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null)"; then
             if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
               printf 'Release tag %s already points to a different commit.\n' "$tag" >&2
@@ -299,9 +305,39 @@ jobs:
         with:
           tag_name: ${{ needs.validate-and-tag.outputs.tag }}
           name: Twitch Streak Saver ${{ needs.validate-and-tag.outputs.tag }}
+          draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             ${{ runner.temp }}/release-assets/twitch-streak-saver-${{ needs.validate-and-tag.outputs.version }}-macos-aarch64.zip
             ${{ runner.temp }}/release-assets/twitch-streak-saver-${{ needs.validate-and-tag.outputs.version }}-windows-x86_64-msvc.zip
             ${{ runner.temp }}/release-assets/twitch-streak-saver-chrome-extension.zip
+
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate-and-tag.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate-and-tag.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "true" ]]; then
+            printf 'Release %s is not a draft; refusing to publish.\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          expected_assets="$(printf '%s\n' \
+            "twitch-streak-saver-${RELEASE_VERSION}-macos-aarch64.zip" \
+            "twitch-streak-saver-${RELEASE_VERSION}-windows-x86_64-msvc.zip" \
+            "twitch-streak-saver-chrome-extension.zip" | sort)"
+          actual_assets="$(jq -r '.assets[].name' <<<"$release_json" | sort)"
+          if [[ "$actual_assets" != "$expected_assets" ]]; then
+            printf 'Release %s has an unexpected asset set.\nExpected:\n%s\nActual:\n%s\n' \
+              "$RELEASE_TAG" "$expected_assets" "$actual_assets" >&2
+            exit 1
+          fi
+
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false >/dev/null
