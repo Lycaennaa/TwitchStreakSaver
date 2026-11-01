@@ -88,7 +88,8 @@ def main() -> None:
             roots = {entry.split("/", 1)[0] for entry in entries}
             if roots != {package_name} or entries != expected_entries:
                 raise ValueError("Windows ZIP contents do not match the staged app and extension files")
-            bad_entry = package.testzip()
+        with zipfile.ZipFile(staged_archive, "r") as packaged:
+            bad_entry = packaged.testzip()
             if bad_entry is not None:
                 raise ValueError(f"Windows package archive failed its integrity check: {bad_entry}")
 
