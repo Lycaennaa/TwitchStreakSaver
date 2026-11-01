@@ -88,8 +88,9 @@ def main() -> None:
             roots = {entry.split("/", 1)[0] for entry in entries}
             if roots != {package_name} or entries != expected_entries:
                 raise ValueError("Windows ZIP contents do not match the staged app and extension files")
-            if package.testzip() is not None:
-                raise ValueError("Windows package archive failed its integrity check")
+            bad_entry = package.testzip()
+            if bad_entry is not None:
+                raise ValueError(f"Windows package archive failed its integrity check: {bad_entry}")
 
         shutil.rmtree(package_dir, ignore_errors=True)
         os.replace(staged_package, package_dir)
