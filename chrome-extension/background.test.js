@@ -34,7 +34,7 @@ async function createExtension({
   storedCompletedNativeCommandIds = [],
   browserStartup = false,
   initialTabs = [],
-  extensionVersion = "0.3.18",
+  extensionVersion = "1.0.0",
   runtimeId = trustedExtensionId,
   fetchImpl = async () => ({ status: 204 }),
   connectNativeImpl = null,
