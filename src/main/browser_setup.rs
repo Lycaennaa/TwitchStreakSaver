@@ -130,11 +130,17 @@ pub(super) fn detected_browser_profile_roots(
 }
 
 pub(super) fn detected_browser_profiles_for_roots(
-    roots: &[DetectedBrowserProfileRoot],
+    roots: &mut [DetectedBrowserProfileRoot],
 ) -> Vec<DetectedBrowserProfile> {
     let mut profiles = Vec::new();
     for root in roots {
-        profiles.extend(detected_browser_profiles_for(root.browser, &root.path));
+        if root.scan_error.is_some() {
+            continue;
+        }
+        match detected_browser_profiles_for(root.browser, &root.path) {
+            Ok(mut root_profiles) => profiles.append(&mut root_profiles),
+            Err(error) => root.scan_error = Some(error),
+        }
     }
     profiles.sort_by(|left, right| {
         right
@@ -145,7 +151,10 @@ pub(super) fn detected_browser_profiles_for_roots(
     profiles
 }
 
-fn detected_browser_profiles_for(browser: BrowserKind, root: &Path) -> Vec<DetectedBrowserProfile> {
+fn detected_browser_profiles_for(
+    browser: BrowserKind,
+    root: &Path,
+) -> Result<Vec<DetectedBrowserProfile>, String> {
     if browser == BrowserKind::Firefox {
         return detected_firefox_profiles(root);
     }
@@ -193,11 +202,19 @@ fn detected_browser_profiles_for(browser: BrowserKind, root: &Path) -> Vec<Detec
         }
     }
 
-    browser_profiles
+    Ok(browser_profiles)
 }
-fn detected_firefox_profiles(root: &Path) -> Vec<DetectedBrowserProfile> {
-    let Ok(profiles_ini) = fs::read_to_string(root.join("profiles.ini")) else {
-        return Vec::new();
+fn detected_firefox_profiles(root: &Path) -> Result<Vec<DetectedBrowserProfile>, String> {
+    let profiles_ini_path = root.join("profiles.ini");
+    let profiles_ini = match fs::read_to_string(&profiles_ini_path) {
+        Ok(profiles_ini) => profiles_ini,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "Could not read Firefox profiles.ini at {}: {error}",
+                profiles_ini_path.display()
+            ));
+        }
     };
     let mut profiles = Vec::new();
     let mut is_profile_section = false;
@@ -231,7 +248,7 @@ fn detected_firefox_profiles(root: &Path) -> Vec<DetectedBrowserProfile> {
         }
     }
 
-    profiles
+    Ok(profiles)
 }
 
 fn append_firefox_profile(
@@ -414,7 +431,7 @@ fn browser_profile_root(browser: BrowserKind) -> Option<PathBuf> {
         BrowserKind::Brave => "BraveSoftware/Brave-Browser",
         BrowserKind::Edge => "Microsoft Edge",
         BrowserKind::Helium => "net.imput.helium",
-        BrowserKind::Firefox => "Mozilla/Firefox",
+        BrowserKind::Firefox => "Firefox",
     };
     Some(
         directories::BaseDirs::new()?
@@ -471,11 +488,49 @@ fn replace_browser_profile_data_directory(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn choose_firefox_profile_data_directory() -> Result<Option<PathBuf>, String> {
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "POSIX path of (choose folder with prompt \"Select the Firefox data folder\")",
+        ])
+        .output()
+        .map_err(|error| format!("Could not open the Firefox folder chooser: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        if error.contains("(-128)") {
+            return Ok(None);
+        }
+        return Err(format!(
+            "Could not choose the Firefox data folder: {}",
+            error.trim()
+        ));
+    }
+    let path = String::from_utf8(output.stdout)
+        .map_err(|_| "The selected Firefox folder path is not valid UTF-8.".to_owned())?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(path);
+    let profiles_ini_path = path.join("profiles.ini");
+    match fs::metadata(&profiles_ini_path) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(path)),
+        Ok(_) => Err("Select the Firefox data folder containing profiles.ini.".to_owned()),
+        Err(error) => Err(format!(
+            "Could not inspect Firefox profiles.ini at {}: {error}",
+            profiles_ini_path.display()
+        )),
+    }
+}
+
 impl Dashboard {
     pub(super) fn refresh_browser_profiles(&mut self) {
         self.browser_profile_roots =
             detected_browser_profile_roots(&self.browser_profile_data_directories);
-        self.browser_profiles = detected_browser_profiles_for_roots(&self.browser_profile_roots);
+        self.browser_profiles =
+            detected_browser_profiles_for_roots(&mut self.browser_profile_roots);
         self.browser_launch_attempted = None;
     }
 
@@ -498,6 +553,32 @@ impl Dashboard {
         }
         self.refresh_browser_profiles();
         Ok(())
+    }
+    pub(super) fn apply_firefox_profile_data_directory_selection(
+        &mut self,
+        selection: Result<Option<PathBuf>, String>,
+    ) {
+        match selection {
+            Ok(Some(path)) => {
+                self.browser_profile_folder_error = match self
+                    .set_browser_profile_data_directory(BrowserKind::Firefox, Some(path))
+                {
+                    Ok(()) => None,
+                    Err(error) => Some(error),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => self.browser_profile_folder_error = Some(error),
+        }
+    }
+    pub(super) fn reset_browser_profile_data_directory(&mut self, browser: BrowserKind) {
+        let is_firefox = browser == BrowserKind::Firefox;
+        match self.set_browser_profile_data_directory(browser, None) {
+            Ok(()) if is_firefox => self.browser_profile_folder_error = None,
+            Ok(()) => {}
+            Err(error) if is_firefox => self.browser_profile_folder_error = Some(error),
+            Err(error) => self.browser_error = Some(error),
+        }
     }
 }
 
@@ -842,6 +923,20 @@ mod browser_profile_tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn firefox_profile_root_uses_macos_application_support_directory() {
+        let expected_root = directories::BaseDirs::new()
+            .unwrap()
+            .data_dir()
+            .join("Firefox");
+
+        assert_eq!(
+            super::browser_profile_root(BrowserKind::Firefox),
+            Some(expected_root)
+        );
+    }
+
     struct ProfileTestDirectory(PathBuf);
 
     impl Drop for ProfileTestDirectory {
@@ -917,14 +1012,13 @@ mod browser_profile_tests {
                 (BrowserKind::Chrome, root_path.clone()),
             ]
         );
-
-        let roots = [DetectedBrowserProfileRoot {
+        let mut roots = [DetectedBrowserProfileRoot {
             browser: BrowserKind::Chrome,
             path: selected_root.clone(),
             scan_error: None,
             overridden: true,
         }];
-        let profiles = detected_browser_profiles_for_roots(&roots);
+        let profiles = detected_browser_profiles_for_roots(&mut roots);
 
         assert_eq!(profiles.len(), 4);
         let enabled = profiles
@@ -1015,7 +1109,7 @@ mod browser_profile_tests {
         fs::create_dir_all(&root).unwrap();
         let _cleanup = ProfileTestDirectory(root.clone());
 
-        let profiles = detected_browser_profiles_for(BrowserKind::Chrome, &root);
+        let profiles = detected_browser_profiles_for(BrowserKind::Chrome, &root).unwrap();
 
         assert!(profiles.is_empty());
     }
@@ -1062,7 +1156,7 @@ mod browser_profile_tests {
         );
         fs::write(root.join("profiles.ini"), profiles_ini).unwrap();
 
-        let profiles = detected_browser_profiles_for(BrowserKind::Firefox, &root);
+        let profiles = detected_browser_profiles_for(BrowserKind::Firefox, &root).unwrap();
         assert_eq!(profiles.len(), 3);
         let default = profiles
             .iter()
@@ -1085,6 +1179,31 @@ mod browser_profile_tests {
         assert!(profiles.iter().all(|profile| profile.label != "Escaping"));
     }
 
+    #[test]
+    fn firefox_profiles_ini_read_error_is_reported() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!(
+                "firefox-profiles-ini-error-test-{}",
+                std::process::id()
+            ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(root.join("profiles.ini")).unwrap();
+        let _cleanup = ProfileTestDirectory(root.clone());
+        let mut roots = [DetectedBrowserProfileRoot {
+            browser: BrowserKind::Firefox,
+            path: root,
+            scan_error: None,
+            overridden: false,
+        }];
+
+        let profiles = detected_browser_profiles_for_roots(&mut roots);
+
+        assert!(profiles.is_empty());
+        let error = roots[0].scan_error.as_deref().unwrap();
+        assert!(error.contains("profiles.ini"));
+    }
     #[test]
     fn firefox_profile_launch_rejects_unknown_lock_owner() {
         let error = browser_profile_launch_arguments(

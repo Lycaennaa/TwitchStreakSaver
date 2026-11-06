@@ -214,6 +214,8 @@ impl Dashboard {
         let candidates = queue_candidates(
             &self.channels,
             &self.manual_open_channels,
+            &self.browser_states,
+            &self.auto_open_channels,
             &self.external_stream_counts,
             &self.live_channel_ids,
             &self.raid_redirected_channels,

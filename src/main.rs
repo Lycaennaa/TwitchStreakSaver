@@ -67,6 +67,8 @@ const AUTO_TAB_RETRY_DELAY: Duration = Duration::from_secs(30);
 fn queue_candidates<'a>(
     channels: &'a [FollowedChannel],
     manual_open_channels: &HashSet<String>,
+    browser_states: &HashMap<String, BrowserChannelState>,
+    auto_open_channels: &HashSet<String>,
     external_stream_counts: &HashMap<String, usize>,
     live_channel_ids: &HashSet<String>,
     raid_redirected_channels: &HashSet<String>,
@@ -84,6 +86,10 @@ fn queue_candidates<'a>(
         .iter()
         .filter(|channel| {
             !manual_open_channels.contains(&channel.id)
+                && (!browser_states
+                    .get(&channel.id)
+                    .is_some_and(|state| state.player_tab_id.is_some())
+                    || auto_open_channels.contains(&channel.id))
                 && !external_channel_ids.contains(channel.id.as_str())
                 && !raid_redirected_channels.contains(&channel.id)
                 && !automation_delays.is_channel_snoozed(&channel.id, now)
@@ -356,6 +362,7 @@ const ACTIVITY_LOG_KEY: &str = "activity_log";
 const BROWSER_EXTENSION_ID: &str = include_str!("../web-extension/trusted-extension-id");
 const FIREFOX_EXTENSION_ID: &str = include_str!("../web-extension/firefox-extension-id");
 const BROWSER_BRIDGE_RETRY_DELAY: Duration = Duration::from_secs(5);
+
 fn main() -> eframe::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let launch_in_background = std::env::args().any(|argument| argument == "--background");
@@ -449,6 +456,7 @@ struct Dashboard {
     browser_connected: bool,
     browser_command_ack_supported: bool,
     browser_error: Option<String>,
+    browser_profile_folder_error: Option<String>,
     browser_notice: Option<String>,
     browser_states: HashMap<String, BrowserChannelState>,
     external_stream_counts: HashMap<String, usize>,
@@ -493,10 +501,10 @@ impl Dashboard {
             .unwrap_or_default();
         activity_log.truncate(activity_log::MAX_ACTIVITY_LOG_ENTRIES);
         let browser_profile_data_directories = preferences.browser_profile_data_directories;
-        let browser_profile_roots =
+        let mut browser_profile_roots =
             browser_setup::detected_browser_profile_roots(&browser_profile_data_directories);
         let browser_profiles =
-            browser_setup::detected_browser_profiles_for_roots(&browser_profile_roots);
+            browser_setup::detected_browser_profiles_for_roots(&mut browser_profile_roots);
         #[cfg(target_os = "windows")]
         let (start_with_windows, windows_startup_error) = windows_startup::initialize();
         #[cfg(target_os = "macos")]
@@ -579,6 +587,7 @@ impl Dashboard {
             browser_connected: false,
             browser_command_ack_supported: false,
             browser_error,
+            browser_profile_folder_error: None,
             browser_port_check_sender,
             browser_port_check_receiver,
             browser_port_check_in_flight: false,

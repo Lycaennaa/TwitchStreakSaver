@@ -143,6 +143,7 @@ impl Dashboard {
     }
     fn automation_settings(&mut self, ui: &mut egui::Ui) {
         let mut profile_folder_reset: Option<BrowserKind> = None;
+        let mut choose_firefox_profile_folder = false;
         ui.group(|ui| {
             ui.set_min_width(ui.available_width());
             section_heading(ui, "Automation");
@@ -152,6 +153,12 @@ impl Dashboard {
             }
                 ui.menu_button("Browser data folders", |ui| {
                     ui.label("Detected browser user-data folders:");
+
+                    #[cfg(target_os = "macos")]
+                    if ui.button("Choose Firefox data folder…").clicked() {
+                        choose_firefox_profile_folder = true;
+                        ui.close_menu();
+                    }
                     for root in &self.browser_profile_roots {
                         ui.horizontal(|ui| {
                             ui.label(root.browser.name());
@@ -163,6 +170,12 @@ impl Dashboard {
                         });
                     }
                 });
+            if let Some(error) = &self.browser_profile_folder_error {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("Firefox data folder: {error}"),
+                );
+            }
             let selected_profile = self
                 .browser_launch_target
                 .as_ref()
@@ -235,18 +248,25 @@ impl Dashboard {
                 ui.label("No profiles were found in the readable browser data folders.");
             }
             for root in &self.browser_profile_roots {
-                if !self
+                if let Some(error) = &root.scan_error {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!(
+                            "Could not scan {} profiles under {}: {error}",
+                            root.browser.name(),
+                            root.path.display()
+                        ),
+                    );
+                } else if !self
                     .browser_profiles
                     .iter()
                     .any(|profile| profile.target.browser == root.browser)
                 {
-                    if root.scan_error.is_none() {
-                        ui.label(format!(
-                            "{}: no profiles found under {}",
-                            root.browser.name(),
-                            root.path.display()
-                        ));
-                    }
+                    ui.label(format!(
+                        "{}: no profiles found under {}",
+                        root.browser.name(),
+                        root.path.display()
+                    ));
                 }
             }
             ui.label(
@@ -308,10 +328,15 @@ impl Dashboard {
             }
             ui.label("Twitch and browser connections are required for automatic opening.");
         });
+
+        #[cfg(target_os = "macos")]
+        if choose_firefox_profile_folder {
+            self.apply_firefox_profile_data_directory_selection(
+                browser_setup::choose_firefox_profile_data_directory(),
+            );
+        }
         if let Some(browser) = profile_folder_reset {
-            if let Err(error) = self.set_browser_profile_data_directory(browser, None) {
-                self.browser_error = Some(error);
-            }
+            self.reset_browser_profile_data_directory(browser);
         }
     }
 }

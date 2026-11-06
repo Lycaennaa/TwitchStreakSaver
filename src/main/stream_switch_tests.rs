@@ -60,6 +60,7 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         browser_bridge_retry_after: None,
         browser_connected: true,
         browser_error: None,
+        browser_profile_folder_error: None,
         browser_notice: None,
         browser_port_check_sender,
         browser_port_check_receiver,
@@ -130,6 +131,36 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
     dashboard
 }
 
+struct ProjectTestDirectory(std::path::PathBuf);
+
+impl ProjectTestDirectory {
+    fn firefox_profile_data_directory() -> Self {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!(
+                "firefox-profile-selection-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let directory = Self(root);
+        std::fs::create_dir_all(directory.0.join("Profiles/default")).unwrap();
+        std::fs::write(
+            directory.0.join("profiles.ini"),
+            "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/default\n",
+        )
+        .unwrap();
+        directory
+    }
+}
+
+impl Drop for ProjectTestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 #[test]
 fn queue_visibility_keeps_candidates_visible_when_stream_capacity_is_full() {
     let mut dashboard = dashboard_with_pending_stream_switch(true);
@@ -1307,6 +1338,82 @@ fn popup_open_selected_rechecks_a_stale_selection_error() {
 }
 
 #[test]
+fn choosing_a_valid_firefox_folder_clears_stale_error_and_resumes_pending_manual_open() {
+    let root = ProjectTestDirectory::firefox_profile_data_directory();
+
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.channels[0].login = "new".to_owned();
+    dashboard.pending_manual_open = true;
+    dashboard.apply_firefox_profile_data_directory_selection(Err(
+        "Select the Firefox data folder containing profiles.ini.".to_owned(),
+    ));
+    assert!(dashboard.browser_profile_folder_error.is_some());
+    assert!(dashboard.browser_error.is_none());
+
+    dashboard.apply_firefox_profile_data_directory_selection(Ok(Some(root.0.clone())));
+    assert!(dashboard.browser_profile_folder_error.is_none());
+    assert!(dashboard.browser_error.is_none());
+
+    let mut sent = false;
+    dashboard.service_pending_manual_open_with(|_, command| {
+        sent = matches!(
+            command,
+            super::BrowserCommand::OpenSelected {
+                manual_request: true,
+                ..
+            }
+        );
+        true
+    });
+
+    assert!(sent);
+    assert!(dashboard.pending_manual_open_command.is_some());
+}
+
+#[test]
+fn choosing_firefox_folder_preserves_unrelated_browser_error() {
+    let root = ProjectTestDirectory::firefox_profile_data_directory();
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.channels[0].login = "new".to_owned();
+    dashboard.pending_manual_open = true;
+    let unrelated_error = "The browser extension reported a tab error.";
+    dashboard.browser_error = Some(unrelated_error.to_owned());
+
+    dashboard.apply_firefox_profile_data_directory_selection(Ok(Some(root.0.clone())));
+
+    assert_eq!(dashboard.browser_error.as_deref(), Some(unrelated_error));
+    assert!(dashboard.browser_profile_folder_error.is_none());
+    let mut sent = false;
+    dashboard.service_pending_manual_open_with(|_, _| {
+        sent = true;
+        true
+    });
+    assert!(!sent);
+    assert!(dashboard.pending_manual_open);
+}
+
+#[test]
+fn resetting_another_browser_folder_preserves_firefox_folder_error() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard
+        .browser_profile_data_directories
+        .push((BrowserKind::Chrome, "/custom/chrome".to_owned()));
+    let firefox_error = "Select the Firefox data folder containing profiles.ini.";
+    dashboard.browser_profile_folder_error = Some(firefox_error.to_owned());
+
+    dashboard.reset_browser_profile_data_directory(BrowserKind::Chrome);
+
+    assert!(!dashboard
+        .browser_profile_data_directories
+        .iter()
+        .any(|(browser, _)| *browser == BrowserKind::Chrome));
+    assert_eq!(
+        dashboard.browser_profile_folder_error.as_deref(),
+        Some(firefox_error)
+    );
+}
+
+#[test]
 fn screenshot_privacy_hides_variable_channel_rows() {
     let mut dashboard = dashboard_with_pending_stream_switch(true);
     dashboard.hide_sensitive_info = true;
@@ -1611,4 +1718,106 @@ fn legacy_unmatched_inventory_is_not_reported_as_empty() {
         "Open Twitch tabs are present, but their names are unavailable. Update the browser extension."
     ));
     assert!(!rendered.contains("No streamers are currently open."));
+}
+
+#[test]
+fn rotation_does_not_reopen_an_existing_tab_when_no_alternative_is_available() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.pending_stream_switch = None;
+    dashboard.auto_open_channels.clear();
+    dashboard.browser_states.insert(
+        "new".to_owned(),
+        BrowserChannelState {
+            player_tab_id: Some(2),
+            ..BrowserChannelState::default()
+        },
+    );
+
+    let mut commands = Vec::new();
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, command| {
+        commands.push(command);
+        true
+    });
+
+    assert!(commands.is_empty());
+}
+
+#[test]
+fn rotation_opens_an_alternative_without_reopening_an_existing_player_tab() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.pending_stream_switch = None;
+    dashboard.auto_open_channels.clear();
+    dashboard.browser_states.insert(
+        "new".to_owned(),
+        BrowserChannelState {
+            player_tab_id: Some(2),
+            ..BrowserChannelState::default()
+        },
+    );
+    let mut other = FollowedChannel::new("other", "Other Streamer");
+    other.selection.streak = true;
+    dashboard.channels.push(other);
+    dashboard.live_channel_ids.insert("other".to_owned());
+
+    let mut commands = Vec::new();
+    dashboard.reconcile_automatic_tabs_with(Duration::ZERO, |_, command| {
+        commands.push(command);
+        true
+    });
+
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| matches!(command, super::BrowserCommand::OpenSelected { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        dashboard.auto_open_channels,
+        HashSet::from(["other".to_owned()])
+    );
+}
+
+#[test]
+fn completed_single_channel_rotation_keeps_the_existing_managed_tab() {
+    let mut dashboard = dashboard_with_pending_stream_switch(false);
+    dashboard.pending_stream_switch = None;
+    dashboard.auto_open_channels = HashSet::from(["new".to_owned()]);
+    dashboard.browser_states.insert(
+        "new".to_owned(),
+        BrowserChannelState {
+            player_tab_id: Some(2),
+            chat_tab_id: Some(3),
+            player_state: Some(super::PlayerState::Playing),
+            chat_state: Some(super::ChatState::Ready),
+            player_last_seen: Some(Instant::now()),
+            chat_last_seen: Some(Instant::now()),
+        },
+    );
+    let session = super::StreamSession {
+        channel_id: "new".to_owned(),
+        eligibility: super::TurnEligibility {
+            player_playing: true,
+            chat_ready: true,
+            capacity_available: true,
+        },
+    };
+    assert!(dashboard
+        .streak_rotation
+        .observe_active_sessions(&[session], Duration::ZERO)
+        .unwrap()
+        .is_empty());
+
+    let mut commands = Vec::new();
+    dashboard.reconcile_automatic_tabs_with(super::STREAM_TURN_DURATION, |_, command| {
+        commands.push(command);
+        true
+    });
+
+    assert!(commands.is_empty());
+    assert!(dashboard.auto_open_channels.contains("new"));
+    assert_eq!(
+        dashboard.browser_states.get("new").unwrap().player_tab_id,
+        Some(2)
+    );
 }

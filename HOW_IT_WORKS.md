@@ -46,7 +46,9 @@ The extension revalidates tab identity and player route after async adoption and
 
 **Automatic browser opening** can launch Chrome, Brave, Edge, Helium, or Firefox with the selected profile when automation is enabled, a followed Twitch channel is live, and the extension is disconnected. Profiles with the extension enabled are marked. If several are enabled, the bridge cannot identify which profile is connected, and an already-connected profile is preserved.
 
-**Queue visibility.** The followed-channel panel shows the upcoming managed Watch Streak or Channel Points queue and the player/chat readiness used for each 16-minute turn timer. Player/chat readiness does not block opening. The queue reports actionable opening blockers—including automation, Twitch/browser connection or tab-inventory state, and full stream capacity—and keeps upcoming channels visible while capacity is full.
+On macOS, if Firefox profile scanning is denied, use **Settings > Automation > Browser data folders > Choose Firefox data folder** and select the folder containing `profiles.ini`. This grants access to the selected folder without requiring Full Disk Access. Folder-selection errors stay in Settings; choosing a valid folder clears that message without blocking manual opens or clearing unrelated browser errors.
+
+**Queue visibility.** The followed-channel panel shows the upcoming managed Watch Streak or Channel Points queue and the player/chat readiness used for each 16-minute turn timer. Player/chat readiness does not block opening. Rotation does not open another tab for a channel that already has a player tab; app-managed tabs remain in the rotation. The queue reports actionable opening blockers—including automation, Twitch/browser connection or tab-inventory state, and full stream capacity—and keeps upcoming channels visible while capacity is full.
 
 **Chat engagement.** The extension checks the Twitch login attached to each rendered chat message against the Twitch account connected in the Rust app. Only matching messages from app-managed streams are excluded from the 16-minute rotation for the current automation run. Message text stays local.
 
