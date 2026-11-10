@@ -1,6 +1,11 @@
+# Distill is a cli wrapper making it easier for humans and agents to use commands by showing only errors/warnings and other non noise. https://github.com/lycaennaa/distill
+
+
 worktree_root := justfile_directory()
 worktree_build_dir := worktree_root + "/.build"
 cargo_command := if os() == "windows" { "cargo" } else if `command -v distill >/dev/null 2>&1 && echo yes` == "yes" { "distill --cwd \"" + worktree_root + "\" cargo" } else { "cargo" }
+node_check_command := if os() == "windows" { "node --check" } else if `command -v distill >/dev/null 2>&1 && echo yes` == "yes" { "distill --cwd \"" + worktree_root + "\" node check" } else { "node --check" }
+node_test_command := if os() == "windows" { "node --test" } else if `command -v distill >/dev/null 2>&1 && echo yes` == "yes" { "distill --cwd \"" + worktree_root + "\" node test" } else { "node --test" }
 
 default:
     just --list
@@ -27,16 +32,16 @@ test:
     {{cargo_command}} test
 
 extension-check:
-    taskpolicy -b node --check web-extension/background.js
-    taskpolicy -b node --check web-extension/content.js
-    taskpolicy -b node --check web-extension/managed_tabs.js
-    taskpolicy -b node --check web-extension/quality.js
-    taskpolicy -b node --check web-extension/popup.js
-    taskpolicy -b node --check web-extension/twitch_tabs.js
-    taskpolicy -b node --test web-extension/content.test.js web-extension/quality.test.js web-extension/twitch_tabs.test.js
-    taskpolicy -b node --check web-extension/background.test.js
-    taskpolicy -b node --test web-extension/background.test.js
-    python3 -m json.tool web-extension/manifest.json > /dev/null
+    @taskpolicy -b {{node_check_command}} web-extension/background.js
+    @taskpolicy -b {{node_check_command}} web-extension/content.js
+    @taskpolicy -b {{node_check_command}} web-extension/managed_tabs.js
+    @taskpolicy -b {{node_check_command}} web-extension/quality.js
+    @taskpolicy -b {{node_check_command}} web-extension/popup.js
+    @taskpolicy -b {{node_check_command}} web-extension/twitch_tabs.js
+    @taskpolicy -b {{node_test_command}} web-extension/content.test.js web-extension/quality.test.js web-extension/twitch_tabs.test.js
+    @taskpolicy -b {{node_check_command}} web-extension/background.test.js
+    @taskpolicy -b {{node_test_command}} web-extension/background.test.js
+    @python3 -m json.tool web-extension/manifest.json > /dev/null
 
 check: fmt-check build test extension-check package-extensions
 

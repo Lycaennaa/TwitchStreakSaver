@@ -13,7 +13,7 @@ just check
 `just check` aggregates formatting, build, Rust tests, extension tests, and extension-package validation.
 `just package-extensions` builds the Chromium and Firefox extension packages in `dist/`. The Firefox package is unsigned and can be loaded temporarily in Firefox for local testing.
 
-These recipes use [Distill](https://github.com/lycaennaa/distill) when installed and Cargo otherwise; Distill is optional.
+Where supported, Cargo and Node.js checks use [Distill](https://github.com/lycaennaa/distill) when installed and run directly otherwise; Distill is optional.
 
 To invoke Cargo directly:
 
