@@ -4,7 +4,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -399,9 +399,11 @@ fn write_command_with_timeout(stream: &mut TcpStream, command: &BrowserCommand) 
 }
 
 fn install_native_host() -> Result<(), String> {
-    let host_path = native_host_path()?
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve native host executable: {error}"))?;
+    let host_path = plain_host_path(
+        native_host_path()?
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve native host executable: {error}"))?,
+    );
     let base_dirs =
         BaseDirs::new().ok_or_else(|| "Could not locate user config directory.".to_owned())?;
     let manifest_paths = native_manifest_paths(&base_dirs)?;
@@ -447,6 +449,20 @@ fn install_native_host() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Convert a canonicalized path into the plain form native messaging manifests require.
+/// `fs::canonicalize` returns Windows verbatim paths (`\\?\C:\...`, `\\?\UNC\server\share\...`);
+/// Chromium native messaging cannot launch a host registered with such a path.
+fn plain_host_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy().into_owned();
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    match raw.strip_prefix(r"\\?\") {
+        Some(plain) => PathBuf::from(plain),
+        None => path,
+    }
 }
 
 fn native_host_manifest(host_path: &Path) -> NativeHostManifest {
@@ -627,14 +643,14 @@ fn register_windows_hosts(manifest_path: &std::path::Path) -> Result<(), String>
 mod tests {
     use super::{
         firefox_native_host_manifest, firefox_native_manifest_path, native_host_manifest,
-        native_manifest_paths, read_message, send_command, update_recovery_generation,
-        windows_firefox_native_host_registry_path, windows_native_host_registry_paths,
-        write_message, BridgeEvent, BrowserCommand, QueuedBrowserCommand, NATIVE_HOST_NAME,
-        TRUSTED_EXTENSION_ID,
+        native_manifest_paths, plain_host_path, read_message, send_command,
+        update_recovery_generation, windows_firefox_native_host_registry_path,
+        windows_native_host_registry_paths, write_message, BridgeEvent, BrowserCommand,
+        QueuedBrowserCommand, NATIVE_HOST_NAME, TRUSTED_EXTENSION_ID,
     };
     use serde_json::{json, Value};
     use std::io::Cursor;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::sync::Mutex;
 
@@ -734,6 +750,26 @@ mod tests {
         ));
         drop(command_tx);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn verbatim_windows_paths_are_normalized_for_native_host_manifests() {
+        assert_eq!(
+            plain_host_path(PathBuf::from(r"\\?\C:\Apps\twitch_streak_saver_host.exe")),
+            PathBuf::from(r"C:\Apps\twitch_streak_saver_host.exe"),
+        );
+        assert_eq!(
+            plain_host_path(PathBuf::from(r"\\?\UNC\server\share\host.exe")),
+            PathBuf::from(r"\\server\share\host.exe"),
+        );
+        assert_eq!(
+            plain_host_path(PathBuf::from(r"C:\Apps\host.exe")),
+            PathBuf::from(r"C:\Apps\host.exe"),
+        );
+        assert_eq!(
+            plain_host_path(PathBuf::from("/opt/app/host")),
+            PathBuf::from("/opt/app/host"),
+        );
     }
 
     #[test]
