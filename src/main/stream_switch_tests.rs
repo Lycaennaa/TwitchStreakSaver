@@ -1,7 +1,7 @@
 use super::{
     BrowserChannelState, BrowserKind, BrowserLaunchTarget, BrowserSurface, BrowserTabCloseReason,
     Dashboard, FollowedChannel, KnownBrowserMessage, PreferredQuality, QueuePlanner,
-    TwitchConnectionStatus, TwitchUpdate,
+    TwitchConnectionStatus, TwitchPointsEvent, TwitchUpdate,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -81,8 +81,9 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         browser_open_streamer_names_complete: false,
         external_unmatched_streams: 0,
         external_inventory_received: true,
-        pubsub_connected: false,
-        pubsub_error: None,
+        points_events_connected: false,
+        points_events_error: None,
+        twitch_user_id: Some("viewer-123".to_owned()),
         streak_completed: HashMap::new(),
         notified_streak_channels: HashSet::new(),
         activity_log: VecDeque::new(),
@@ -109,9 +110,9 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         pending_manual_open_command: None,
         browser_command_ack_supported: true,
         twitch_baseline_confirmed_at: None,
-        pubsub_state_confirmed_at: None,
-        pubsub_last_event_at: None,
-        pubsub_missed_events_since: None,
+        points_events_state_confirmed_at: None,
+        points_events_last_event_at: None,
+        points_events_missed_events_since: None,
         auto_open_retry_after: HashMap::new(),
     };
     dashboard.browser_connected = false;
@@ -1418,9 +1419,9 @@ fn screenshot_privacy_hides_variable_channel_rows() {
     let mut dashboard = dashboard_with_pending_stream_switch(true);
     dashboard.hide_sensitive_info = true;
     dashboard.twitch_baseline_confirmed_at = Some(Instant::now());
-    dashboard.pubsub_state_confirmed_at = Some(Instant::now());
-    dashboard.pubsub_last_event_at = Some(Instant::now());
-    dashboard.pubsub_missed_events_since = Some(Instant::now());
+    dashboard.points_events_state_confirmed_at = Some(Instant::now());
+    dashboard.points_events_last_event_at = Some(Instant::now());
+    dashboard.points_events_missed_events_since = Some(Instant::now());
     let input = eframe::egui::RawInput {
         screen_rect: Some(eframe::egui::Rect::from_min_size(
             eframe::egui::Pos2::ZERO,
@@ -1448,9 +1449,9 @@ fn screenshot_privacy_hides_variable_channel_rows() {
     assert!(!rendered.contains("Unselect all"));
     assert!(!rendered.contains("Unselect matching"));
     assert!(!rendered.contains("last confirmed"));
-    assert!(!rendered.contains("Last PubSub event observed"));
-    assert!(!rendered.contains("No PubSub events observed"));
-    assert!(!rendered.contains("PubSub monitoring gap started"));
+    assert!(!rendered.contains("Last Points/Streak event observed"));
+    assert!(!rendered.contains("No Points/Streak events observed"));
+    assert!(!rendered.contains("Points/Streak event monitoring gap started"));
 }
 
 #[test]
@@ -1820,4 +1821,95 @@ fn completed_single_channel_rotation_keeps_the_existing_managed_tab() {
         dashboard.browser_states.get("new").unwrap().player_tab_id,
         Some(2)
     );
+}
+#[test]
+fn browser_points_events_require_the_connected_app_account() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.handle_browser_message(KnownBrowserMessage::PointsEventsStatus {
+        viewer_ids: vec!["other-viewer".to_owned()],
+    });
+    dashboard.poll_twitch_updates();
+    assert!(!dashboard.points_events_connected);
+    assert_eq!(
+        dashboard.points_events_error.as_deref(),
+        Some("The browser's Twitch account does not match the app's connected account.")
+    );
+
+    dashboard.handle_browser_message(KnownBrowserMessage::PointsEventsStatus {
+        viewer_ids: vec!["viewer-123".to_owned()],
+    });
+    dashboard.poll_twitch_updates();
+    assert!(dashboard.points_events_connected);
+    assert_eq!(dashboard.points_events_error, None);
+
+    dashboard.handle_browser_message(KnownBrowserMessage::PointsEvent {
+        viewer_id: "other-viewer".to_owned(),
+        event: TwitchPointsEvent::PointsEarned {
+            channel_id: "new".to_owned(),
+            points_earned: 400,
+            balance: 1400,
+            reason_code: "WATCH_STREAK".to_owned(),
+        },
+    });
+    dashboard.poll_twitch_updates();
+    assert!(dashboard.streak_completed.is_empty());
+    assert!(dashboard.channel_points_balances.is_empty());
+
+    dashboard.handle_browser_message(KnownBrowserMessage::PointsEvent {
+        viewer_id: "viewer-123".to_owned(),
+        event: TwitchPointsEvent::PointsEarned {
+            channel_id: "new".to_owned(),
+            points_earned: 400,
+            balance: 1400,
+            reason_code: "WATCH_STREAK".to_owned(),
+        },
+    });
+    dashboard.poll_twitch_updates();
+    assert_eq!(dashboard.streak_completed.get("new"), Some(&400));
+    assert_eq!(dashboard.channel_points_balances.get("new"), Some(&1400));
+
+    dashboard.handle_browser_message(KnownBrowserMessage::PointsEvent {
+        viewer_id: "viewer-123".to_owned(),
+        event: TwitchPointsEvent::PointsSpent {
+            channel_id: "new".to_owned(),
+            balance: 1300,
+        },
+    });
+    dashboard.handle_browser_message(KnownBrowserMessage::PointsEvent {
+        viewer_id: "viewer-123".to_owned(),
+        event: TwitchPointsEvent::ClaimAvailable {
+            channel_id: "new".to_owned(),
+        },
+    });
+    dashboard.poll_twitch_updates();
+    assert_eq!(dashboard.channel_points_balances.get("new"), Some(&1300));
+    assert!(dashboard.available_claim_channels.contains("new"));
+}
+
+#[test]
+fn points_event_status_is_visible_in_the_dashboard() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let render = |dashboard: &mut Dashboard| {
+        let input = eframe::egui::RawInput {
+            screen_rect: Some(eframe::egui::Rect::from_min_size(
+                eframe::egui::Pos2::ZERO,
+                eframe::egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let output = eframe::egui::Context::default().run(input, |context| {
+            eframe::egui::CentralPanel::default().show(context, |ui| {
+                dashboard.show_dashboard_content_with_bounds(ui);
+            });
+        });
+        format!("{:?}", output.shapes)
+    };
+
+    let waiting = render(&mut dashboard);
+    assert!(waiting.contains("Points & Streak events waiting for a Twitch tab"));
+
+    dashboard.points_events_connected = true;
+    let connected = render(&mut dashboard);
+    assert!(connected.contains("Points & Streak events connected"));
+    assert!(!connected.contains("waiting for a Twitch tab"));
 }

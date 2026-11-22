@@ -75,6 +75,24 @@ pub enum BrowserPopupAction {
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+pub enum TwitchPointsEvent {
+    PointsEarned {
+        channel_id: String,
+        points_earned: u64,
+        balance: u64,
+        reason_code: String,
+    },
+    PointsSpent {
+        channel_id: String,
+        balance: u64,
+    },
+    ClaimAvailable {
+        channel_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum KnownBrowserMessage {
     Ready {
         #[serde(default)]
@@ -86,6 +104,13 @@ pub enum KnownBrowserMessage {
     },
     CommandAcknowledged {
         command_id: String,
+    },
+    PointsEventsStatus {
+        viewer_ids: Vec<String>,
+    },
+    PointsEvent {
+        viewer_id: String,
+        event: TwitchPointsEvent,
     },
     ExternalStreams {
         #[serde(deserialize_with = "deserialize_channel_counts")]
@@ -416,6 +441,85 @@ mod tests {
                 channel_id: None,
                 message: Some("legacy error".to_owned()),
                 close_reason: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn points_event_messages_decode_typed_payloads() {
+        let status = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "points_events_status",
+            "viewer_ids": ["viewer-123"],
+        }))
+        .unwrap();
+        assert_eq!(
+            status,
+            BrowserMessage::Known(KnownBrowserMessage::PointsEventsStatus {
+                viewer_ids: vec!["viewer-123".to_owned()],
+            }),
+        );
+
+        let event = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "points_event",
+            "viewer_id": "viewer-123",
+            "event": {
+                "type": "points_earned",
+                "channel_id": "channel-456",
+                "points_earned": 400,
+                "balance": 1400,
+                "reason_code": "WATCH_STREAK",
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            event,
+            BrowserMessage::Known(KnownBrowserMessage::PointsEvent {
+                viewer_id: "viewer-123".to_owned(),
+                event: super::TwitchPointsEvent::PointsEarned {
+                    channel_id: "channel-456".to_owned(),
+                    points_earned: 400,
+                    balance: 1400,
+                    reason_code: "WATCH_STREAK".to_owned(),
+                },
+            }),
+        );
+
+        let spent = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "points_event",
+            "viewer_id": "viewer-123",
+            "event": {
+                "type": "points_spent",
+                "channel_id": "98765",
+                "balance": 80,
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            spent,
+            BrowserMessage::Known(KnownBrowserMessage::PointsEvent {
+                viewer_id: "viewer-123".to_owned(),
+                event: super::TwitchPointsEvent::PointsSpent {
+                    channel_id: "98765".to_owned(),
+                    balance: 80,
+                },
+            }),
+        );
+        let claim = serde_json::from_value::<BrowserMessage>(json!({
+            "type": "points_event",
+            "viewer_id": "viewer-123",
+            "event": {
+                "type": "claim_available",
+                "channel_id": "98765",
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            claim,
+            BrowserMessage::Known(KnownBrowserMessage::PointsEvent {
+                viewer_id: "viewer-123".to_owned(),
+                event: super::TwitchPointsEvent::ClaimAvailable {
+                    channel_id: "98765".to_owned(),
+                },
             }),
         );
     }

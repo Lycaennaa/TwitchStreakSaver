@@ -85,6 +85,8 @@ impl Dashboard {
                     self.requeue_unacknowledged_browser_commands();
                     self.pending_stream_switch = None;
                     self.browser_connected = false;
+                    self.note_points_events_disconnection(Instant::now());
+                    self.points_events_error = None;
                     self.browser_command_ack_supported = false;
                     self.external_stream_counts.clear();
                     self.browser_open_streamer_names.clear();
@@ -254,6 +256,76 @@ impl Dashboard {
         match message {
             KnownBrowserMessage::CommandAcknowledged { command_id } => {
                 self.acknowledge_browser_command(command_id);
+            }
+            KnownBrowserMessage::PointsEventsStatus { viewer_ids } => {
+                if !matches!(
+                    &self.connection_status,
+                    TwitchConnectionStatus::Connected(_)
+                ) {
+                    return;
+                }
+                let Some(viewer_id) = self.twitch_user_id.as_deref() else {
+                    return;
+                };
+                let connected = viewer_ids.iter().any(|id| id == viewer_id);
+                let detail = (!connected && !viewer_ids.is_empty()).then(|| {
+                    "The browser's Twitch account does not match the app's connected account."
+                        .to_owned()
+                });
+                let _ = self.twitch_sender.send(TwitchUpdate::PointsEventsStatus {
+                    generation: self.connection_generation,
+                    connected,
+                    detail,
+                });
+            }
+            KnownBrowserMessage::PointsEvent { viewer_id, event } => {
+                if !matches!(
+                    &self.connection_status,
+                    TwitchConnectionStatus::Connected(_)
+                ) || self.twitch_user_id.as_deref() != Some(viewer_id.as_str())
+                {
+                    return;
+                }
+                let generation = self.connection_generation;
+                match event {
+                    TwitchPointsEvent::PointsEarned {
+                        channel_id,
+                        points_earned,
+                        balance,
+                        reason_code,
+                    } => {
+                        if reason_code == "WATCH_STREAK" {
+                            let _ = self.twitch_sender.send(TwitchUpdate::StreakCompleted {
+                                generation,
+                                channel_id: channel_id.clone(),
+                                points_earned,
+                            });
+                        }
+                        let _ = self.twitch_sender.send(TwitchUpdate::PointsEarned {
+                            generation,
+                            channel_id,
+                            points_earned,
+                            balance,
+                            reason_code,
+                        });
+                    }
+                    TwitchPointsEvent::PointsSpent {
+                        channel_id,
+                        balance,
+                    } => {
+                        let _ = self.twitch_sender.send(TwitchUpdate::PointsSpent {
+                            generation,
+                            channel_id,
+                            balance,
+                        });
+                    }
+                    TwitchPointsEvent::ClaimAvailable { channel_id } => {
+                        let _ = self.twitch_sender.send(TwitchUpdate::ClaimAvailable {
+                            generation,
+                            channel_id,
+                        });
+                    }
+                }
             }
             KnownBrowserMessage::PopupAction { request_id, action } => {
                 let (success, message) = self

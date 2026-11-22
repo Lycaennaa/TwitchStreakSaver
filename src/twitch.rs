@@ -1,22 +1,17 @@
 use crate::model::FollowedChannel;
-use crate::twitch_events::{parse_pubsub_frame, TwitchObservedEvent};
 use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
-use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc::Sender, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{connect, Error as WebSocketError, Message, WebSocket};
 use url::Url;
 mod api;
 pub mod connection;
 pub mod oauth;
-mod pubsub;
 
 const CLIENT_ID: &str = "phiay4sq36lfv9zu7cbqwz2ndnesfd8";
 const REDIRECT_URI: &str = "http://localhost:65432/redirect";
@@ -24,11 +19,6 @@ const OAUTH_URL: &str = "https://id.twitch.tv/oauth2/authorize";
 const VALIDATE_URL: &str = "https://id.twitch.tv/oauth2/validate";
 const FOLLOWED_URL: &str = "https://api.twitch.tv/helix/channels/followed";
 const STREAMS_URL: &str = "https://api.twitch.tv/helix/streams";
-const PUBSUB_URL: &str = "wss://pubsub-edge.twitch.tv/v1";
-const PUBSUB_READ_TIMEOUT: Duration = Duration::from_secs(2);
-const PUBSUB_PING_INTERVAL: Duration = Duration::from_secs(240);
-const PUBSUB_RECONNECT_INITIAL: Duration = Duration::from_secs(2);
-const PUBSUB_RECONNECT_MAX: Duration = Duration::from_secs(60);
 const REQUIRED_SCOPE: &str = "user:read:follows";
 const KEYRING_SERVICE: &str = "Twitch Streak Saver";
 const KEYRING_ACCOUNT: &str = "twitch-access-token";
@@ -59,6 +49,7 @@ pub enum TwitchUpdate {
     Connected {
         generation: u64,
         login: String,
+        user_id: String,
         channels: Vec<FollowedChannel>,
         live_channel_ids: HashSet<String>,
     },
@@ -77,7 +68,7 @@ pub enum TwitchUpdate {
         generation: u64,
         live_channel_ids: HashSet<String>,
     },
-    PubSubStatus {
+    PointsEventsStatus {
         generation: u64,
         connected: bool,
         detail: Option<String>,
@@ -201,24 +192,9 @@ mod tests {
     use super::{
         api::user_from_validation,
         oauth::{build_authorization_url, token_from_callback},
-        pubsub::{dispatch_pubsub_event, pubsub_listen_request},
-        OAuthCallback, TwitchUpdate, ValidateResponse, CLIENT_ID, REDIRECT_URI, REQUIRED_SCOPE,
+        OAuthCallback, ValidateResponse, CLIENT_ID, REDIRECT_URI, REQUIRED_SCOPE,
     };
-    use crate::twitch_events::TwitchObservedEvent;
-    use std::sync::mpsc;
 
-    #[test]
-    fn pubsub_subscription_listens_only_to_authenticated_user_topic() {
-        let request = pubsub_listen_request("viewer-123", "secret-token", "nonce-1");
-
-        assert_eq!(request["type"], "LISTEN");
-        assert_eq!(request["nonce"], "nonce-1");
-        assert_eq!(
-            request["data"]["topics"][0],
-            "community-points-user-v1.viewer-123"
-        );
-        assert_eq!(request["data"]["auth_token"], "secret-token");
-    }
     #[test]
     fn authorization_url_matches_streamlink_client_and_registered_callback() {
         let url = build_authorization_url("test-state").unwrap();
@@ -278,74 +254,5 @@ mod tests {
             scopes: vec![REQUIRED_SCOPE.to_owned()],
         };
         assert!(user_from_validation(wrong_client).is_err());
-    }
-    #[test]
-    fn pubsub_watch_streak_updates_balance_and_streak_completion() {
-        let (updates_sender, updates_receiver) = mpsc::channel();
-        dispatch_pubsub_event(
-            9,
-            TwitchObservedEvent::PointsEarned {
-                channel_id: "channel-1".to_owned(),
-                points_earned: 400,
-                balance: 1400,
-                reason_code: "WATCH_STREAK".to_owned(),
-            },
-            &updates_sender,
-        );
-
-        assert!(matches!(
-            updates_receiver.try_recv().unwrap(),
-            TwitchUpdate::StreakCompleted {
-                generation: 9,
-                channel_id,
-                points_earned: 400,
-            } if channel_id == "channel-1"
-        ));
-        assert!(matches!(
-            updates_receiver.try_recv().unwrap(),
-            TwitchUpdate::PointsEarned {
-                generation: 9,
-                channel_id,
-                points_earned: 400,
-                balance: 1400,
-                reason_code,
-            } if channel_id == "channel-1" && reason_code == "WATCH_STREAK"
-        ));
-    }
-
-    #[test]
-    fn pubsub_dispatches_spending_and_bonus_events_without_mutations() {
-        let (updates_sender, updates_receiver) = mpsc::channel();
-        dispatch_pubsub_event(
-            3,
-            TwitchObservedEvent::PointsSpent {
-                channel_id: "channel-2".to_owned(),
-                balance: 250,
-            },
-            &updates_sender,
-        );
-        dispatch_pubsub_event(
-            3,
-            TwitchObservedEvent::ClaimAvailable {
-                channel_id: "channel-2".to_owned(),
-            },
-            &updates_sender,
-        );
-
-        assert!(matches!(
-            updates_receiver.try_recv().unwrap(),
-            TwitchUpdate::PointsSpent {
-                generation: 3,
-                channel_id,
-                balance: 250,
-            } if channel_id == "channel-2"
-        ));
-        assert!(matches!(
-            updates_receiver.try_recv().unwrap(),
-            TwitchUpdate::ClaimAvailable {
-                generation: 3,
-                channel_id,
-            } if channel_id == "channel-2"
-        ));
     }
 }

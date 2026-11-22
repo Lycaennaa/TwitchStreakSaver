@@ -683,6 +683,16 @@ async function createExtension({
       tab.url = url;
       await Promise.all(onUpdated.dispatch(tabId, { url }, { ...tab }));
     },
+    async beginTabNavigation(tabId, url) {
+      const tab = tabsById.get(tabId);
+      if (!tab) throw new Error("No such tab");
+      tab.url = url;
+      tab.status = "loading";
+      await Promise.all(onUpdated.dispatch(tabId, {
+        status: "loading",
+        url,
+      }, { ...tab }));
+    },
     completeTab(tabId) {
       const tab = tabsById.get(tabId);
       if (!tab) throw new Error("No such tab");
@@ -719,10 +729,40 @@ async function createExtension({
         context,
       );
     },
+    reportPointsEventMessage(tabId, message, sender = {}) {
+      const documentToken = vm.runInContext(`pointsEventDocumentTokens.get(${tabId})`, context);
+      const payload = message.document_token === undefined
+        ? { ...message, document_token: documentToken }
+        : message;
+      return vm.runInContext(
+        `handlePointsEventMessage(${JSON.stringify(payload)}, ${JSON.stringify({
+          tab: { id: tabId },
+          frameId: 0,
+          url: "https://www.twitch.tv/streamer",
+          ...sender,
+        })})`,
+        context,
+      );
+    },
+    pointsEventDocumentToken(tabId) {
+      return vm.runInContext(`pointsEventDocumentTokens.get(${tabId})`, context);
+    },
+    markNativeSyncPending() {
+      vm.runInContext("syncedNativePort = null; channelSyncInProgress = true", context);
+    },
+    refreshPointsEventSources() {
+      return vm.runInContext("refreshPointsEventSources()", context);
+    },
     discard(tabId) {
       const tab = tabsById.get(tabId);
       tab.discarded = true;
       tab.status = "complete";
+    },
+    async discardTab(tabId) {
+      const tab = tabsById.get(tabId);
+      if (!tab) throw new Error("No such tab");
+      tab.discarded = true;
+      await Promise.all(onUpdated.dispatch(tabId, { discarded: true }, { ...tab }));
     },
     waitForFirstWindow: () => firstWindowStarted,
     releaseFirstWindow,
@@ -1546,12 +1586,15 @@ test("enabled raid redirects close managed streams and survive worker restarts",
 
   assert.equal(restarted.tabsById.has(21), false);
   assert.equal(restarted.tabsById.has(22), true);
-  assert.ok(restarted.calls.nativeMessages.some(
-    (message) => message.type === "tab_closed"
-      && message.channel_id === "channel-raid"
-      && message.surface === "player"
-      && message.close_reason === "raid_redirect",
-  ));
+  assert.ok(
+    restarted.calls.nativeMessages.some(
+      (message) => message.type === "tab_closed"
+        && message.channel_id === "channel-raid"
+        && message.surface === "player"
+        && message.close_reason === "raid_redirect",
+    ),
+    JSON.stringify(restarted.calls.nativeMessages),
+  );
 });
 
 test("worker restoration closes a managed tab already redirected by a raid", async () => {
@@ -3348,5 +3391,203 @@ test("Firefox event-page background scripts connect and restore", async () => {
     extension.calls.alarms.some(
       (alarm) => alarm.name === "twitch-streak-saver-native-host-sync",
     ),
+  );
+});
+test("forwards Points events only from a registered Twitch-page source", async () => {
+  const extension = await createExtension({
+    initialTabs: [{ id: 7, url: "https://www.twitch.tv/streamer" }],
+  });
+  await extension.send({ type: "bridge_ready" });
+  await extension.send({
+    type: "sync_channels",
+    channels: [],
+    viewer_login: "viewer",
+    close_on_raid_redirect: false,
+    adopt_existing_twitch_tabs: false,
+  });
+  await extension.refreshPointsEventSources();
+
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    sources: [{ source_id: "source-1", viewer_id: "12345" }],
+  });
+  const status = extension.calls.nativeMessages
+    .filter((message) => message.type === "points_events_status")
+    .at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(status)), {
+    type: "points_events_status",
+    viewer_ids: ["12345"],
+  });
+  extension.markNativeSyncPending();
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    sources: [{ source_id: "source-1", viewer_id: "12345" }],
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(extension.calls.nativeMessages
+      .filter((message) => message.type === "points_events_status")
+      .at(-1))),
+    { type: "points_events_status", viewer_ids: ["12345"] },
+  );
+  await extension.refreshPointsEventSources();
+
+  const pointsEvent = {
+    type: "points_event",
+    source_id: "source-1",
+    viewer_id: "12345",
+    event: {
+      type: "points_earned",
+      channel_id: "98765",
+      points_earned: 400,
+      balance: 1400,
+      reason_code: "WATCH_STREAK",
+    },
+  };
+  extension.reportPointsEventMessage(7, pointsEvent);
+  const forwardedEvents = extension.calls.nativeMessages
+    .filter((message) => message.type === "points_event");
+  assert.deepEqual(JSON.parse(JSON.stringify(forwardedEvents)), [{
+    type: "points_event",
+    viewer_id: "12345",
+    event: pointsEvent.event,
+  }]);
+
+  extension.reportPointsEventMessage(7, { ...pointsEvent, source_id: "unknown-source" });
+  extension.reportPointsEventMessage(7, { ...pointsEvent, viewer_id: "54321" });
+  extension.reportPointsEventMessage(7, pointsEvent, { frameId: 2 });
+  extension.reportPointsEventMessage(7, pointsEvent, { url: "https://example.invalid/" });
+  assert.equal(
+    extension.calls.nativeMessages.filter((message) => message.type === "points_event").length,
+    1,
+  );
+});
+test("rejects stale Points sources and events after same-host document navigation", async () => {
+  const extension = await createExtension({
+    initialTabs: [{ id: 7, url: "https://www.twitch.tv/streamer" }],
+  });
+  await extension.send({ type: "bridge_ready" });
+  await extension.send({
+    type: "sync_channels",
+    channels: [],
+    viewer_login: "viewer",
+    close_on_raid_redirect: false,
+    adopt_existing_twitch_tabs: false,
+  });
+  await extension.refreshPointsEventSources();
+  const oldDocumentToken = extension.pointsEventDocumentToken(7);
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    sources: [{ source_id: "old-source", viewer_id: "12345" }],
+  });
+
+  await extension.beginTabNavigation(7, "https://www.twitch.tv/another");
+  const statusMessages = () => extension.calls.nativeMessages
+    .filter((message) => message.type === "points_events_status");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: [] },
+  );
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    document_token: oldDocumentToken,
+    sources: [{ source_id: "old-source", viewer_id: "12345" }],
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: [] },
+  );
+
+  await extension.completeTab(7);
+  const newDocumentToken = extension.pointsEventDocumentToken(7);
+  assert.notEqual(newDocumentToken, oldDocumentToken);
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    document_token: oldDocumentToken,
+    sources: [{ source_id: "stale-source", viewer_id: "12345" }],
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: [] },
+  );
+
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    document_token: newDocumentToken,
+    sources: [{ source_id: "new-source", viewer_id: "54321" }],
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: ["54321"] },
+  );
+
+  const pointsEvent = {
+    type: "points_event",
+    document_token: oldDocumentToken,
+    source_id: "new-source",
+    viewer_id: "54321",
+    event: { type: "points_earned", channel_id: "98765", points_earned: 50, balance: 1400, reason_code: "CLAIM" },
+  };
+  extension.reportPointsEventMessage(7, pointsEvent);
+  assert.equal(
+    extension.calls.nativeMessages.filter((message) => message.type === "points_event").length,
+    0,
+  );
+});
+test("clears Points sources when a Twitch tab is discarded", async () => {
+  const extension = await createExtension({
+    initialTabs: [{ id: 7, url: "https://www.twitch.tv/streamer" }],
+  });
+  await extension.send({ type: "bridge_ready" });
+  await extension.send({
+    type: "sync_channels",
+    channels: [],
+    viewer_login: "viewer",
+    close_on_raid_redirect: false,
+    adopt_existing_twitch_tabs: false,
+  });
+  await extension.refreshPointsEventSources();
+  const oldDocumentToken = extension.pointsEventDocumentToken(7);
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    sources: [{ source_id: "source-1", viewer_id: "12345" }],
+  });
+
+  const statusMessages = () => extension.calls.nativeMessages
+    .filter((message) => message.type === "points_events_status");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: ["12345"] },
+  );
+  await extension.discardTab(7);
+  assert.equal(extension.pointsEventDocumentToken(7), undefined);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: [] },
+  );
+
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    document_token: oldDocumentToken,
+    sources: [{ source_id: "source-1", viewer_id: "12345" }],
+  });
+  await extension.refreshPointsEventSources();
+  assert.equal(extension.pointsEventDocumentToken(7), undefined);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: [] },
+  );
+
+  extension.tabsById.get(7).discarded = false;
+  await extension.completeTab(7);
+  const newDocumentToken = extension.pointsEventDocumentToken(7);
+  assert.notEqual(newDocumentToken, oldDocumentToken);
+  extension.reportPointsEventMessage(7, {
+    type: "points_event_sources",
+    document_token: newDocumentToken,
+    sources: [{ source_id: "source-2", viewer_id: "54321" }],
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(statusMessages().at(-1))),
+    { type: "points_events_status", viewer_ids: ["54321"] },
   );
 });

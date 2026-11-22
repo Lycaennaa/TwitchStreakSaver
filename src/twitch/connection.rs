@@ -1,6 +1,5 @@
 use super::api::{build_client, fetch_followed_channels, fetch_live_channel_ids};
 use super::oauth::{clear_keyring_token, obtain_token};
-use super::pubsub::run_pubsub_listener;
 use super::*;
 pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<TwitchUpdate>) {
     let client = match build_client() {
@@ -56,38 +55,13 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
         .send(TwitchUpdate::Connected {
             generation,
             login: user.login.clone(),
+            user_id: user.id.clone(),
             channels: channels.clone(),
             live_channel_ids: live_channel_ids.clone(),
         })
         .is_err()
     {
         return;
-    }
-
-    let pubsub_cancel = Arc::new(AtomicBool::new(false));
-    let worker_cancel = Arc::clone(&pubsub_cancel);
-    let pubsub_updates = updates.clone();
-    let pubsub_token = token.clone();
-    let pubsub_user_id = user.id.clone();
-    if let Err(error) = thread::Builder::new()
-        .name("twitch-pubsub-listener".to_owned())
-        .spawn(move || {
-            run_pubsub_listener(
-                worker_cancel,
-                generation,
-                pubsub_user_id,
-                pubsub_token,
-                pubsub_updates,
-            )
-        })
-    {
-        let _ = updates.send(TwitchUpdate::PubSubStatus {
-            generation,
-            connected: false,
-            detail: Some(format!(
-                "Could not start Channel Points/Streak event listener: {error}"
-            )),
-        });
     }
 
     let mut last_live_refresh = Instant::now();
@@ -230,7 +204,6 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
             last_follow_refresh = Instant::now();
         }
     }
-    pubsub_cancel.store(true, Ordering::Release);
 }
 fn next_retry_delay(current: Duration) -> Duration {
     current.saturating_mul(2).min(NETWORK_RETRY_MAX)

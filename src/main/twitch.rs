@@ -6,10 +6,10 @@ impl Dashboard {
             cancel.store(true, Ordering::Release);
         }
         let now = Instant::now();
-        if self.pubsub_connected {
-            self.note_pubsub_disconnection(now);
+        if self.points_events_connected {
+            self.note_points_events_disconnection(now);
         } else {
-            self.note_pubsub_gap(now);
+            self.note_points_events_gap(now);
         }
         self.connection_generation = self.connection_generation.wrapping_add(1);
         if let Some(bridge) = &self.browser_bridge {
@@ -22,6 +22,8 @@ impl Dashboard {
         let worker_cancel = Arc::clone(&cancel);
         let updates = self.twitch_sender.clone();
         self.connection_status = TwitchConnectionStatus::Connecting;
+        self.points_events_error = None;
+        self.twitch_user_id = None;
         self.connection_error = None;
         self.twitch_network_errors.clear();
         self.twitch_network_unavailable = false;
@@ -43,7 +45,7 @@ impl Dashboard {
         if let Some(cancel) = self.twitch_cancel.take() {
             cancel.store(true, Ordering::Release);
         }
-        self.note_pubsub_disconnection(Instant::now());
+        self.note_points_events_disconnection(Instant::now());
         self.connection_generation = self.connection_generation.wrapping_add(1);
         if let Some(bridge) = &self.browser_bridge {
             bridge.set_recovery_generation(self.connection_generation);
@@ -56,8 +58,9 @@ impl Dashboard {
         self.pending_manual_open_inventory_wait_since = None;
         self.pending_reload_command = None;
         self.pending_manual_open_command = None;
-        self.pubsub_connected = false;
-        self.pubsub_error = None;
+        self.points_events_connected = false;
+        self.twitch_user_id = None;
+        self.points_events_error = None;
         self.live_channel_ids.clear();
         self.streak_completed.clear();
         self.notified_streak_channels.clear();
@@ -89,6 +92,9 @@ impl Dashboard {
             bridge.set_recovery_generation(self.connection_generation);
         }
         self.connection_status = TwitchConnectionStatus::Disconnected;
+        self.note_points_events_disconnection(Instant::now());
+        self.points_events_error = None;
+        self.twitch_user_id = None;
         self.twitch_network_unavailable = false;
         self.reload_managed_player_tabs_pending = false;
         self.pending_manual_open = false;
@@ -122,14 +128,14 @@ impl Dashboard {
             .retain(|channel_id| followed_ids.contains(channel_id.as_str()));
     }
 
-    pub(super) fn note_pubsub_gap(&mut self, now: Instant) {
-        self.pubsub_missed_events_since.get_or_insert(now);
-        self.pubsub_connected = false;
+    pub(super) fn note_points_events_gap(&mut self, now: Instant) {
+        self.points_events_missed_events_since.get_or_insert(now);
+        self.points_events_connected = false;
     }
 
-    fn note_pubsub_disconnection(&mut self, now: Instant) {
-        self.note_pubsub_gap(now);
-        self.pubsub_state_confirmed_at = Some(now);
+    pub(super) fn note_points_events_disconnection(&mut self, now: Instant) {
+        self.note_points_events_gap(now);
+        self.points_events_state_confirmed_at = Some(now);
     }
 
     fn note_twitch_network_unavailable(&mut self, source: TwitchNetworkSource, message: String) {
@@ -172,6 +178,7 @@ impl Dashboard {
                 TwitchUpdate::Connected {
                     generation,
                     login,
+                    user_id,
                     channels,
                     live_channel_ids,
                 } if generation == self.connection_generation => {
@@ -184,6 +191,7 @@ impl Dashboard {
                         .retain(|channel_id| live_channel_ids.contains(channel_id));
                     self.live_channel_ids = live_channel_ids;
                     self.connection_status = TwitchConnectionStatus::Connected(login);
+                    self.twitch_user_id = Some(user_id);
                     self.connection_error = None;
                     self.clear_offline_raid_redirects();
                     self.sync_extension_channels();
@@ -239,22 +247,22 @@ impl Dashboard {
                     self.live_channel_ids = live_channel_ids;
                     self.clear_offline_raid_redirects();
                 }
-                TwitchUpdate::PubSubStatus {
+                TwitchUpdate::PointsEventsStatus {
                     generation,
                     connected,
                     detail,
                 } if generation == self.connection_generation => {
                     let now = Instant::now();
                     if connected {
-                        self.pubsub_state_confirmed_at = Some(now);
+                        self.points_events_state_confirmed_at = Some(now);
                     } else {
-                        self.note_pubsub_disconnection(now);
+                        self.note_points_events_disconnection(now);
                     }
-                    if connected && !self.pubsub_connected {
+                    if connected && !self.points_events_connected {
                         self.available_claim_channels.clear();
                     }
-                    self.pubsub_connected = connected;
-                    self.pubsub_error = detail;
+                    self.points_events_connected = connected;
+                    self.points_events_error = detail;
                 }
                 TwitchUpdate::NetworkUnavailable {
                     generation,
@@ -268,7 +276,7 @@ impl Dashboard {
                     channel_id,
                     points_earned,
                 } if generation == self.connection_generation => {
-                    self.pubsub_last_event_at = Some(Instant::now());
+                    self.points_events_last_event_at = Some(Instant::now());
                     if let Some(channel_name) = self
                         .channels
                         .iter()
@@ -293,6 +301,7 @@ impl Dashboard {
                         }
                     }
                 }
+
                 TwitchUpdate::PointsEarned {
                     generation,
                     channel_id,
@@ -300,7 +309,7 @@ impl Dashboard {
                     balance,
                     reason_code,
                 } if generation == self.connection_generation => {
-                    self.pubsub_last_event_at = Some(Instant::now());
+                    self.points_events_last_event_at = Some(Instant::now());
                     let Some(channel_name) = self
                         .channels
                         .iter()
@@ -331,7 +340,7 @@ impl Dashboard {
                     channel_id,
                     balance,
                 } if generation == self.connection_generation => {
-                    self.pubsub_last_event_at = Some(Instant::now());
+                    self.points_events_last_event_at = Some(Instant::now());
                     let Some(channel_name) = self
                         .channels
                         .iter()
@@ -353,7 +362,7 @@ impl Dashboard {
                     generation,
                     channel_id,
                 } if generation == self.connection_generation => {
-                    self.pubsub_last_event_at = Some(Instant::now());
+                    self.points_events_last_event_at = Some(Instant::now());
                     let Some(channel_name) = self
                         .channels
                         .iter()
@@ -390,12 +399,13 @@ impl Dashboard {
                     self.pending_manual_open_inventory_wait_since = None;
                     self.pending_reload_command = None;
                     self.pending_manual_open_command = None;
-                    self.note_pubsub_disconnection(Instant::now());
+                    self.note_points_events_disconnection(Instant::now());
+                    self.twitch_user_id = None;
                     self.twitch_cancel = None;
                     self.connection_status = TwitchConnectionStatus::Disconnected;
                     self.live_channel_ids.clear();
-                    self.pubsub_connected = false;
-                    self.pubsub_error = None;
+                    self.points_events_connected = false;
+                    self.points_events_error = None;
                     self.streak_completed.clear();
                     self.notified_streak_channels.clear();
                     self.queue_planner = QueuePlanner::default();

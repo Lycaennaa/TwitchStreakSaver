@@ -21,6 +21,8 @@ let externalScanGeneration = 0;
 let channelsById = new Map();
 let syncedExistingTabAdoption = false;
 let channelSyncInProgress = false;
+const pointsEventSources = new Map();
+const pointsEventDocumentTokens = new Map();
 let nativeCommandQueue = Promise.resolve();
 const MAX_CONCURRENT_CHANNEL_OPENS = 2;
 const MAX_COMPLETED_NATIVE_COMMAND_IDS = 128;
@@ -350,6 +352,105 @@ function sendNative(message) {
     handleNativePortDisconnect(port, error);
   }
 }
+function isTwitchPointsTab(url) {
+  try {
+    return new URL(url).hostname === "www.twitch.tv";
+  } catch {
+    return false;
+  }
+}
+
+function reportPointsEventsStatus() {
+  if (!nativePort || nativeBridgeReadyPort !== nativePort) return;
+  const viewerIds = new Set();
+  for (const sources of pointsEventSources.values()) {
+    for (const viewerId of sources.values()) viewerIds.add(viewerId);
+  }
+  sendNative({ type: "points_events_status", viewer_ids: Array.from(viewerIds) });
+}
+
+function setPointsEventSources(tabId, rawSources, reportStatus = true) {
+  const sources = new Map();
+  for (const source of Array.isArray(rawSources) ? rawSources.slice(0, 64) : []) {
+    if (
+      typeof source?.source_id === "string"
+      && source.source_id.length > 0
+      && source.source_id.length <= 128
+      && typeof source.viewer_id === "string"
+      && /^\d{1,32}$/.test(source.viewer_id)
+    ) {
+      sources.set(source.source_id, source.viewer_id);
+    }
+  }
+  pointsEventSources.set(tabId, sources);
+  if (reportStatus) reportPointsEventsStatus();
+}
+
+async function refreshPointsEventSources(sourcePort = nativePort, onlyTabId = null) {
+  if (!sourcePort || nativePort !== sourcePort) return;
+  let tabs;
+  try {
+    tabs = await browserApi.tabs.query({ url: "https://www.twitch.tv/*" });
+  } catch {
+    return;
+  }
+  for (const tab of tabs) {
+    if (
+      !Number.isInteger(tab.id)
+      || tab.status !== "complete"
+      || tab.discarded === true
+      || !isTwitchPointsTab(tab.url)
+      || (onlyTabId !== null && tab.id !== onlyTabId)
+    ) continue;
+    if (nativePort !== sourcePort) return;
+    const documentToken = pointsEventDocumentTokens.get(tab.id) ?? crypto.randomUUID();
+    pointsEventDocumentTokens.set(tab.id, documentToken);
+    let previousSources = pointsEventSources.get(tab.id);
+    if (!previousSources) {
+      previousSources = new Map();
+      pointsEventSources.set(tab.id, previousSources);
+    }
+    let response = null;
+    try {
+      response = await browserApi.tabs.sendMessage(tab.id, {
+        type: "get_points_event_sources",
+        document_token: documentToken,
+      });
+    } catch {}
+    if (nativePort !== sourcePort) return;
+    if (
+      pointsEventDocumentTokens.get(tab.id) !== documentToken
+      || pointsEventSources.get(tab.id) !== previousSources
+      || response?.document_token !== documentToken
+      || !Array.isArray(response.sources)
+    ) continue;
+    setPointsEventSources(tab.id, response.sources, false);
+  }
+  reportPointsEventsStatus();
+}
+
+function handlePointsEventMessage(message, sender) {
+  const tabId = sender?.tab?.id;
+  if (sender?.frameId !== 0 || !Number.isInteger(tabId) || !isTwitchPointsTab(sender.url)) return;
+  const documentToken = pointsEventDocumentTokens.get(tabId);
+  if (!documentToken || message?.document_token !== documentToken) return;
+  if (message?.type === "points_event_sources") {
+    setPointsEventSources(tabId, message.sources);
+    return;
+  }
+  if (
+    message?.type !== "points_event"
+    || !nativePort
+    || nativeBridgeReadyPort !== nativePort
+    || pointsEventSources.get(tabId)?.get(message.source_id) !== message.viewer_id
+    || !["points_earned", "points_spent", "claim_available"].includes(message.event?.type)
+  ) return;
+  sendNative({
+    type: "points_event",
+    viewer_id: message.viewer_id,
+    event: message.event,
+  });
+}
 
 async function acknowledgeNativeCommand(message, sourcePort) {
   const commandId = message?.command_id;
@@ -500,6 +601,7 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
           });
         }
       }
+      void refreshPointsEventSources(sourcePort);
       scheduleExternalStreamReport();
       break;
     }
@@ -824,6 +926,10 @@ browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "popup_action") {
     return handlePopupActionRequest(message, sendResponse);
   }
+  if (message?.type === "points_event_sources" || message?.type === "points_event") {
+    handlePointsEventMessage(message, sender);
+    return false;
+  }
   if (message?.type === "channel_status") {
     void forwardChannelState(message, sender).catch((error) => {
       console.warn("Could not process a browser channel status.", error);
@@ -877,6 +983,8 @@ browserApi.tabs.onAttached.addListener(async (tabId, attachInfo) => {
 
 browserApi.tabs.onRemoved.addListener(async (tabId) => {
   TwitchManagedTabs.deletePendingIdentityCheck(tabId);
+  pointsEventDocumentTokens.delete(tabId);
+  if (pointsEventSources.delete(tabId)) reportPointsEventsStatus();
   if (TwitchManagedTabs.isClosingTab(tabId)) return;
   void TwitchManagedTabs.forgetManagedTabOwner(tabId);
   for (const [channelId, record] of TwitchManagedTabs.recordEntries()) {
@@ -895,9 +1003,26 @@ browserApi.tabs.onRemoved.addListener(async (tabId) => {
 
 
 
-browserApi.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+browserApi.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
+  const invalidatesPointsDocument = changeInfo.status === "loading"
+    || changeInfo.discarded === true
+    || tab?.discarded === true
+    || (changeInfo.url && !isTwitchPointsTab(changeInfo.url));
+  if (invalidatesPointsDocument) {
+    pointsEventDocumentTokens.delete(tabId);
+    if (pointsEventSources.delete(tabId)) reportPointsEventsStatus();
+  }
   await restorePromise;
+  if (
+    changeInfo.status === "complete"
+    && isTwitchPointsTab(changeInfo.url || tab?.url)
+  ) {
+    if (!pointsEventDocumentTokens.has(tabId)) {
+      pointsEventDocumentTokens.set(tabId, crypto.randomUUID());
+    }
+    void refreshPointsEventSources(nativePort, tabId);
+  }
   if (changeInfo.url) scheduleExternalStreamReport();
   if (changeInfo.status === "complete" && TwitchManagedTabs.hasPendingIdentityCheck(tabId)) {
     const identity = await TwitchManagedTabs.readManagedTabIdentity(tabId);

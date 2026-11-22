@@ -32,11 +32,11 @@ impl Dashboard {
         let has_no_channels = self.channels.is_empty();
         let filtered_indices =
             followed_channel_search_indices(&self.channels, &self.followed_search);
-        let pubsub_error = self.pubsub_error.clone();
+        let points_events_error = self.points_events_error.clone();
         let twitch_baseline_confirmed_at = self.twitch_baseline_confirmed_at;
-        let pubsub_state_confirmed_at = self.pubsub_state_confirmed_at;
-        let pubsub_last_event_at = self.pubsub_last_event_at;
-        let pubsub_missed_events_since = self.pubsub_missed_events_since;
+        let points_events_state_confirmed_at = self.points_events_state_confirmed_at;
+        let points_events_last_event_at = self.points_events_last_event_at;
+        let points_events_missed_events_since = self.points_events_missed_events_since;
         let streak_completed = &self.streak_completed;
         let points_balances = &self.channel_points_balances;
         let mut open_selected = false;
@@ -86,32 +86,32 @@ impl Dashboard {
                 });
                 ui.horizontal_wrapped(|ui| {
                     if hide_sensitive_info {
-                        ui.label("Live-status and PubSub timing hidden during screenshot privacy.");
+                        ui.label("Live-status and Points event timing hidden during screenshot privacy.");
                     } else {
                     ui.label(format!(
                         "Twitch live status last confirmed {}",
                         freshness_age(twitch_baseline_confirmed_at)
                     ));
                     ui.label(format!(
-                        "PubSub state last confirmed {}",
-                        freshness_age(pubsub_state_confirmed_at)
+                        "Points event source last confirmed {}",
+                        freshness_age(points_events_state_confirmed_at)
                     ));
-                    if let Some(last_event_at) = pubsub_last_event_at {
+                    if let Some(last_event_at) = points_events_last_event_at {
                         ui.label(format!(
-                            "Last PubSub event observed {}",
+                            "Last Points/Streak event observed {}",
                             freshness_age(Some(last_event_at))
                         ));
                     } else {
-                        ui.label("No PubSub events observed this session");
+                        ui.label("No Points/Streak events observed this session");
                     }
                     }
                 });
                 if !hide_sensitive_info {
-                if let Some(gap_started_at) = pubsub_missed_events_since {
+                if let Some(gap_started_at) = points_events_missed_events_since {
                     ui.colored_label(
                         egui::Color32::YELLOW,
                         format!(
-                            "PubSub monitoring gap started {}; events may have been missed. Reconnecting does not restore event history.",
+                            "Points/Streak event monitoring gap started {}; events may have been missed. Reconnecting does not restore event history.",
                             freshness_age(Some(gap_started_at))
                         ),
                     );
@@ -121,7 +121,7 @@ impl Dashboard {
                     "Separate player tabs are muted by default; select Unmuted to start with audio.",
                 );
 
-                if let Some(error) = &pubsub_error {
+                if let Some(error) = &points_events_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("Points events: {error}"));
                 }
                 if !hide_sensitive_info {

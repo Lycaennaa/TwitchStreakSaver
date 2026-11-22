@@ -59,13 +59,13 @@ impl Dashboard {
                     "Browser not connected"
                 },
             );
-            ui.label(if self.pubsub_connected {
+            ui.label(if self.points_events_connected {
                 "Points & Streak events connected"
             } else if matches!(
                 &self.connection_status,
                 TwitchConnectionStatus::Connected(_)
             ) {
-                "Points & Streak events reconnecting"
+                "Points & Streak events waiting for a Twitch tab"
             } else {
                 "Points & Streak events disconnected"
             });
