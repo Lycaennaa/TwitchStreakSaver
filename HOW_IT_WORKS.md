@@ -24,6 +24,8 @@ The in-app activity log retains the most recent 500 events locally across launch
 
 **Select all** buttons continue to apply to every followed channel regardless of the current search. The separate **Select matching** buttons affect only followed channels matching the search (with an empty search, all followed channels match). Each button toggles to **Unselect all** or **Unselect matching** once every channel in its scope has the option selected; unselecting affects only that scope.
 
+The **Mute all** / **Unmute all** button applies to every followed channel regardless of the search. It unmutes all channels unless every channel is already unmuted, in which case it mutes all.
+
 ## Browser extension and stream automation
 
 **Preferred stream quality** is chosen in the Rust desktop app under **Stream quality**. It defaults to 160p to save bandwidth and applies automatically to Twitch player pages. Choose 160p, 360p, 480p, 720p, 1080p, Source, or Twitch Auto; if a rendition is unavailable, the extension chooses the lowest available quality. Saved quality and per-channel **Unmuted** preferences apply to open Twitch pages and are restored after reload. Refresh already-open Twitch pages after upgrading extension version 0.3.18.

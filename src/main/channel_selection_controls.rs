@@ -15,13 +15,15 @@ pub(super) fn selection_bulk_controls(
     ui: &mut egui::Ui,
     channels: &mut [FollowedChannel],
     matching_indices: &[usize],
-) -> [egui::Response; 4] {
+) -> [egui::Response; 5] {
     let all_channels_enabled = !channels.is_empty();
     let matching_channels_enabled = !matching_indices.is_empty();
     let all_points_selected =
         all_channels_enabled && channels.iter().all(|channel| channel.selection.points);
     let all_streaks_selected =
         all_channels_enabled && channels.iter().all(|channel| channel.selection.streak);
+    let all_channels_unmuted =
+        all_channels_enabled && channels.iter().all(|channel| channel.unmuted);
     let all_matching_points_selected = matching_channels_enabled
         && matching_indices
             .iter()
@@ -68,6 +70,23 @@ pub(super) fn selection_bulk_controls(
                 channel.selection.streak = !all_streaks_selected;
             }
         }
+        let all_audio_label = if all_channels_unmuted {
+            "Mute all"
+        } else {
+            "Unmute all"
+        };
+        let all_audio = ui.add_enabled(all_channels_enabled, egui::Button::new(all_audio_label));
+        let set_all_unmuted = all_audio.clicked();
+        let all_audio = all_audio.on_hover_text(if all_channels_unmuted {
+            "Mute all followed channels, regardless of the current search."
+        } else {
+            "Unmute all followed channels, regardless of the current search."
+        });
+        if set_all_unmuted {
+            for channel in channels.iter_mut() {
+                channel.unmuted = !all_channels_unmuted;
+            }
+        }
 
         let matching_points_label = if all_matching_points_selected {
             "Unselect matching Points"
@@ -111,7 +130,13 @@ pub(super) fn selection_bulk_controls(
             }
         }
 
-        [all_points, all_streaks, matching_points, matching_streaks]
+        [
+            all_points,
+            all_streaks,
+            all_audio,
+            matching_points,
+            matching_streaks,
+        ]
     })
     .inner
 }
@@ -124,7 +149,7 @@ mod tests {
         channels: &mut [FollowedChannel],
         matching_indices: &[usize],
         events: Vec<egui::Event>,
-    ) -> [egui::Rect; 4] {
+    ) -> [egui::Rect; 5] {
         let mut button_rects = None;
         let _ = context.run(
             egui::RawInput {
@@ -137,11 +162,12 @@ mod tests {
             },
             |context| {
                 egui::CentralPanel::default().show(context, |ui| {
-                    let [all_points, all_streaks, matching_points, matching_streaks] =
+                    let [all_points, all_streaks, all_audio, matching_points, matching_streaks] =
                         selection_bulk_controls(ui, channels, matching_indices);
                     button_rects = Some([
                         all_points.rect,
                         all_streaks.rect,
+                        all_audio.rect,
                         matching_points.rect,
                         matching_streaks.rect,
                     ]);
@@ -267,6 +293,24 @@ mod tests {
     }
 
     #[test]
+    fn all_audio_bulk_button_sets_every_channel_to_the_opposite_uniform_state() {
+        let mut first = FollowedChannel::new("first", "First");
+        first.unmuted = true;
+        let hidden = FollowedChannel::new("hidden", "Hidden");
+        let mut channels = vec![first, hidden];
+        let matching_indices = [0];
+        let context = egui::Context::default();
+
+        click_button(&context, &mut channels, &matching_indices, 2);
+
+        assert!(channels.iter().all(|channel| channel.unmuted));
+
+        click_button(&context, &mut channels, &matching_indices, 2);
+
+        assert!(channels.iter().all(|channel| !channel.unmuted));
+    }
+
+    #[test]
     fn matching_bulk_buttons_only_toggle_channels_matching_the_search() {
         let mut first = FollowedChannel::new("first", "First");
         first.selection.streak = true;
@@ -277,27 +321,27 @@ mod tests {
         assert_eq!(matching_indices, vec![0, 2]);
         let context = egui::Context::default();
 
-        click_button(&context, &mut channels, &matching_indices, 2);
+        click_button(&context, &mut channels, &matching_indices, 3);
 
         assert!(channels[0].selection.points);
         assert!(!channels[1].selection.points);
         assert!(channels[2].selection.points);
 
         channels[1].selection.points = true;
-        click_button(&context, &mut channels, &matching_indices, 2);
+        click_button(&context, &mut channels, &matching_indices, 3);
 
         assert!(!channels[0].selection.points);
         assert!(channels[1].selection.points);
         assert!(!channels[2].selection.points);
 
-        click_button(&context, &mut channels, &matching_indices, 3);
+        click_button(&context, &mut channels, &matching_indices, 4);
 
         assert!(channels[0].selection.streak);
         assert!(!channels[1].selection.streak);
         assert!(channels[2].selection.streak);
 
         channels[1].selection.streak = true;
-        click_button(&context, &mut channels, &matching_indices, 3);
+        click_button(&context, &mut channels, &matching_indices, 4);
 
         assert!(!channels[0].selection.streak);
         assert!(channels[1].selection.streak);

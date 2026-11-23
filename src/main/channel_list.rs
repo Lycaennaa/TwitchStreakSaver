@@ -24,7 +24,6 @@ impl Dashboard {
             TwitchConnectionStatus::Connected(_)
         );
         let browser_connected = self.browser_connected;
-        let external_inventory_received = self.external_inventory_received;
         let has_sample_data = self
             .channels
             .iter()
@@ -74,7 +73,11 @@ impl Dashboard {
                 if hide_sensitive_info {
                     ui.label("Bulk channel controls hidden during screenshot privacy.");
                 } else {
-                    let _ = selection_bulk_controls(ui, channels, &filtered_indices);
+                    let [_, _, all_audio, _, _] =
+                        selection_bulk_controls(ui, channels, &filtered_indices);
+                    if all_audio.clicked() {
+                        unmuted_changed = true;
+                    }
                 }
                 ui.horizontal_wrapped(|ui| {
                     open_selected = ui
