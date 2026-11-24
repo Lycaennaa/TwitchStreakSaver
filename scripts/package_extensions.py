@@ -183,7 +183,15 @@ def main() -> None:
                 shutil.copy2(SOURCE / relative, destination)
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as package:
             for relative in sorted(files):
-                package.write(staging / relative, arcname=relative.as_posix())
+                package.write(
+                    staging / relative,
+                    arcname=relative.as_posix(),
+                    compress_type=(
+                        zipfile.ZIP_STORED
+                        if relative.suffix == ".png"
+                        else zipfile.ZIP_DEFLATED
+                    ),
+                )
             bad_entry = package.testzip()
             if bad_entry is not None:
                 raise ValueError(
