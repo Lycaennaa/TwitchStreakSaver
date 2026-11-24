@@ -430,6 +430,8 @@ struct Dashboard {
     automation_enabled: bool,
     automation_delays: automation::AutomationDelays,
     channels: Vec<FollowedChannel>,
+    followed_channels_by_account: HashMap<String, Vec<FollowedChannel>>,
+    followed_channels_account_id: Option<String>,
     followed_search: String,
     started_at: Instant,
     connection_status: TwitchConnectionStatus,
@@ -561,6 +563,8 @@ impl Dashboard {
             automation_enabled: preferences.auto_start_on_launch,
             automation_delays: automation::AutomationDelays::default(),
             channels: preferences.channels,
+            followed_channels_by_account: preferences.followed_channels_by_account,
+            followed_channels_account_id: preferences.followed_channels_account_id,
             followed_search: String::new(),
             started_at: Instant::now(),
             connection_status: TwitchConnectionStatus::Disconnected,
@@ -628,6 +632,11 @@ impl Dashboard {
     }
 
     fn preferences(&self) -> AppPreferences {
+        let mut followed_channels_by_account = self.followed_channels_by_account.clone();
+        if let Some(account_id) = &self.followed_channels_account_id {
+            followed_channels_by_account.insert(account_id.clone(), self.channels.clone());
+        }
+
         AppPreferences {
             auto_start_on_launch: self.auto_start_on_launch,
             close_to_tray_on_close: self.close_to_tray_on_close,
@@ -640,6 +649,8 @@ impl Dashboard {
             browser_launch_target: self.browser_launch_target.clone(),
             browser_profile_data_directories: self.browser_profile_data_directories.clone(),
             channels: self.channels.clone(),
+            followed_channels_by_account,
+            followed_channels_account_id: self.followed_channels_account_id.clone(),
         }
     }
 }

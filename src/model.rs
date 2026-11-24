@@ -103,6 +103,31 @@ pub fn merge_followed_channels(
         })
         .collect()
 }
+pub fn merge_followed_channels_for_account(
+    current: &[FollowedChannel],
+    current_account_id: &mut Option<String>,
+    channels_by_account: &mut std::collections::HashMap<String, Vec<FollowedChannel>>,
+    account_id: &str,
+    incoming: Vec<FollowedChannel>,
+) -> Vec<FollowedChannel> {
+    let preferences = match current_account_id.as_deref() {
+        Some(active_account_id) if active_account_id == account_id => current,
+        Some(active_account_id) => {
+            channels_by_account.insert(active_account_id.to_owned(), current.to_vec());
+            channels_by_account
+                .get(account_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        }
+        None => channels_by_account
+            .get(account_id)
+            .map(Vec::as_slice)
+            .unwrap_or(current),
+    };
+    let channels = merge_followed_channels(preferences, incoming);
+    *current_account_id = Some(account_id.to_owned());
+    channels
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +194,10 @@ pub struct AppPreferences {
     pub browser_launch_target: Option<BrowserLaunchTarget>,
     pub browser_profile_data_directories: Vec<(BrowserKind, String)>,
     pub channels: Vec<FollowedChannel>,
+    #[serde(default)]
+    pub followed_channels_by_account: std::collections::HashMap<String, Vec<FollowedChannel>>,
+    #[serde(default)]
+    pub followed_channels_account_id: Option<String>,
 }
 
 impl Default for AppPreferences {
@@ -189,6 +218,8 @@ impl Default for AppPreferences {
                 FollowedChannel::new("sample-02", "Sample channel two"),
                 FollowedChannel::new("sample-03", "Sample channel three"),
             ],
+            followed_channels_by_account: std::collections::HashMap::new(),
+            followed_channels_account_id: None,
         }
     }
 }
@@ -227,6 +258,47 @@ mod tests {
         assert!(!refreshed[1].unmuted);
     }
     #[test]
+    fn followed_channel_preferences_are_kept_separate_by_account() {
+        let mut selected = super::FollowedChannel::new("channel-1", "Streamer");
+        selected.selection.streak = true;
+        selected.unmuted = true;
+        let mut active_account = None;
+        let mut channels_by_account = std::collections::HashMap::new();
+
+        let account_a = super::merge_followed_channels_for_account(
+            &[selected],
+            &mut active_account,
+            &mut channels_by_account,
+            "account-a",
+            vec![super::FollowedChannel::new("channel-1", "Streamer")],
+        );
+        assert!(account_a[0].selection.streak);
+        assert!(account_a[0].unmuted);
+
+        let account_b = super::merge_followed_channels_for_account(
+            &account_a,
+            &mut active_account,
+            &mut channels_by_account,
+            "account-b",
+            vec![super::FollowedChannel::new("channel-1", "Streamer")],
+        );
+        assert_eq!(account_b[0].selection, ChannelSelection::default());
+        assert!(!account_b[0].unmuted);
+        assert!(channels_by_account["account-a"][0].selection.streak);
+        assert!(channels_by_account["account-a"][0].unmuted);
+
+        let account_a = super::merge_followed_channels_for_account(
+            &account_b,
+            &mut active_account,
+            &mut channels_by_account,
+            "account-a",
+            vec![super::FollowedChannel::new("channel-1", "Streamer")],
+        );
+        assert!(account_a[0].selection.streak);
+        assert!(account_a[0].unmuted);
+    }
+
+    #[test]
     fn preferences_round_trip_settings() {
         let mut preferences = AppPreferences::default();
         preferences.channels[0].selection = ChannelSelection {
@@ -241,6 +313,10 @@ mod tests {
         preferences.preferred_quality = PreferredQuality::P720;
         preferences.theme = super::AppTheme::Light;
 
+        preferences.followed_channels_account_id = Some("viewer-123".to_owned());
+        preferences
+            .followed_channels_by_account
+            .insert("viewer-123".to_owned(), preferences.channels.clone());
         let encoded = ron::to_string(&preferences).unwrap();
         let decoded: AppPreferences = ron::from_str(&encoded).unwrap();
 

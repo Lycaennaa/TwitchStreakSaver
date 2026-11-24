@@ -25,6 +25,7 @@ The in-app activity log retains the most recent 500 events locally across launch
 **Select all** buttons continue to apply to every followed channel regardless of the current search. The separate **Select matching** buttons affect only followed channels matching the search (with an empty search, all followed channels match). Each button toggles to **Unselect all** or **Unselect matching** once every channel in its scope has the option selected; unselecting affects only that scope.
 
 The **Mute all** / **Unmute all** button applies to every followed channel regardless of the search. It unmutes all channels unless every channel is already unmuted, in which case it mutes all.
+Followed-channel selections and per-channel **Unmuted** preferences are saved separately for each connected Twitch account and restored when you switch back to that account.
 
 ## Browser extension and stream automation
 

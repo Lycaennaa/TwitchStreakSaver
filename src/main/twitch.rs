@@ -104,19 +104,32 @@ impl Dashboard {
         self.connection_error = None;
     }
 
-    fn replace_followed_channels(&mut self, incoming: Vec<FollowedChannel>) {
+    fn replace_followed_channels(
+        &mut self,
+        incoming: Vec<FollowedChannel>,
+        account_id: Option<&str>,
+    ) {
+        let updated_channels = match account_id {
+            Some(account_id) => twitch_streak_saver::model::merge_followed_channels_for_account(
+                &self.channels,
+                &mut self.followed_channels_account_id,
+                &mut self.followed_channels_by_account,
+                account_id,
+                incoming,
+            ),
+            None => twitch_streak_saver::model::merge_followed_channels(&self.channels, incoming),
+        };
         for channel in &self.channels {
             if self.auto_open_channels.contains(&channel.id)
-                && !incoming
+                && !updated_channels
                     .iter()
-                    .any(|incoming_channel| incoming_channel.id == channel.id)
+                    .any(|updated_channel| updated_channel.id == channel.id)
             {
                 self.removed_auto_streamer_names
                     .insert(channel.id.clone(), channel.display_name.clone());
             }
         }
-        self.channels =
-            twitch_streak_saver::model::merge_followed_channels(&self.channels, incoming);
+        self.channels = updated_channels;
         let followed_ids = self
             .channels
             .iter()
@@ -184,7 +197,7 @@ impl Dashboard {
                 } if generation == self.connection_generation => {
                     self.note_twitch_network_fully_online();
                     self.twitch_baseline_confirmed_at = Some(Instant::now());
-                    self.replace_followed_channels(channels);
+                    self.replace_followed_channels(channels, Some(&user_id));
                     self.streak_completed
                         .retain(|channel_id, _| live_channel_ids.contains(channel_id));
                     self.notified_streak_channels
@@ -203,7 +216,7 @@ impl Dashboard {
                 } if generation == self.connection_generation => {
                     self.note_twitch_network_fully_online();
                     self.twitch_baseline_confirmed_at = Some(Instant::now());
-                    self.replace_followed_channels(channels);
+                    self.replace_followed_channels(channels, None);
                     self.streak_completed
                         .retain(|channel_id, _| live_channel_ids.contains(channel_id));
                     self.notified_streak_channels
@@ -219,7 +232,7 @@ impl Dashboard {
                     live_status_failure,
                 } if generation == self.connection_generation => {
                     self.note_twitch_network_online(TwitchNetworkSource::FollowedChannels);
-                    self.replace_followed_channels(channels);
+                    self.replace_followed_channels(channels, None);
                     self.sync_extension_channels();
                     match live_status_failure {
                         TwitchUpdateFailure::Retryable(message) => {

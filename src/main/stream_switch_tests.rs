@@ -47,6 +47,8 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
             FollowedChannel::new("old", "Old Streamer"),
             new_streamer.clone(),
         ],
+        followed_channels_by_account: HashMap::new(),
+        followed_channels_account_id: Some("viewer-123".to_owned()),
         followed_search: String::new(),
         started_at: Instant::now(),
         connection_status: TwitchConnectionStatus::Connected("test".to_owned()),
@@ -1885,6 +1887,51 @@ fn browser_points_events_require_the_connected_app_account() {
     dashboard.poll_twitch_updates();
     assert_eq!(dashboard.channel_points_balances.get("new"), Some(&1300));
     assert!(dashboard.available_claim_channels.contains("new"));
+}
+
+#[test]
+fn account_switch_cleans_up_removed_followed_channel_state() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard
+        .channel_points_balances
+        .insert("old".to_owned(), 200);
+    dashboard.available_claim_channels.insert("old".to_owned());
+    dashboard
+        .twitch_sender
+        .send(TwitchUpdate::Connected {
+            generation: dashboard.connection_generation,
+            login: "viewer-b".to_owned(),
+            user_id: "viewer-456".to_owned(),
+            channels: vec![FollowedChannel::new("new", "New Streamer")],
+            live_channel_ids: HashSet::from(["new".to_owned()]),
+        })
+        .unwrap();
+
+    dashboard.poll_twitch_updates();
+
+    assert_eq!(
+        dashboard
+            .removed_auto_streamer_names
+            .get("old")
+            .map(String::as_str),
+        Some("Old Streamer")
+    );
+    assert!(!dashboard.channel_points_balances.contains_key("old"));
+    assert!(!dashboard.available_claim_channels.contains("old"));
+    let new_channel = dashboard
+        .channels
+        .iter()
+        .find(|channel| channel.id == "new")
+        .unwrap();
+    assert_eq!(
+        new_channel.selection,
+        twitch_streak_saver::model::ChannelSelection::default()
+    );
+    let previous_account_channel = dashboard.followed_channels_by_account["viewer-123"]
+        .iter()
+        .find(|channel| channel.id == "new")
+        .unwrap();
+    assert!(previous_account_channel.selection.streak);
 }
 
 #[test]
