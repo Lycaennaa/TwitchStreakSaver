@@ -89,15 +89,24 @@
     && process.versions?.node
   ) module.exports = parser;
   if (typeof window !== "object" || typeof window.WebSocket !== "function") return;
+  const NativeWebSocket = window.WebSocket;
   const NativeURL = URL;
   const pageHref = window.location.href;
+  const pageOrigin = window.location.origin;
   const nativeUrlHostname = nativeCall.bind(Object.getOwnPropertyDescriptor(NativeURL.prototype, "hostname").get);
-  const nativeAddEventListener = nativeCall.bind(EventTarget.prototype.addEventListener);
-  const nativeIsTrustedEvent = nativeCall.bind(Object.getOwnPropertyDescriptor(Event.prototype, "isTrusted").get);
-  const nativeMessageEventData = nativeCall.bind(Object.getOwnPropertyDescriptor(MessageEvent.prototype, "data").get);
-  const nativeMessageEventPorts = nativeCall.bind(Object.getOwnPropertyDescriptor(MessageEvent.prototype, "ports").get);
+  const nativeAddEventListener = nativeCall.bind(Object.getPrototypeOf(NativeWebSocket.prototype).addEventListener);
+  function eventPropertyReader(prototype, name) {
+    for (let current = prototype; current; current = Object.getPrototypeOf(current)) {
+      const getter = Object.getOwnPropertyDescriptor(current, name)?.get;
+      if (typeof getter === "function") return nativeCall.bind(getter);
+    }
+    return (event) => event[name];
+  }
+  const nativeIsTrustedEvent = eventPropertyReader(Event.prototype, "isTrusted");
+  const nativeMessageEventData = eventPropertyReader(MessageEvent.prototype, "data");
+  const nativeMessageEventPorts = eventPropertyReader(MessageEvent.prototype, "ports");
   const NativeMessageChannel = MessageChannel;
-  const NativeMessageEvent = MessageEvent;
+  const nativeWindowPostMessage = window.postMessage;
   const nativePortPostMessage = nativeCall.bind(MessagePort.prototype.postMessage);
   const nativePortStart = nativeCall.bind(MessagePort.prototype.start);
   const patchKey = Symbol.for("twitch-streak-saver.points-events-patched");
@@ -119,7 +128,19 @@
 
   let extensionPort = null;
 
-  function onBridgeChallenge(event) {
+
+  function postToPage(message, transfer = []) {
+    try {
+      nativeApply(nativeWindowPostMessage, window, [
+        nativeJsonStringify({ channel: BRIDGE_CHANNEL_EVENT, ...message }),
+        pageOrigin,
+        transfer,
+      ]);
+    } catch {}
+  }
+
+  function onBridgeMessage(event) {
+    if (extensionPort || event.origin !== pageOrigin) return;
     let data;
     let ports;
     try {
@@ -128,24 +149,23 @@
     } catch {
       return;
     }
-    if (extensionPort || ports.length !== 0 || typeof data !== "string") return;
+    if (ports.length !== 0 || typeof data !== "string") return;
     const challenge = parseJson(data);
     if (
-      challenge?.type !== "challenge"
+      challenge?.channel !== BRIDGE_CHANNEL_EVENT
+      || challenge.type !== "challenge"
       || typeof challenge.token !== "string"
       || challenge.token.length > 128
     ) return;
-    window.removeEventListener(BRIDGE_CHANNEL_EVENT, onBridgeChallenge);
+    window.removeEventListener("message", onBridgeMessage);
     const channel = new NativeMessageChannel();
     extensionPort = channel.port1;
     nativePortStart(extensionPort);
-    window.dispatchEvent(new NativeMessageEvent(BRIDGE_CHANNEL_EVENT, {
-      data: nativeJsonStringify({ type: "connect", token: challenge.token }),
-      ports: [channel.port2],
-    }));
+    postToPage({ type: "connect", token: challenge.token }, [channel.port2]);
   }
 
-  window.addEventListener(BRIDGE_CHANNEL_EVENT, onBridgeChallenge);
+  window.addEventListener("message", onBridgeMessage);
+  postToPage({ type: "hook-ready" });
 
   function postToExtension(message) {
     try {
@@ -153,7 +173,6 @@
     } catch {}
   }
 
-  const NativeWebSocket = window.WebSocket;
   const nativeWebSocketSend = NativeWebSocket.prototype.send;
   const pageId = crypto.randomUUID();
   let nextSocketId = 0;
@@ -192,11 +211,13 @@
         if (isRecord(response)) {
           const viewerId = nativeMapGet(pendingTopics, frame.parentId);
           nativeMapDelete(pendingTopics, frame.parentId);
+          if (!viewerId) return;
+          if (response.result !== "ok") {
+            return;
+          }
           const subscriptionId = response.subscription?.id;
           if (
-            viewerId
-            && response.result === "ok"
-            && typeof subscriptionId === "string"
+            typeof subscriptionId === "string"
             && nativeMapSize(subscriptions) < MAX_ACTIVE_SUBSCRIPTIONS
           ) {
             nativeMapSet(subscriptions, subscriptionId, viewerId);

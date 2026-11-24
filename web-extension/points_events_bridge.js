@@ -12,6 +12,7 @@ var browserApi = globalThis.browser ?? globalThis.chrome;
   let pagePort = null;
   let documentToken = null;
 
+
   function sendSources() {
     if (!documentToken) return;
     try {
@@ -37,11 +38,8 @@ var browserApi = globalThis.browser ?? globalThis.chrome;
 
   function onPageMessage(event) {
     const message = event.data;
-    if (
-      !isRecord(message)
-      || !isSourceId(message.source_id)
-      || !isViewerId(message.viewer_id)
-    ) return;
+    if (!isRecord(message)) return;
+    if (!isSourceId(message.source_id) || !isViewerId(message.viewer_id)) return;
 
     if (message.kind === "source" && typeof message.connected === "boolean") {
       if (message.connected) {
@@ -73,25 +71,50 @@ var browserApi = globalThis.browser ?? globalThis.chrome;
     }
   }
 
-  function onBridgeChannel(event) {
-    if (pagePort || event.ports?.length !== 1 || typeof event.data !== "string") return;
+  function postToPage(message, transfer = []) {
+    try {
+      window.postMessage(
+        JSON.stringify({ channel: BRIDGE_CHANNEL_EVENT, ...message }),
+        window.location.origin,
+        transfer,
+      );
+    } catch {}
+  }
+
+  function dispatchChallenge() {
+    postToPage({ type: "challenge", token: bridgeToken });
+  }
+
+  function onPageHandshake(event) {
+    if (
+      pagePort
+      || event.origin !== window.location.origin
+      || typeof event.data !== "string"
+    ) return;
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
-    if (message?.type !== "connect" || message.token !== bridgeToken) return;
+    if (message?.channel !== BRIDGE_CHANNEL_EVENT) return;
+    if (message.type === "hook-ready") {
+      if (event.ports?.length === 0) dispatchChallenge();
+      return;
+    }
+    if (
+      message.type !== "connect"
+      || message.token !== bridgeToken
+      || event.ports?.length !== 1
+    ) return;
 
     const [port] = event.ports;
     if (!port || typeof port.postMessage !== "function") return;
     pagePort = port;
     pagePort.onmessage = onPageMessage;
     pagePort.start();
-    window.removeEventListener(BRIDGE_CHANNEL_EVENT, onBridgeChannel);
+    window.removeEventListener("message", onPageHandshake);
   }
 
-  window.addEventListener(BRIDGE_CHANNEL_EVENT, onBridgeChannel);
-  // The statically injected document-start hook receives this synchronous challenge before page scripts run.
-  window.dispatchEvent(new MessageEvent(BRIDGE_CHANNEL_EVENT, {
-    data: JSON.stringify({ type: "challenge", token: bridgeToken }),
-  }));
+  window.addEventListener("message", onPageHandshake);
+  // Retry after the main-world hook announces readiness; static content-script ordering can vary.
+  dispatchChallenge();
 
   browserApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type !== "get_points_event_sources") return false;

@@ -40,7 +40,7 @@ extension-check:
     @taskpolicy -b {{node_check_command}} web-extension/quality.js
     @taskpolicy -b {{node_check_command}} web-extension/popup.js
     @taskpolicy -b {{node_check_command}} web-extension/twitch_tabs.js
-    @taskpolicy -b {{node_test_command}} web-extension/content.test.js web-extension/quality.test.js web-extension/twitch_tabs.test.js web-extension/points_events.test.js
+    @taskpolicy -b {{node_test_command}} web-extension/content.test.js web-extension/quality.test.js web-extension/twitch_tabs.test.js web-extension/points_events.test.js web-extension/points_events_bridge.test.js
     @taskpolicy -b {{node_check_command}} web-extension/background.test.js
     @taskpolicy -b {{node_test_command}} web-extension/background.test.js
     @python3 -m json.tool web-extension/manifest.json > /dev/null

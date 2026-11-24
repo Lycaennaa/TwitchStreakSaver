@@ -268,10 +268,14 @@ impl Dashboard {
                     return;
                 };
                 let connected = viewer_ids.iter().any(|id| id == viewer_id);
-                let detail = (!connected && !viewer_ids.is_empty()).then(|| {
-                    "The browser's Twitch account does not match the app's connected account."
-                        .to_owned()
-                });
+                let detail = if !connected && !viewer_ids.is_empty() {
+                    Some(
+                        "The browser's Twitch account does not match the app's connected account."
+                            .to_owned(),
+                    )
+                } else {
+                    None
+                };
                 let _ = self.twitch_sender.send(TwitchUpdate::PointsEventsStatus {
                     generation: self.connection_generation,
                     connected,

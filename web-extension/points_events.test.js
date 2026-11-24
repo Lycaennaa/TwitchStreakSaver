@@ -10,9 +10,10 @@ const pointsEventBridgeSource = fs.readFileSync(path.join(__dirname, "points_eve
 const TOPIC_PREFIX = "community-points-user-v1.";
 const BRIDGE_CHANNEL_EVENT = "tss-points-event-bridge";
 
-function createPointsPage() {
+function createPointsPage({ trustedGetter = true } = {}) {
   const messages = [];
   const sockets = [];
+  const dispatchedEvents = [];
   const listeners = new Map();
   const transferredPorts = [];
   let nextPageId = 0;
@@ -20,22 +21,29 @@ function createPointsPage() {
     constructor(type, { isTrusted = false } = {}) {
       this.type = type;
       this.trusted = isTrusted;
+      if (!trustedGetter) Object.defineProperty(this, "isTrusted", { value: isTrusted, configurable: true });
     }
   }
-  Object.defineProperty(FakeEvent.prototype, "isTrusted", {
-    configurable: true,
-    get() { return this.trusted; },
-  });
+  if (trustedGetter) {
+    Object.defineProperty(FakeEvent.prototype, "isTrusted", {
+      configurable: true,
+      get() { return this.trusted; },
+    });
+  }
   class FakeMessageEvent extends FakeEvent {
-    constructor(type, { data, ports = [], isTrusted = false } = {}) {
+    constructor(type, { data, ports = [], isTrusted = false, origin = "", source = null } = {}) {
       super(type, { isTrusted });
       this.messageData = data;
       this.messagePorts = ports;
+      this.messageOrigin = origin;
+      this.messageSource = source;
     }
   }
   Object.defineProperties(FakeMessageEvent.prototype, {
     data: { get() { return this.messageData; } },
     ports: { get() { return this.messagePorts; } },
+    origin: { get() { return this.messageOrigin; } },
+    source: { get() { return this.messageSource; } },
   });
   class FakeEventTarget {
     constructor() {
@@ -96,7 +104,8 @@ function createPointsPage() {
   class FakeMessageChannel {
     constructor() {
       this.port1 = new FakeMessagePort((message) => {
-        messages.push(JSON.parse(JSON.stringify(message)));
+        const cloned = JSON.parse(JSON.stringify(message));
+        messages.push(cloned);
       });
       this.port2 = new FakeMessagePort(() => {});
     }
@@ -119,104 +128,49 @@ function createPointsPage() {
       listeners.set(type, (listeners.get(type) ?? []).filter((candidate) => candidate !== listener));
     },
     dispatchEvent(event) {
-      for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event);
-      return true;
-    },
-  });
-  context.window = context;
-  context.addEventListener(BRIDGE_CHANNEL_EVENT, (event) => {
-    if (typeof event.data !== "string") return;
-    const message = JSON.parse(event.data);
-    if (message.type === "connect") transferredPorts.push(...event.ports);
-  });
-  vm.runInContext(pointsEventSource, context, { filename: "points_events.js" });
-  context.dispatchEvent(new FakeMessageEvent(BRIDGE_CHANNEL_EVENT, {
-    data: JSON.stringify({ type: "challenge", token: "bridge-token" }),
-  }));
-  return { context, messages, sockets, transferredPorts };
-}
-
-function createPointsBridge() {
-  const sent = [];
-  const listeners = new Map();
-  const dispatchedEvents = [];
-  let runtimeListener;
-  const window = {
-    location: { origin: "https://www.twitch.tv" },
-    addEventListener(type, listener) {
-      if (!listeners.has(type)) listeners.set(type, []);
-      listeners.get(type).push(listener);
-    },
-    removeEventListener(type, listener) {
-      listeners.set(type, (listeners.get(type) ?? []).filter((candidate) => candidate !== listener));
-    },
-    dispatchEvent(event) {
       dispatchedEvents.push(event);
       for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event);
       return true;
     },
-  };
-  class FakeMessageEvent {
-    constructor(type, { data, ports = [] } = {}) {
-      this.type = type;
-      this.data = data;
-      this.ports = ports;
-    }
-  }
-  const context = vm.createContext({
-    browser: {
-      runtime: {
-        onMessage: {
-          addListener(listener) {
-            runtimeListener = listener;
-          },
-        },
-        sendMessage(message) {
-          sent.push(JSON.parse(JSON.stringify(message)));
-          return Promise.resolve();
-        },
-      },
-    },
-    crypto: { randomUUID: () => "bridge-token" },
-    MessageEvent: FakeMessageEvent,
-    window,
-  });
-  vm.runInContext(pointsEventBridgeSource, context, { filename: "points_events_bridge.js" });
-  const challengeEvent = dispatchedEvents.find((event) => event.type === BRIDGE_CHANNEL_EVENT);
-  const challengeToken = JSON.parse(challengeEvent.data).token;
-  const pagePort = { onmessage: null, start() {}, postMessage() {} };
-  const requestSources = (documentToken) => {
-    let response;
-    runtimeListener({
-      type: "get_points_event_sources",
-      document_token: documentToken,
-    }, {}, (value) => { response = value; });
-    return response === undefined ? response : JSON.parse(JSON.stringify(response));
-  };
-  return {
-    sent,
-    challengeToken,
-    connectMainWorld(token = challengeToken, port = pagePort) {
-      window.dispatchEvent(new FakeMessageEvent(BRIDGE_CHANNEL_EVENT, {
-        data: JSON.stringify({ type: "connect", token }),
-        ports: [port],
+    postMessage(data, targetOrigin, transfer = []) {
+      if (targetOrigin !== this.location.origin) return;
+      this.dispatchEvent(new FakeMessageEvent("message", {
+        data,
+        ports: transfer,
+        origin: this.location.origin,
+        source: this,
+        isTrusted: true,
       }));
     },
-    sendPageMessage(data, origin = window.location.origin) {
-      window.dispatchEvent({ type: "message", source: window, origin, data, ports: [] });
-    },
-    sendPortMessage(data, port = pagePort) {
-      port.onmessage?.({ data });
-    },
-    setDocumentToken(documentToken = "document-token") {
-      return requestSources(documentToken);
-    },
-    reportSources() {
-      return requestSources("document-token");
-    },
-  };
+  });
+  context.window = context;
+  context.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") return;
+    const message = JSON.parse(event.data);
+    if (message.channel === BRIDGE_CHANNEL_EVENT && message.type === "connect") {
+      transferredPorts.push(...event.ports);
+    }
+  });
+  vm.runInContext(pointsEventSource, context, { filename: "points_events.js" });
+  context.postMessage(JSON.stringify({
+    channel: BRIDGE_CHANNEL_EVENT,
+    type: "challenge",
+    token: "bridge-token",
+  }), context.location.origin);
+  return { context, messages, sockets, transferredPorts, dispatchedEvents };
 }
 
+
+test("main-world hook announces readiness after registering its message listener", () => {
+  const page = createPointsPage();
+  const ready = page.dispatchedEvents.find((event) => {
+    if (event.type !== "message" || typeof event.data !== "string") return false;
+    const message = JSON.parse(event.data);
+    return message.channel === BRIDGE_CHANNEL_EVENT && message.type === "hook-ready";
+  });
+
+  assert.ok(ready);
+});
 
 test("parses earned, spent, and manual claim notices from Twitch Hermes payloads", () => {
   assert.deepEqual(parsePointsNotification({
@@ -290,6 +244,36 @@ test("rejects malformed point payloads instead of inventing account state", () =
   }, "12345"), null);
   assert.equal(parsePointsNotification({ type: "other", data: {} }, "12345"), null);
 });
+
+test("supports event prototypes without an isTrusted getter", () => {
+  const page = createPointsPage({ trustedGetter: false });
+  const socket = new page.context.WebSocket("wss://hermes.twitch.tv/ws");
+  socket.send(JSON.stringify({
+    id: "request-1",
+    type: "subscribe",
+    subscribe: {
+      id: "subscription-request-1",
+      type: "pubsub",
+      pubsub: { topic: `${TOPIC_PREFIX}12345` },
+    },
+  }));
+  socket.dispatch("message", {
+    data: JSON.stringify({
+      type: "response",
+      parentId: "request-1",
+      subscribeResponse: { subscription: { id: "subscription-1" }, result: "ok" },
+    }),
+    isTrusted: true,
+  });
+
+  assert.deepEqual(page.messages[0], {
+    kind: "source",
+    source_id: "page-1:1",
+    viewer_id: "12345",
+    connected: true,
+  });
+});
+
 
 test("forwards only events for an acknowledged Hermes Points subscription", () => {
   const page = createPointsPage();
@@ -433,80 +417,3 @@ test("forwards a JSON-encoded pubsub payload for an acknowledged Points subscrip
   });
 });
 
-test("relays only validated events over the one-time private page bridge", () => {
-  const bridge = createPointsBridge();
-  const source = {
-    kind: "source",
-    source_id: "page-1:1",
-    viewer_id: "12345",
-    connected: true,
-  };
-  const event = {
-    kind: "event",
-    source_id: "page-1:1",
-    viewer_id: "12345",
-    event: { type: "claim_available", channel_id: "98765" },
-  };
-
-  bridge.sendPageMessage(source);
-  assert.equal(bridge.sent.length, 0);
-  bridge.connectMainWorld("wrong-token");
-  bridge.sendPortMessage(source);
-  assert.equal(bridge.sent.length, 0);
-
-  bridge.connectMainWorld();
-  bridge.sendPageMessage(source);
-  bridge.sendPortMessage(source);
-  assert.equal(bridge.sent.length, 0);
-  assert.deepEqual(bridge.setDocumentToken(), {
-    document_token: "document-token",
-    sources: [{ source_id: "page-1:1", viewer_id: "12345" }],
-  });
-  assert.deepEqual(bridge.reportSources(), {
-    document_token: "document-token",
-    sources: [{ source_id: "page-1:1", viewer_id: "12345" }],
-  });
-  bridge.sendPortMessage(source);
-  assert.deepEqual(bridge.sent[0], {
-    type: "points_event_sources",
-    document_token: "document-token",
-    sources: [{ source_id: "page-1:1", viewer_id: "12345" }],
-  });
-
-  bridge.sendPortMessage({
-    ...event,
-    event: {
-      type: "points_earned",
-      channel_id: "98765",
-      points_earned: -1,
-      balance: 100,
-      reason_code: "CLAIM",
-    },
-  });
-  assert.equal(bridge.sent.length, 1);
-
-  const replacementPort = { onmessage: null, start() {}, postMessage() {} };
-  bridge.connectMainWorld(bridge.challengeToken, replacementPort);
-  bridge.sendPortMessage(event, replacementPort);
-  assert.equal(bridge.sent.length, 1);
-
-  bridge.sendPortMessage(event);
-  assert.deepEqual(bridge.sent[1], {
-    type: "points_event",
-    document_token: "document-token",
-    source_id: "page-1:1",
-    viewer_id: "12345",
-    event: { type: "claim_available", channel_id: "98765" },
-  });
-  bridge.sendPageMessage(event, "https://attacker.invalid");
-  assert.equal(bridge.sent.length, 2);
-
-  bridge.sendPortMessage({ ...source, connected: false });
-  assert.deepEqual(bridge.sent[2], {
-    type: "points_event_sources",
-    document_token: "document-token",
-    sources: [],
-  });
-  bridge.sendPortMessage(event);
-  assert.equal(bridge.sent.length, 3);
-});

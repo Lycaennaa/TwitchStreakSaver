@@ -1822,6 +1822,7 @@ fn completed_single_channel_rotation_keeps_the_existing_managed_tab() {
         Some(2)
     );
 }
+
 #[test]
 fn browser_points_events_require_the_connected_app_account() {
     let mut dashboard = dashboard_with_pending_stream_switch(true);

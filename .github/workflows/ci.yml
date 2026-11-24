@@ -48,7 +48,7 @@ jobs:
           taskpolicy -b node --check web-extension/background.test.js
 
       - name: Run extension tests
-        run: taskpolicy -b node --test web-extension/content.test.js web-extension/quality.test.js web-extension/twitch_tabs.test.js web-extension/background.test.js
+        run: taskpolicy -b node --test web-extension/content.test.js web-extension/quality.test.js web-extension/twitch_tabs.test.js web-extension/background.test.js web-extension/points_events.test.js web-extension/points_events_bridge.test.js
 
       - name: Validate extension manifest and package resources
         run: |

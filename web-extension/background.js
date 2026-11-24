@@ -360,13 +360,18 @@ function isTwitchPointsTab(url) {
   }
 }
 
+
+
 function reportPointsEventsStatus() {
   if (!nativePort || nativeBridgeReadyPort !== nativePort) return;
   const viewerIds = new Set();
   for (const sources of pointsEventSources.values()) {
     for (const viewerId of sources.values()) viewerIds.add(viewerId);
   }
-  sendNative({ type: "points_events_status", viewer_ids: Array.from(viewerIds) });
+  sendNative({
+    type: "points_events_status",
+    viewer_ids: Array.from(viewerIds),
+  });
 }
 
 function setPointsEventSources(tabId, rawSources, reportStatus = true) {
@@ -435,7 +440,8 @@ function handlePointsEventMessage(message, sender) {
   const documentToken = pointsEventDocumentTokens.get(tabId);
   if (!documentToken || message?.document_token !== documentToken) return;
   if (message?.type === "points_event_sources") {
-    setPointsEventSources(tabId, message.sources);
+    setPointsEventSources(tabId, message.sources, false);
+    reportPointsEventsStatus();
     return;
   }
   if (
