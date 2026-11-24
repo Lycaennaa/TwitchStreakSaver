@@ -65,6 +65,7 @@ pub(super) fn dashboard_with_pending_stream_switch(source_state_available: bool)
         browser_bridge: None,
         browser_bridge_retry_after: None,
         browser_connected: true,
+        last_extension_status: None,
         browser_error: None,
         browser_profile_folder_error: None,
         browser_notice: None,
@@ -2062,4 +2063,51 @@ fn points_event_status_is_visible_in_the_dashboard() {
     let connected = render(&mut dashboard);
     assert!(connected.contains("Points & Streak events connected"));
     assert!(!connected.contains("waiting for a Twitch tab"));
+}
+
+#[test]
+fn app_status_indicator_tracks_connection_and_pause_states() {
+    use super::AppStatusIndicator;
+
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let now = Duration::from_secs(60);
+
+    assert_eq!(
+        dashboard.app_status_indicator(now),
+        AppStatusIndicator::Active
+    );
+
+    dashboard
+        .automation_delays
+        .pause_for(now, Duration::from_secs(15 * 60));
+    assert_eq!(
+        dashboard.app_status_indicator(now),
+        AppStatusIndicator::Paused
+    );
+
+    dashboard.automation_delays.resume();
+    assert_eq!(
+        dashboard.app_status_indicator(now),
+        AppStatusIndicator::Active
+    );
+
+    dashboard.automation_enabled = false;
+    assert_eq!(
+        dashboard.app_status_indicator(now),
+        AppStatusIndicator::Paused
+    );
+
+    dashboard.automation_enabled = true;
+    dashboard.browser_connected = false;
+    assert_eq!(
+        dashboard.app_status_indicator(now),
+        AppStatusIndicator::Disconnected,
+    );
+
+    dashboard.browser_connected = true;
+    dashboard.connection_status = TwitchConnectionStatus::Disconnected;
+    assert_eq!(
+        dashboard.app_status_indicator(now),
+        AppStatusIndicator::Disconnected,
+    );
 }

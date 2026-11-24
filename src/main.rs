@@ -9,8 +9,9 @@ use twitch_streak_saver::browser_bridge::{
     BridgeEvent, BrowserBridge, EXTENSION_REGISTRATION_ADDRESS,
 };
 use twitch_streak_saver::browser_protocol::{
-    BrowserChannel, BrowserCommand, BrowserMessage, BrowserPopupAction, BrowserSurface,
-    BrowserTabCloseReason, ChatState, KnownBrowserMessage, PlayerState, TwitchPointsEvent,
+    AppStatusIndicator, BrowserChannel, BrowserCommand, BrowserMessage, BrowserPopupAction,
+    BrowserSurface, BrowserTabCloseReason, ChatState, KnownBrowserMessage, PlayerState,
+    TwitchPointsEvent,
 };
 use twitch_streak_saver::model::{
     AppPreferences, AppTheme, BrowserKind, BrowserLaunchTarget, FollowedChannel, PreferredQuality,
@@ -365,6 +366,16 @@ const ACTIVITY_LOG_KEY: &str = "activity_log";
 const BROWSER_EXTENSION_ID: &str = include_str!("../web-extension/trusted-extension-id");
 const FIREFOX_EXTENSION_ID: &str = include_str!("../web-extension/firefox-extension-id");
 const BROWSER_BRIDGE_RETRY_DELAY: Duration = Duration::from_secs(5);
+const WINDOW_ICON_SIZE: u32 = 64;
+const WINDOW_ICON_RGBA: &[u8] = include_bytes!("../assets/icons/window-icon-64.rgba");
+
+fn window_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: WINDOW_ICON_RGBA.to_vec(),
+        width: WINDOW_ICON_SIZE,
+        height: WINDOW_ICON_SIZE,
+    }
+}
 
 fn main() -> eframe::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -374,6 +385,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(window_icon())
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([800.0, 600.0])
             .with_visible(!launch_in_background),
@@ -464,6 +476,7 @@ struct Dashboard {
     browser_bridge_retry_after: Option<Instant>,
     browser_connected: bool,
     browser_command_ack_supported: bool,
+    last_extension_status: Option<AppStatusIndicator>,
     browser_error: Option<String>,
     browser_profile_folder_error: Option<String>,
     browser_notice: Option<String>,
@@ -611,6 +624,7 @@ impl Dashboard {
             browser_bridge_retry_after,
             browser_connected: false,
             browser_command_ack_supported: false,
+            last_extension_status: None,
             browser_error,
             browser_profile_folder_error: None,
             browser_port_check_sender,
@@ -653,6 +667,36 @@ impl Dashboard {
                 Some(format!("Could not load saved Twitch accounts: {error}"));
         }
         dashboard
+    }
+
+    fn app_status_indicator(&self, now: Duration) -> AppStatusIndicator {
+        if !self.browser_connected
+            || !matches!(
+                &self.connection_status,
+                TwitchConnectionStatus::Connected(_)
+            )
+        {
+            AppStatusIndicator::Disconnected
+        } else if !self.automation_enabled || self.automation_delays.is_paused(now) {
+            AppStatusIndicator::Paused
+        } else {
+            AppStatusIndicator::Active
+        }
+    }
+
+    fn sync_status_indicators(&mut self, now: Duration) {
+        let status = self.app_status_indicator(now);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(tray) = &mut self.system_tray {
+            tray.set_status(status);
+        }
+        if self.browser_connected
+            && self.browser_command_ack_supported
+            && self.last_extension_status != Some(status)
+            && self.send_bridge_command(BrowserCommand::SetStatus { status })
+        {
+            self.last_extension_status = Some(status);
+        }
     }
 
     fn preferences(&self) -> AppPreferences {

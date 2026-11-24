@@ -140,6 +140,7 @@ jobs:
           cp "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/twitch-streak-saver" "$app/Contents/MacOS/twitch-streak-saver"
           cp "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/twitch_streak_saver_host" "$app/Contents/MacOS/twitch_streak_saver_host"
           cp packaging/macos/Info.plist "$app/Contents/Info.plist"
+          cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
           cp -R "$dist/chrome-extension/." "$app/Contents/Resources/chrome-extension/"
           cp -R "$dist/firefox-extension/." "$app/Contents/Resources/firefox-extension/"
           plutil -lint "$app/Contents/Info.plist"
@@ -151,6 +152,7 @@ jobs:
 
           test -x "$app/Contents/MacOS/twitch-streak-saver"
           test -x "$app/Contents/MacOS/twitch_streak_saver_host"
+          test -f "$app/Contents/Resources/AppIcon.icns"
           test -f "$app/Contents/Resources/chrome-extension/managed_tabs.js"
           test -f "$app/Contents/Resources/firefox-extension/manifest.json"
           unzip -tq "$assets/twitch-streak-saver-${RELEASE_VERSION}-macos-aarch64.zip"

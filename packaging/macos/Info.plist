@@ -8,6 +8,8 @@
 	<string>Twitch Streak Saver</string>
 	<key>CFBundleExecutable</key>
 	<string>twitch-streak-saver</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.lycaennaa.twitchstreaksaver</string>
 	<key>CFBundleInfoDictionaryVersion</key>

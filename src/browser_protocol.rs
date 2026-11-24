@@ -3,10 +3,21 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppStatusIndicator {
+    Active,
+    Paused,
+    Disconnected,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserCommand {
     BridgeReady,
+    SetStatus {
+        status: AppStatusIndicator,
+    },
     SetTheme {
         theme: AppTheme,
     },
@@ -706,6 +717,20 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(super::BrowserCommand::SetTheme { theme }).unwrap(),
                 serde_json::json!({ "type": "set_theme", "theme": expected }),
+            );
+        }
+    }
+
+    #[test]
+    fn status_command_matches_extension_wire_contract() {
+        for (status, expected) in [
+            (super::AppStatusIndicator::Active, "active"),
+            (super::AppStatusIndicator::Paused, "paused"),
+            (super::AppStatusIndicator::Disconnected, "disconnected"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(super::BrowserCommand::SetStatus { status }).unwrap(),
+                serde_json::json!({ "type": "set_status", "status": expected }),
             );
         }
     }

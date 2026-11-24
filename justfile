@@ -57,6 +57,7 @@ package-macos: package-extensions
     @cp -R "{{worktree_root}}/dist/chrome-extension/." "{{worktree_root}}/dist/macos/Twitch Streak Saver.app/Contents/Resources/chrome-extension/"
     @cp -R "{{worktree_root}}/dist/firefox-extension/." "{{worktree_root}}/dist/macos/Twitch Streak Saver.app/Contents/Resources/firefox-extension/"
     @cp "{{worktree_root}}/packaging/macos/Info.plist" "{{worktree_root}}/dist/macos/Twitch Streak Saver.app/Contents/Info.plist"
+    @cp "{{worktree_root}}/packaging/macos/AppIcon.icns" "{{worktree_root}}/dist/macos/Twitch Streak Saver.app/Contents/Resources/AppIcon.icns"
     @plutil -lint "{{worktree_root}}/dist/macos/Twitch Streak Saver.app/Contents/Info.plist"
 
 install-macos: package-macos

@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="16%" y1="6%" x2="86%" y2="96%">
+      <stop offset="0%" stop-color="#9E4BFF" />
+      <stop offset="52%" stop-color="#6C25DC" />
+      <stop offset="100%" stop-color="#340C75" />
+    </linearGradient>
+    <radialGradient id="topshine" cx="50%" cy="14%" r="62%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.28" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="bevel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.34" />
+      <stop offset="45%" stop-color="#FFFFFF" stop-opacity="0.06" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.28" />
+    </linearGradient>
+    <linearGradient id="shield_dark" x1="30%" y1="10%" x2="70%" y2="96%">
+      <stop offset="0%" stop-color="#3B1178" />
+      <stop offset="100%" stop-color="#22074D" />
+    </linearGradient>
+    <linearGradient id="shield_rim" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#F5EAFF" />
+      <stop offset="100%" stop-color="#C492FF" />
+    </linearGradient>
+    <linearGradient id="shield_gleam" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.16" />
+      <stop offset="48%" stop-color="#FFFFFF" stop-opacity="0.02" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </linearGradient>
+    <linearGradient id="flame" x1="45%" y1="12%" x2="55%" y2="96%">
+      <stop offset="0%" stop-color="#FFE259" />
+      <stop offset="54%" stop-color="#FF9017" />
+      <stop offset="100%" stop-color="#EB471E" />
+    </linearGradient>
+    <radialGradient id="flame_core" cx="48%" cy="32%" r="54%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.36" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="sym" x1="20%" y1="10%" x2="80%" y2="92%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#FFF6E5" />
+    </linearGradient>
+    <clipPath id="tile_clip">
+      <path d="M 248.0 24.0 L 776.0 24.0 C 901.4 24.0 1000.0 122.6 1000.0 248.0 L 1000.0 776.0 C 1000.0 901.4 901.4 1000.0 776.0 1000.0 L 248.0 1000.0 C 122.6 1000.0 24.0 901.4 24.0 776.0 L 24.0 248.0 C 24.0 122.6 122.6 24.0 248.0 24.0 Z" />
+    </clipPath>
+  </defs>
+  <path d="M 248.0 24.0 L 776.0 24.0 C 901.4 24.0 1000.0 122.6 1000.0 248.0 L 1000.0 776.0 C 1000.0 901.4 901.4 1000.0 776.0 1000.0 L 248.0 1000.0 C 122.6 1000.0 24.0 901.4 24.0 776.0 L 24.0 248.0 C 24.0 122.6 122.6 24.0 248.0 24.0 Z" fill="url(#tile)" />
+  <g clip-path="url(#tile_clip)">
+    <rect width="1024" height="1024" fill="url(#topshine)" />
+  </g>
+  <g transform="translate(512 512) scale(1.16) translate(-512 -512)">
+    <path d="M 512 198 C 608 232, 706 250, 782 262 C 796 264, 804 276, 804 290 L 804 476 C 804 654, 680 778, 526 832 C 517 835, 507 835, 498 832 C 344 778, 220 654, 220 476 L 220 290 C 220 276, 228 264, 242 262 C 318 250, 416 232, 512 198 Z" fill="url(#shield_dark)" stroke="url(#shield_rim)" stroke-width="42" stroke-linejoin="round" />
+    <g transform="translate(512 508) scale(0.76) translate(-512 -508)">
+      <path d="M 556 208 C 554 282, 646 334, 690 434 C 728 520, 718 634, 652 708 C 600 766, 502 790, 420 764 C 328 734, 280 644, 292 542 C 300 474, 336 414, 372 366 C 374 414, 394 442, 416 452 C 408 376, 448 304, 502 254 C 524 234, 542 220, 556 208 Z" fill="url(#flame)" />
+      <path d="M 444.6 499.6 Q 444.6 469.7 470.7 484.4 L 618.2 567.3 Q 644.3 582.0 618.2 596.7 L 470.7 679.6 Q 444.6 694.3 444.6 664.4 Z" fill="url(#sym)" />
+    </g>
+  </g>
+</svg>

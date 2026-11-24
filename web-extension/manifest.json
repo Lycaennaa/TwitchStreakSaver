@@ -6,8 +6,18 @@
   "description": "Open Twitch channels, apply preferred video quality and per-channel audio preferences, and report stream availability to the app.",
   "permissions": ["alarms", "nativeMessaging", "storage", "tabs"],
   "host_permissions": ["https://www.twitch.tv/*", "https://player.twitch.tv/*"],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
-    "default_title": "Wake browser connection",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    },
+    "default_title": "Twitch Streak Saver — Disconnected",
     "default_popup": "popup.html"
   },
   "background": {

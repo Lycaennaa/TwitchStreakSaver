@@ -55,6 +55,8 @@ async function createExtension({
     registrationRequests: [],
     nativeConnections: 0,
     alarms: [],
+    actionIcons: [],
+    actionTitles: [],
     logs: [],
   };
   let nextTabId = 1;
@@ -403,6 +405,14 @@ async function createExtension({
       onAlarm: event(),
       create(name, options) {
         calls.alarms.push({ name, options: { ...options } });
+      },
+    },
+    action: {
+      async setIcon(details) {
+        calls.actionIcons.push(JSON.parse(JSON.stringify(details)));
+      },
+      async setTitle(details) {
+        calls.actionTitles.push(JSON.parse(JSON.stringify(details)));
       },
     },
   };
@@ -3656,4 +3666,44 @@ test("clears Points sources when a Twitch tab is discarded", async () => {
       viewer_ids: ["54321"],
     },
   );
+});
+
+test("updates the toolbar icon and title across disconnected, active, and paused states", async () => {
+  const extension = await createExtension();
+
+  assert.deepEqual(extension.calls.actionIcons.at(-1), {
+    path: { 16: "icons/icon-disconnected-16.png", 32: "icons/icon-disconnected-32.png" },
+  });
+  assert.deepEqual(extension.calls.actionTitles.at(-1), {
+    title: "Twitch Streak Saver — Disconnected",
+  });
+
+  await extension.send({ type: "bridge_ready" });
+  assert.deepEqual(extension.calls.actionIcons.at(-1), {
+    path: { 16: "icons/icon-16.png", 32: "icons/icon-32.png" },
+  });
+  assert.deepEqual(extension.calls.actionTitles.at(-1), {
+    title: "Twitch Streak Saver",
+  });
+
+  await extension.send({ type: "set_status", status: "paused" });
+  assert.deepEqual(extension.calls.actionIcons.at(-1), {
+    path: { 16: "icons/icon-paused-16.png", 32: "icons/icon-paused-32.png" },
+  });
+  assert.deepEqual(extension.calls.actionTitles.at(-1), {
+    title: "Twitch Streak Saver — Paused",
+  });
+
+  await extension.send({ type: "set_status", status: "active" });
+  assert.deepEqual(extension.calls.actionIcons.at(-1), {
+    path: { 16: "icons/icon-16.png", 32: "icons/icon-32.png" },
+  });
+
+  extension.disconnectHost();
+  assert.deepEqual(extension.calls.actionIcons.at(-1), {
+    path: { 16: "icons/icon-disconnected-16.png", 32: "icons/icon-disconnected-32.png" },
+  });
+  assert.deepEqual(extension.calls.actionTitles.at(-1), {
+    title: "Twitch Streak Saver — Disconnected",
+  });
 });

@@ -69,6 +69,7 @@ impl Dashboard {
                     self.pending_stream_switch = None;
                     self.browser_connected = true;
                     self.browser_command_ack_supported = false;
+                    self.last_extension_status = None;
                     self.browser_launch_attempted = None;
                     self.external_stream_counts.clear();
                     self.browser_open_streamer_names.clear();
@@ -88,6 +89,7 @@ impl Dashboard {
                     self.note_points_events_disconnection(Instant::now());
                     self.points_events_error = None;
                     self.browser_command_ack_supported = false;
+                    self.last_extension_status = None;
                     self.external_stream_counts.clear();
                     self.browser_open_streamer_names.clear();
                     self.browser_open_streamer_names_complete = false;
@@ -156,6 +158,7 @@ impl Dashboard {
     ) {
         self.browser_error = Some(message);
         self.browser_connected = false;
+        self.last_extension_status = None;
         self.external_inventory_received = false;
         self.pending_manual_open_inventory_wait_since = None;
         if recovery_generation != Some(self.connection_generation)
@@ -445,6 +448,7 @@ impl Dashboard {
                     self.sync_extension_channels();
                     self.set_extension_preferred_quality();
                     self.set_extension_theme();
+                    self.sync_status_indicators(self.started_at.elapsed());
                 }
             }
             KnownBrowserMessage::TabOpened {

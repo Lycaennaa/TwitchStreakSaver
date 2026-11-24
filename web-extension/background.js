@@ -4,6 +4,20 @@ const NATIVE_HOST_SYNC_ALARM = "twitch-streak-saver-native-host-sync";
 // MV3 alarms wake suspended workers; active workers retry failed native connections after 5 seconds.
 const NATIVE_HOST_SYNC_INTERVAL_MINUTES = 0.5;
 const NATIVE_HOST_RETRY_DELAY_MS = 5000;
+const ACTION_STATUS_ICONS = {
+  active: {
+    path: { 16: "icons/icon-16.png", 32: "icons/icon-32.png" },
+    title: "Twitch Streak Saver",
+  },
+  paused: {
+    path: { 16: "icons/icon-paused-16.png", 32: "icons/icon-paused-32.png" },
+    title: "Twitch Streak Saver — Paused",
+  },
+  disconnected: {
+    path: { 16: "icons/icon-disconnected-16.png", 32: "icons/icon-disconnected-32.png" },
+    title: "Twitch Streak Saver — Disconnected",
+  },
+};
 if (typeof importScripts === "function") {
   importScripts("twitch_tabs.js", "quality.js", "managed_tabs.js");
 }
@@ -12,6 +26,22 @@ let nativePort = null;
 let syncedNativePort = null;
 let nativeBridgeReadyPort = null;
 let nativeHostError = null;
+let lastActionIconState = null;
+
+function updateActionIcon(state) {
+  const normalized = Object.hasOwn(ACTION_STATUS_ICONS, state) ? state : "disconnected";
+  if (lastActionIconState === normalized) return;
+  lastActionIconState = normalized;
+  const spec = ACTION_STATUS_ICONS[normalized];
+  const actionApi = browserApi.action;
+  if (!actionApi) return;
+  if (typeof actionApi.setIcon === "function") {
+    void Promise.resolve(actionApi.setIcon({ path: spec.path })).catch(() => {});
+  }
+  if (typeof actionApi.setTitle === "function") {
+    void Promise.resolve(actionApi.setTitle({ title: spec.title })).catch(() => {});
+  }
+}
 const pendingPopupActions = new Map();
 let reconnectTimer = null;
 let channelsByLogin = new Map();
@@ -72,6 +102,9 @@ async function synchronizeNativeHostOnce() {
 }
 
 function initializeNativeHostSync() {
+  if (!nativePort || nativeBridgeReadyPort !== nativePort) {
+    updateActionIcon("disconnected");
+  }
   browserApi.alarms.create(NATIVE_HOST_SYNC_ALARM, {
     periodInMinutes: NATIVE_HOST_SYNC_INTERVAL_MINUTES,
   });
@@ -311,6 +344,7 @@ function handleNativePortDisconnect(port, error) {
   nativePort = null;
   syncedNativePort = null;
   nativeBridgeReadyPort = null;
+  updateActionIcon("disconnected");
   for (const [requestId, pending] of pendingPopupActions) {
     if (pending.port === port) {
       finishPopupAction(requestId, {
@@ -517,7 +551,13 @@ async function handleNativeCommand(message, sourcePort = nativePort) {
     case "bridge_ready":
       nativeBridgeReadyPort = sourcePort;
       nativeHostError = null;
+      updateActionIcon("active");
       notifyPopupStatusChanged();
+      break;
+    case "set_status":
+      if (Object.hasOwn(ACTION_STATUS_ICONS, message.status)) {
+        updateActionIcon(message.status);
+      }
       break;
     case "sync_channels": {
       externalScanGeneration += 1;

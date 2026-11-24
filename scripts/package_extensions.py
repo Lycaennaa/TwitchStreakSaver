@@ -43,7 +43,12 @@ def manifest_references(manifest: dict[str, object]) -> set[Path]:
     references: set[Path] = set()
 
     def add(value: object) -> None:
-        values = value if isinstance(value, list) else [value]
+        if isinstance(value, dict):
+            values = list(value.values())
+        elif isinstance(value, list):
+            values = value
+        else:
+            values = [value]
         for item in values:
             if isinstance(item, str):
                 reference = local_reference(SOURCE, item)

@@ -261,6 +261,7 @@ impl eframe::App for Dashboard {
         let now = self.started_at.elapsed();
         let poll_interval = Duration::from_secs(1);
         self.reconcile_automatic_tabs(now);
+        self.sync_status_indicators(now);
         context.request_repaint_after(poll_interval);
         apply_theme_preference(context, self.theme);
         context.style_mut(|style| {
