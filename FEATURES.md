@@ -1,6 +1,7 @@
 # Features
 
 - Shows live Watch Streak and Points activity for followed Twitch channels.
+- Save multiple Twitch logins securely, switch the active account, and keep channel choices separate.
 - Schedules up to two managed streams, prioritizing Watch Streaks before Points turns.
 - Coordinates Twitch player tabs, stream quality, and per-channel audio through the browser extension.
 - Summarizes recent activity and upcoming channels, including scheduling blockers.

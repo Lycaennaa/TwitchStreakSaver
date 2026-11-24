@@ -1,6 +1,32 @@
 use super::api;
+use super::credential_store;
 use super::*;
+use std::sync::{Mutex, MutexGuard, TryLockError};
+
+static OAUTH_CALLBACK_LOCK: Mutex<()> = Mutex::new(());
+
+fn acquire_callback_lock(cancel: &AtomicBool) -> Result<MutexGuard<'static, ()>, TwitchError> {
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err(TwitchError::Cancelled);
+        }
+        match OAUTH_CALLBACK_LOCK.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(25)),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(TwitchError::Failed(
+                    "Twitch sign-in callback is unavailable.".to_owned(),
+                ));
+            }
+        }
+    }
+}
+
 fn authorize_in_browser(cancel: &AtomicBool) -> Result<String, TwitchError> {
+    let _callback_guard = acquire_callback_lock(cancel)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(TwitchError::Cancelled);
+    }
     let state = random_state()?;
     let listener_v4 = TcpListener::bind("127.0.0.1:65432").map_err(|error| {
         TwitchError::Failed(format!(
@@ -301,82 +327,58 @@ fetch("/token", {method: "POST", headers: {"Content-Type": "application/json"}, 
   document.body.textContent = "Could not return Twitch sign-in to the app.";
 });"#;
 
-fn load_keyring_token() -> Result<Option<String>, TwitchError> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| {
-            TwitchError::Failed(format!("Could not open secure token storage: {error}"))
-        })?;
-        return match entry.get_password() {
-            Ok(token) => Ok(Some(token)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(TwitchError::Failed(format!(
-                "Could not read secure token storage: {error}"
-            ))),
-        };
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Err(TwitchError::Failed(
-            "Secure Twitch token storage is supported on macOS and Windows.".to_owned(),
-        ))
-    }
-}
-
-fn store_keyring_token(token: &str) -> Result<(), TwitchError> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| {
-            TwitchError::Failed(format!("Could not open secure token storage: {error}"))
-        })?;
-        return entry.set_password(token).map_err(|error| {
-            TwitchError::Failed(format!("Could not save Twitch token securely: {error}"))
-        });
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = token;
-        Err(TwitchError::Failed(
-            "Secure Twitch token storage is supported on macOS and Windows.".to_owned(),
-        ))
-    }
-}
-
-pub(super) fn clear_keyring_token() -> Result<(), TwitchError> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| {
-            TwitchError::Failed(format!("Could not open secure token storage: {error}"))
-        })?;
-        return match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(TwitchError::Failed(format!(
-                "Could not remove saved Twitch token: {error}"
-            ))),
-        };
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Err(TwitchError::Failed(
-            "Secure Twitch token storage is supported on macOS and Windows.".to_owned(),
-        ))
-    }
-}
-pub fn clear_saved_token() -> Result<(), String> {
-    clear_keyring_token().map_err(TwitchError::message)
-}
 pub(super) fn obtain_token(
     client: &Client,
     cancel: &AtomicBool,
+    account_id: Option<&str>,
+    force_authorization: bool,
 ) -> Result<(String, TwitchUser), TwitchError> {
-    if let Some(token) = load_keyring_token()? {
-        if !valid_token(&token) {
-            clear_keyring_token()?;
-        } else {
-            match api::validate_token(client, &token) {
-                Ok(user) => return Ok((token, user)),
-                Err(TwitchError::Reauthorize(_)) => clear_keyring_token()?,
+    let (saved_token, legacy_token) = match account_id {
+        Some(account_id) if !force_authorization => {
+            let account_token = credential_store::load_account_token(account_id)?;
+            if account_token.is_some() {
+                (account_token, false)
+            } else if credential_store::legacy_token_owner()?.as_deref() == Some(account_id) {
+                (credential_store::load_legacy_token()?, true)
+            } else {
+                (None, false)
+            }
+        }
+        None if !force_authorization => (credential_store::load_legacy_token()?, true),
+        _ => (None, false),
+    };
+
+    if let Some(token) = saved_token {
+        if valid_token(&token) {
+            match api::validate_token(client, &token, cancel) {
+                Ok(user) if account_id.is_none_or(|expected| expected == user.id) => {
+                    credential_store::save_validated_account(&user, &token, legacy_token, cancel)?;
+                    return Ok((token, user));
+                }
+                Ok(_) => {
+                    if !legacy_token {
+                        if let Some(account_id) = account_id {
+                            credential_store::clear_account_token(account_id, cancel)?;
+                        }
+                    }
+                    return Err(TwitchError::Failed(
+                        "The saved Twitch token belongs to a different account.".to_owned(),
+                    ));
+                }
+                Err(TwitchError::Reauthorize(_)) => match (account_id, legacy_token) {
+                    (_, true) | (None, _) => credential_store::clear_legacy_keyring_token(cancel)?,
+                    (Some(account_id), false) => {
+                        credential_store::clear_account_token(account_id, cancel)?
+                    }
+                },
                 Err(error) => return Err(error),
+            }
+        } else {
+            match (account_id, legacy_token) {
+                (_, true) | (None, _) => credential_store::clear_legacy_keyring_token(cancel)?,
+                (Some(account_id), false) => {
+                    credential_store::clear_account_token(account_id, cancel)?
+                }
             }
         }
     }
@@ -385,17 +387,52 @@ pub(super) fn obtain_token(
     }
 
     let token = authorize_in_browser(cancel)?;
-    let user = api::validate_token(client, &token).map_err(|error| match error {
+    let user = api::validate_token(client, &token, cancel).map_err(|error| match error {
         TwitchError::Reauthorize(message) => TwitchError::Failed(message),
         error => error,
     })?;
-    store_keyring_token(&token)?;
+    if account_id.is_some_and(|expected| expected != user.id) {
+        return Err(TwitchError::Failed(
+            "The signed-in Twitch account does not match the selected account.".to_owned(),
+        ));
+    }
+    credential_store::save_validated_account(&user, &token, false, cancel)?;
     Ok((token, user))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{oauth_callback_timeout, TwitchError};
+    use super::{acquire_callback_lock, oauth_callback_timeout, TwitchError, OAUTH_CALLBACK_LOCK};
+
+    #[test]
+    fn cancelled_account_switch_releases_callback_waiter() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        let callback_owner = OAUTH_CALLBACK_LOCK.lock().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            attempted_tx.send(()).unwrap();
+            let cancelled = matches!(
+                acquire_callback_lock(&worker_cancel),
+                Err(TwitchError::Cancelled)
+            );
+            result_tx.send(cancelled).unwrap();
+        });
+
+        attempted_rx.recv().unwrap();
+        cancel.store(true, Ordering::Release);
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        drop(callback_owner);
+        let cancelled = result.unwrap_or_else(|_| result_rx.recv().unwrap());
+        worker.join().unwrap();
+        assert!(cancelled);
+    }
 
     #[test]
     fn oauth_callback_timeout_is_retryable() {

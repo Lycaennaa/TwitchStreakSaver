@@ -2,6 +2,8 @@ use super::*;
 
 impl Dashboard {
     pub(super) fn watch_settings(&mut self, ui: &mut egui::Ui) {
+        self.twitch_account_settings(ui);
+        ui.add_space(8.0);
         self.theme_settings(ui);
         ui.add_space(8.0);
         ui.group(|ui| {
@@ -96,6 +98,103 @@ impl Dashboard {
         self.quality_settings(ui);
         ui.add_space(8.0);
         self.automation_settings(ui);
+    }
+    fn twitch_account_settings(&mut self, ui: &mut egui::Ui) {
+        let accounts = self.twitch_accounts.clone();
+        let selected_account_id = self.selected_account_id.clone();
+        let hide_sensitive_info = self.hide_sensitive_info;
+        let connecting = matches!(&self.connection_status, TwitchConnectionStatus::Connecting);
+        let removal_pending = self.pending_twitch_account_forget.is_some();
+        let mut account_to_select = None;
+        let mut account_to_forget: Option<TwitchAccount> = None;
+        let mut add_account = false;
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            section_heading(ui, "Twitch accounts");
+            ui.label("Only the selected account is connected. Each account keeps its own channel selections.");
+            ui.label("Forgetting an account removes its saved login and local channel choices.");
+            if accounts.is_empty() {
+                ui.label("No saved accounts.");
+            }
+            for (index, account) in accounts.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(if hide_sensitive_info {
+                        format!("Account {}", index + 1)
+                    } else {
+                        account.login.clone()
+                    });
+                    if selected_account_id.as_deref() == Some(account.id.as_str()) {
+                        ui.label("Selected");
+                    } else if ui
+                        .add_enabled(
+                            !connecting && !removal_pending,
+                            egui::Button::new("Use"),
+                        )
+                        .clicked()
+                    {
+                        account_to_select = Some(account.id.clone());
+                    }
+                    if ui
+                        .add_enabled(
+                            !connecting && !removal_pending,
+                            egui::Button::new("Forget"),
+                        )
+                        .clicked()
+                    {
+                        account_to_forget = Some(account.clone());
+                    }
+                });
+            }
+            if ui
+                .add_enabled(
+                    !connecting && !removal_pending,
+                    egui::Button::new("Add account"),
+                )
+                .clicked()
+            {
+                add_account = true;
+            }
+        });
+        if let Some(account) = account_to_forget {
+            self.pending_twitch_account_forget = Some(account);
+        }
+        if let Some(account) = self.pending_twitch_account_forget.clone() {
+            let account_name = if hide_sensitive_info {
+                "this account".to_owned()
+            } else {
+                account.login.clone()
+            };
+            let mut confirmed = false;
+            let mut cancelled = false;
+            egui::Window::new("Forget Twitch account?")
+                .id(egui::Id::new("forget_twitch_account_confirmation"))
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!(
+                        "Remove the saved login and local channel choices for {account_name}?"
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Forget account").clicked() {
+                            confirmed = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            if confirmed {
+                self.pending_twitch_account_forget = None;
+                self.forget_twitch_account(&account.id);
+            } else if cancelled {
+                self.pending_twitch_account_forget = None;
+            }
+        }
+        if let Some(account_id) = account_to_select {
+            self.select_twitch_account(account_id);
+        } else if add_account {
+            self.add_twitch_account();
+        }
     }
     fn theme_settings(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;

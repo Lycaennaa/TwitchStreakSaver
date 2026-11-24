@@ -9,12 +9,18 @@ pub(super) fn build_client() -> Result<Client, TwitchError> {
         })
 }
 
-pub(super) fn validate_token(client: &Client, token: &str) -> Result<TwitchUser, TwitchError> {
-    let response = client
-        .get(VALIDATE_URL)
-        .header("Authorization", format!("OAuth {token}"))
-        .send()
-        .map_err(|error| request_error(error, "Could not validate Twitch authorization"))?;
+pub(super) fn validate_token(
+    client: &Client,
+    token: &str,
+    cancel: &AtomicBool,
+) -> Result<TwitchUser, TwitchError> {
+    let response = super::credential_store::with_active_account_credentials(cancel, || {
+        client
+            .get(VALIDATE_URL)
+            .header("Authorization", format!("OAuth {token}"))
+            .send()
+            .map_err(|error| request_error(error, "Could not validate Twitch authorization"))
+    })?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
@@ -116,9 +122,11 @@ pub(super) fn fetch_followed_channels(
         if let Some(after) = cursor.as_deref() {
             request = request.query(&[("after", after)]);
         }
-        let response = request
-            .send()
-            .map_err(|error| request_error(error, "Could not load followed Twitch channels"))?;
+        let response = super::credential_store::with_active_account_credentials(cancel, || {
+            request
+                .send()
+                .map_err(|error| request_error(error, "Could not load followed Twitch channels"))
+        })?;
         let page: FollowedResponse = parse_response(response, "load followed channels")?;
         for record in page.data {
             if channel_ids.insert(record.broadcaster_id.clone()) {
@@ -159,13 +167,15 @@ pub(super) fn fetch_live_channel_ids(
             .iter()
             .map(|channel| ("user_id", channel.id.as_str()))
             .collect();
-        let response = client
-            .get(STREAMS_URL)
-            .header("Client-ID", CLIENT_ID)
-            .bearer_auth(token)
-            .query(&user_ids)
-            .send()
-            .map_err(|error| request_error(error, "Could not load Twitch live status"))?;
+        let response = super::credential_store::with_active_account_credentials(cancel, || {
+            client
+                .get(STREAMS_URL)
+                .header("Client-ID", CLIENT_ID)
+                .bearer_auth(token)
+                .query(&user_ids)
+                .send()
+                .map_err(|error| request_error(error, "Could not load Twitch live status"))
+        })?;
         let streams: StreamsResponse = parse_response(response, "load live status")?;
         live_ids.extend(streams.data.into_iter().map(|stream| stream.user_id));
     }

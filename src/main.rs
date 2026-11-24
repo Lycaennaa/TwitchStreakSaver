@@ -14,6 +14,7 @@ use twitch_streak_saver::browser_protocol::{
 };
 use twitch_streak_saver::model::{
     AppPreferences, AppTheme, BrowserKind, BrowserLaunchTarget, FollowedChannel, PreferredQuality,
+    TwitchAccount,
 };
 use twitch_streak_saver::scheduler::{
     QueueCandidate, QueuePlanner, QueueStage, StreamRotation, StreamSession, TurnEligibility,
@@ -52,6 +53,8 @@ mod firefox_profile_lock;
 mod queue_visibility;
 #[path = "main/twitch.rs"]
 mod twitch;
+#[path = "main/twitch_accounts.rs"]
+mod twitch_accounts;
 #[path = "main/ui.rs"]
 mod ui;
 #[path = "main/windows_startup.rs"]
@@ -432,6 +435,10 @@ struct Dashboard {
     channels: Vec<FollowedChannel>,
     followed_channels_by_account: HashMap<String, Vec<FollowedChannel>>,
     followed_channels_account_id: Option<String>,
+    twitch_accounts: Vec<TwitchAccount>,
+    selected_account_id: Option<String>,
+    forgotten_twitch_account_ids: HashSet<String>,
+    pending_twitch_account_forget: Option<TwitchAccount>,
     followed_search: String,
     started_at: Instant,
     connection_status: TwitchConnectionStatus,
@@ -496,6 +503,15 @@ impl Dashboard {
             .storage
             .and_then(|storage| eframe::get_value::<AppPreferences>(storage, PREFERENCES_KEY))
             .unwrap_or_default();
+        let (twitch_accounts, account_registry_error) =
+            match twitch_api::credential_store::load_saved_accounts() {
+                Ok(accounts) => (accounts, None),
+                Err(error) => (Vec::new(), Some(error)),
+            };
+        let selected_account_id = preferences
+            .active_account_id
+            .clone()
+            .or_else(|| twitch_accounts.first().map(|account| account.id.clone()));
         let mut activity_log = creation_context
             .storage
             .and_then(|storage| {
@@ -565,6 +581,10 @@ impl Dashboard {
             channels: preferences.channels,
             followed_channels_by_account: preferences.followed_channels_by_account,
             followed_channels_account_id: preferences.followed_channels_account_id,
+            twitch_accounts,
+            selected_account_id,
+            pending_twitch_account_forget: None,
+            forgotten_twitch_account_ids: HashSet::new(),
             followed_search: String::new(),
             started_at: Instant::now(),
             connection_status: TwitchConnectionStatus::Disconnected,
@@ -628,6 +648,10 @@ impl Dashboard {
             pending_stream_switch: None,
         };
         dashboard.start_twitch_connection();
+        if let Some(error) = account_registry_error {
+            dashboard.connection_error =
+                Some(format!("Could not load saved Twitch accounts: {error}"));
+        }
         dashboard
     }
 
@@ -651,6 +675,7 @@ impl Dashboard {
             channels: self.channels.clone(),
             followed_channels_by_account,
             followed_channels_account_id: self.followed_channels_account_id.clone(),
+            active_account_id: self.selected_account_id.clone(),
         }
     }
 }

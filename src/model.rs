@@ -181,6 +181,12 @@ impl AppTheme {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TwitchAccount {
+    pub id: String,
+    pub login: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppPreferences {
     pub auto_start_on_launch: bool,
@@ -198,6 +204,8 @@ pub struct AppPreferences {
     pub followed_channels_by_account: std::collections::HashMap<String, Vec<FollowedChannel>>,
     #[serde(default)]
     pub followed_channels_account_id: Option<String>,
+    #[serde(default)]
+    pub active_account_id: Option<String>,
 }
 
 impl Default for AppPreferences {
@@ -220,6 +228,7 @@ impl Default for AppPreferences {
             ],
             followed_channels_by_account: std::collections::HashMap::new(),
             followed_channels_account_id: None,
+            active_account_id: None,
         }
     }
 }
@@ -312,6 +321,7 @@ mod tests {
         preferences.adopt_existing_twitch_tabs = true;
         preferences.preferred_quality = PreferredQuality::P720;
         preferences.theme = super::AppTheme::Light;
+        preferences.active_account_id = Some("viewer-123".to_owned());
 
         preferences.followed_channels_account_id = Some("viewer-123".to_owned());
         preferences
@@ -339,6 +349,7 @@ mod tests {
         assert!(preferences.channels.is_empty());
         assert_eq!(preferences.preferred_quality, PreferredQuality::P160);
         assert_eq!(preferences.theme, super::AppTheme::System);
+        assert_eq!(preferences.active_account_id, None);
     }
 
     #[test]

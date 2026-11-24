@@ -164,6 +164,50 @@ fn apply_theme_preference(context: &egui::Context, theme: twitch_streak_saver::m
     }
     context.set_visuals(visuals);
 }
+impl Dashboard {
+    fn twitch_account_selector(&mut self, ui: &mut egui::Ui, enabled: bool) {
+        let selected_account_id = self.selected_account_id.clone();
+        let account_options = self
+            .twitch_accounts
+            .iter()
+            .enumerate()
+            .map(|(index, account)| {
+                (
+                    account.id.clone(),
+                    if self.hide_sensitive_info {
+                        format!("Account {}", index + 1)
+                    } else {
+                        account.login.clone()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_account_label = account_options
+            .iter()
+            .find(|(account_id, _)| selected_account_id.as_deref() == Some(account_id.as_str()))
+            .map(|(_, label)| label.clone())
+            .unwrap_or_else(|| "No account selected".to_owned());
+        let mut account_choice = selected_account_id.clone();
+        ui.add_enabled_ui(enabled, |ui| {
+            egui::ComboBox::from_id_salt("twitch_account_picker")
+                .selected_text(selected_account_label.as_str())
+                .show_ui(ui, |ui| {
+                    for (account_id, label) in &account_options {
+                        ui.selectable_value(
+                            &mut account_choice,
+                            Some(account_id.clone()),
+                            label.as_str(),
+                        );
+                    }
+                });
+        });
+        if account_choice != selected_account_id {
+            if let Some(account_id) = account_choice {
+                self.select_twitch_account(account_id);
+            }
+        }
+    }
+}
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PREFERENCES_KEY, &self.preferences());
@@ -238,6 +282,8 @@ impl eframe::App for Dashboard {
         let mut active_tab = context
             .data_mut(|data| data.get_temp::<DashboardTab>(tab_id))
             .unwrap_or_default();
+        let mut add_account = false;
+        let account_removal_pending = self.pending_twitch_account_forget.is_some();
         egui::TopBottomPanel::top("app_header")
             .show_separator_line(false)
             .show(context, |ui| {
@@ -266,12 +312,10 @@ impl eframe::App for Dashboard {
                             status_color(ui.visuals().dark_mode, StatusColor::Success)
                         } else if connecting {
                             status_color(ui.visuals().dark_mode, StatusColor::Warning)
+                        } else if ui.visuals().dark_mode {
+                            egui::Color32::from_rgb(255, 120, 120)
                         } else {
-                            if ui.visuals().dark_mode {
-                                egui::Color32::from_rgb(255, 120, 120)
-                            } else {
-                                egui::Color32::from_rgb(153, 27, 27)
-                            }
+                            egui::Color32::from_rgb(153, 27, 27)
                         }));
                         if self.twitch_network_unavailable {
                             ui.colored_label(
@@ -279,6 +323,7 @@ impl eframe::App for Dashboard {
                                 "NETWORK RECOVERING",
                             );
                         }
+                        self.twitch_account_selector(ui, !connecting && !account_removal_pending);
                         if connecting {
                             if ui.button("Cancel").clicked() {
                                 self.cancel_twitch_connection();
@@ -287,16 +332,26 @@ impl eframe::App for Dashboard {
                             if ui.button("Disconnect").clicked() {
                                 self.disconnect_twitch();
                             }
-                        } else if ui
-                            .add(
-                                egui::Button::new("Connect Twitch")
-                                    .fill(egui::Color32::from_rgb(145, 70, 255)),
-                            )
-                            .clicked()
+                        } else if !account_removal_pending
+                            && ui
+                                .add(
+                                    egui::Button::new("Connect Twitch")
+                                        .fill(egui::Color32::from_rgb(145, 70, 255)),
+                                )
+                                .clicked()
                         {
                             self.start_twitch_connection();
                         }
+                        if !connecting
+                            && !account_removal_pending
+                            && ui.button("Add account").clicked()
+                        {
+                            add_account = true;
+                        }
                     });
+                    if add_account {
+                        self.add_twitch_account();
+                    }
                 });
                 ui.add_space(8.0);
             });
@@ -480,5 +535,44 @@ mod theme_preference_tests {
         render(&context, AppTheme::System, Theme::Light);
         assert!(!context.style().visuals.dark_mode);
         assert_ne!(context.style().visuals.panel_fill, egui::Color32::BLACK);
+    }
+}
+#[cfg(test)]
+mod account_selector_tests {
+    use super::super::stream_switch_tests::dashboard_with_pending_stream_switch;
+    use super::*;
+
+    #[test]
+    fn account_selector_lists_saved_login_and_masks_it_for_screenshots() {
+        let mut dashboard = dashboard_with_pending_stream_switch(true);
+        dashboard.twitch_accounts = vec![TwitchAccount {
+            id: "123456".to_owned(),
+            login: "main-account".to_owned(),
+        }];
+        dashboard.selected_account_id = Some("123456".to_owned());
+
+        let render = |dashboard: &mut Dashboard| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let output = egui::Context::default().run(input, |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    dashboard.twitch_account_selector(ui, true);
+                });
+            });
+            format!("{:?}", output.shapes)
+        };
+
+        let visible = render(&mut dashboard);
+        assert!(visible.contains("main-account"));
+
+        dashboard.hide_sensitive_info = true;
+        let private = render(&mut dashboard);
+        assert!(!private.contains("main-account"));
+        assert!(private.contains("Account 1"));
     }
 }

@@ -1,7 +1,14 @@
 use super::api::{build_client, fetch_followed_channels, fetch_live_channel_ids};
-use super::oauth::{clear_keyring_token, obtain_token};
+use super::credential_store::{clear_account_token, clear_legacy_keyring_token};
+use super::oauth::obtain_token;
 use super::*;
-pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<TwitchUpdate>) {
+pub fn run_connection(
+    cancel: Arc<AtomicBool>,
+    generation: u64,
+    updates: Sender<TwitchUpdate>,
+    account_id: Option<String>,
+    force_authorization: bool,
+) {
     let client = match build_client() {
         Ok(client) => client,
         Err(error) => {
@@ -15,12 +22,12 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
         &updates,
         super::TwitchNetworkSource::Connection,
         NETWORK_RETRY_INITIAL,
-        || obtain_token(&client, &cancel),
+        || obtain_token(&client, &cancel, account_id.as_deref(), force_authorization),
     ) {
         Ok(credentials) => credentials,
         Err(TwitchError::Cancelled) => return,
         Err(error @ TwitchError::Reauthorize(_)) => {
-            fail_expired_session(&updates, generation, error);
+            fail_expired_session(&updates, generation, &cancel, account_id.as_deref(), error);
             return;
         }
         Err(error) => {
@@ -28,6 +35,16 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
             return;
         }
     };
+    if updates
+        .send(TwitchUpdate::AccountSaved {
+            generation,
+            login: user.login.clone(),
+            user_id: user.id.clone(),
+        })
+        .is_err()
+    {
+        return;
+    }
     let (mut channels, mut live_channel_ids) = match retry_until_success(
         &cancel,
         generation,
@@ -43,7 +60,7 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
         Ok(baseline) => baseline,
         Err(TwitchError::Cancelled) => return,
         Err(error @ TwitchError::Reauthorize(_)) => {
-            fail_expired_session(&updates, generation, error);
+            fail_expired_session(&updates, generation, &cancel, Some(&user.id), error);
             return;
         }
         Err(error) => {
@@ -94,7 +111,7 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
                 }
                 Err(TwitchError::Cancelled) => break,
                 Err(error @ TwitchError::Reauthorize(_)) => {
-                    fail_expired_session(&updates, generation, error);
+                    fail_expired_session(&updates, generation, &cancel, Some(&user.id), error);
                     break;
                 }
                 Err(TwitchError::Retryable(message)) => {
@@ -143,7 +160,13 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
                         }
                         Err(TwitchError::Cancelled) => break,
                         Err(error @ TwitchError::Reauthorize(_)) => {
-                            fail_expired_session(&updates, generation, error);
+                            fail_expired_session(
+                                &updates,
+                                generation,
+                                &cancel,
+                                Some(&user.id),
+                                error,
+                            );
                             break;
                         }
                         Err(TwitchError::Retryable(message)) => {
@@ -181,7 +204,7 @@ pub fn run_connection(cancel: Arc<AtomicBool>, generation: u64, updates: Sender<
                 }
                 Err(TwitchError::Cancelled) => break,
                 Err(error @ TwitchError::Reauthorize(_)) => {
-                    fail_expired_session(&updates, generation, error);
+                    fail_expired_session(&updates, generation, &cancel, Some(&user.id), error);
                     break;
                 }
                 Err(TwitchError::Retryable(message)) => {
@@ -228,9 +251,20 @@ fn send_failed(updates: &Sender<TwitchUpdate>, generation: u64, message: String)
     });
 }
 
-fn fail_expired_session(updates: &Sender<TwitchUpdate>, generation: u64, error: TwitchError) {
-    let message = match clear_keyring_token() {
+fn fail_expired_session(
+    updates: &Sender<TwitchUpdate>,
+    generation: u64,
+    cancel: &AtomicBool,
+    account_id: Option<&str>,
+    error: TwitchError,
+) {
+    let remove_token = match account_id {
+        Some(account_id) => clear_account_token(account_id, cancel),
+        None => clear_legacy_keyring_token(cancel),
+    };
+    let message = match remove_token {
         Ok(()) => error.message(),
+        Err(TwitchError::Cancelled) => return,
         Err(clear_error) => format!(
             "{}; could not remove saved token: {}",
             error.message(),

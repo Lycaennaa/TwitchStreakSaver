@@ -1,109 +1,6 @@
 use super::*;
 
 impl Dashboard {
-    pub(super) fn start_twitch_connection(&mut self) {
-        if let Some(cancel) = self.twitch_cancel.take() {
-            cancel.store(true, Ordering::Release);
-        }
-        let now = Instant::now();
-        if self.points_events_connected {
-            self.note_points_events_disconnection(now);
-        } else {
-            self.note_points_events_gap(now);
-        }
-        self.connection_generation = self.connection_generation.wrapping_add(1);
-        if let Some(bridge) = &self.browser_bridge {
-            bridge.set_recovery_generation(self.connection_generation);
-        }
-        self.pending_reload_command = None;
-        self.pending_manual_open_command = None;
-        let generation = self.connection_generation;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let updates = self.twitch_sender.clone();
-        self.connection_status = TwitchConnectionStatus::Connecting;
-        self.points_events_error = None;
-        self.twitch_user_id = None;
-        self.connection_error = None;
-        self.twitch_network_errors.clear();
-        self.twitch_network_unavailable = false;
-        self.live_channel_ids.clear();
-        self.twitch_cancel = Some(cancel);
-
-        if let Err(error) = thread::Builder::new()
-            .name("twitch-connection".to_owned())
-            .spawn(move || {
-                twitch_api::connection::run_connection(worker_cancel, generation, updates)
-            })
-        {
-            self.twitch_cancel = None;
-            self.connection_status = TwitchConnectionStatus::Disconnected;
-            self.connection_error = Some(format!("Could not start Twitch connection: {error}"));
-        }
-    }
-    pub(super) fn disconnect_twitch(&mut self) {
-        if let Some(cancel) = self.twitch_cancel.take() {
-            cancel.store(true, Ordering::Release);
-        }
-        self.note_points_events_disconnection(Instant::now());
-        self.connection_generation = self.connection_generation.wrapping_add(1);
-        if let Some(bridge) = &self.browser_bridge {
-            bridge.set_recovery_generation(self.connection_generation);
-        }
-        self.connection_status = TwitchConnectionStatus::Disconnected;
-        self.twitch_network_unavailable = false;
-        self.twitch_network_errors.clear();
-        self.reload_managed_player_tabs_pending = false;
-        self.pending_manual_open = false;
-        self.pending_manual_open_inventory_wait_since = None;
-        self.pending_reload_command = None;
-        self.pending_manual_open_command = None;
-        self.points_events_connected = false;
-        self.twitch_user_id = None;
-        self.points_events_error = None;
-        self.live_channel_ids.clear();
-        self.streak_completed.clear();
-        self.notified_streak_channels.clear();
-        self.queue_planner = QueuePlanner::default();
-        self.points_rotation = StreamRotation::default();
-        self.streak_rotation = StreamRotation::default();
-        let close_ids = self
-            .auto_open_channels
-            .difference(&self.manual_open_channels)
-            .cloned()
-            .collect::<Vec<_>>();
-        self.auto_open_channels.clear();
-        self.pending_stream_switch = None;
-        self.auto_open_retry_after.clear();
-        if !close_ids.is_empty() {
-            self.send_bridge_command(BrowserCommand::CloseChannels {
-                channel_ids: close_ids,
-            });
-        }
-        self.connection_error = twitch_api::oauth::clear_saved_token().err();
-    }
-
-    pub(super) fn cancel_twitch_connection(&mut self) {
-        if let Some(cancel) = self.twitch_cancel.take() {
-            cancel.store(true, Ordering::Release);
-        }
-        self.connection_generation = self.connection_generation.wrapping_add(1);
-        if let Some(bridge) = &self.browser_bridge {
-            bridge.set_recovery_generation(self.connection_generation);
-        }
-        self.connection_status = TwitchConnectionStatus::Disconnected;
-        self.note_points_events_disconnection(Instant::now());
-        self.points_events_error = None;
-        self.twitch_user_id = None;
-        self.twitch_network_unavailable = false;
-        self.reload_managed_player_tabs_pending = false;
-        self.pending_manual_open = false;
-        self.pending_manual_open_inventory_wait_since = None;
-        self.pending_reload_command = None;
-        self.pending_manual_open_command = None;
-        self.connection_error = None;
-    }
-
     fn replace_followed_channels(
         &mut self,
         incoming: Vec<FollowedChannel>,
@@ -184,10 +81,42 @@ impl Dashboard {
             self.connection_error = None;
         }
     }
+    fn upsert_twitch_account(&mut self, account_id: &str, login: &str) {
+        if let Some(account) = self
+            .twitch_accounts
+            .iter_mut()
+            .find(|account| account.id == account_id)
+        {
+            account.login = login.to_owned();
+        } else {
+            self.twitch_accounts.push(TwitchAccount {
+                id: account_id.to_owned(),
+                login: login.to_owned(),
+            });
+        }
+    }
+
+    fn remember_twitch_account(&mut self, account_id: &str, login: &str) {
+        self.upsert_twitch_account(account_id, login);
+        self.selected_account_id = Some(account_id.to_owned());
+    }
 
     pub(super) fn poll_twitch_updates(&mut self) {
         while let Ok(update) = self.twitch_updates.try_recv() {
             match update {
+                TwitchUpdate::AccountSaved {
+                    generation,
+                    login,
+                    user_id,
+                } => {
+                    if generation == self.connection_generation {
+                        self.forgotten_twitch_account_ids.remove(&user_id);
+                        self.select_followed_channel_context(&user_id);
+                        self.remember_twitch_account(&user_id, &login);
+                    } else if !self.forgotten_twitch_account_ids.contains(&user_id) {
+                        self.upsert_twitch_account(&user_id, &login);
+                    }
+                }
                 TwitchUpdate::Connected {
                     generation,
                     login,
@@ -198,6 +127,7 @@ impl Dashboard {
                     self.note_twitch_network_fully_online();
                     self.twitch_baseline_confirmed_at = Some(Instant::now());
                     self.replace_followed_channels(channels, Some(&user_id));
+                    self.remember_twitch_account(&user_id, &login);
                     self.streak_completed
                         .retain(|channel_id, _| live_channel_ids.contains(channel_id));
                     self.notified_streak_channels

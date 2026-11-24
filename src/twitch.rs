@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use url::Url;
 mod api;
 pub mod connection;
+pub mod credential_store;
 pub mod oauth;
 
 const CLIENT_ID: &str = "phiay4sq36lfv9zu7cbqwz2ndnesfd8";
@@ -20,8 +21,6 @@ const VALIDATE_URL: &str = "https://id.twitch.tv/oauth2/validate";
 const FOLLOWED_URL: &str = "https://api.twitch.tv/helix/channels/followed";
 const STREAMS_URL: &str = "https://api.twitch.tv/helix/streams";
 const REQUIRED_SCOPE: &str = "user:read:follows";
-const KEYRING_SERVICE: &str = "Twitch Streak Saver";
-const KEYRING_ACCOUNT: &str = "twitch-access-token";
 const OAUTH_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -46,6 +45,11 @@ pub enum TwitchUpdateFailure {
 }
 
 pub enum TwitchUpdate {
+    AccountSaved {
+        generation: u64,
+        login: String,
+        user_id: String,
+    },
     Connected {
         generation: u64,
         login: String,

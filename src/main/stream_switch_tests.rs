@@ -6,7 +6,7 @@ use super::{
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboard {
+pub(super) fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboard {
     let mut new_streamer = FollowedChannel::new("new", "New Streamer");
     new_streamer.selection.streak = true;
     let (twitch_sender, twitch_updates) = std::sync::mpsc::channel();
@@ -49,6 +49,10 @@ fn dashboard_with_pending_stream_switch(source_state_available: bool) -> Dashboa
         ],
         followed_channels_by_account: HashMap::new(),
         followed_channels_account_id: Some("viewer-123".to_owned()),
+        twitch_accounts: Vec::new(),
+        selected_account_id: Some("viewer-123".to_owned()),
+        forgotten_twitch_account_ids: HashSet::new(),
+        pending_twitch_account_forget: None,
         followed_search: String::new(),
         started_at: Instant::now(),
         connection_status: TwitchConnectionStatus::Connected("test".to_owned()),
@@ -1890,6 +1894,99 @@ fn browser_points_events_require_the_connected_app_account() {
 }
 
 #[test]
+fn authorized_account_is_remembered_before_channel_baseline_finishes() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    dashboard.connection_status = TwitchConnectionStatus::Connecting;
+    dashboard.selected_account_id = None;
+    dashboard.twitch_accounts.clear();
+    let mut account_b_channel = FollowedChannel::new("test-channel", "Test Channel");
+    account_b_channel.selection.points = true;
+    account_b_channel.unmuted = true;
+    dashboard
+        .followed_channels_by_account
+        .insert("viewer-456".to_owned(), vec![account_b_channel.clone()]);
+    dashboard
+        .twitch_sender
+        .send(TwitchUpdate::AccountSaved {
+            generation: dashboard.connection_generation,
+            login: "viewer-b".to_owned(),
+            user_id: "viewer-456".to_owned(),
+        })
+        .unwrap();
+
+    dashboard.poll_twitch_updates();
+
+    assert_eq!(dashboard.selected_account_id.as_deref(), Some("viewer-456"));
+    assert_eq!(dashboard.twitch_accounts.len(), 1);
+    assert_eq!(dashboard.twitch_accounts[0].login, "viewer-b");
+    assert_eq!(
+        dashboard.followed_channels_account_id.as_deref(),
+        Some("viewer-456")
+    );
+    assert_eq!(dashboard.channels, vec![account_b_channel]);
+    assert!(matches!(
+        dashboard.connection_status,
+        TwitchConnectionStatus::Connecting
+    ));
+}
+
+#[test]
+fn stale_account_saved_update_adds_account_without_switching_active_account() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let active_account_id = dashboard.selected_account_id.clone();
+    dashboard.twitch_accounts.clear();
+    dashboard
+        .twitch_sender
+        .send(TwitchUpdate::AccountSaved {
+            generation: dashboard.connection_generation.wrapping_add(1),
+            login: "viewer-b".to_owned(),
+            user_id: "viewer-456".to_owned(),
+        })
+        .unwrap();
+
+    dashboard.poll_twitch_updates();
+
+    assert_eq!(dashboard.selected_account_id, active_account_id);
+    assert_eq!(dashboard.twitch_accounts.len(), 1);
+    assert_eq!(dashboard.twitch_accounts[0].login, "viewer-b");
+}
+
+#[test]
+fn stale_account_saved_update_cannot_restore_a_forgotten_account() {
+    let mut dashboard = dashboard_with_pending_stream_switch(true);
+    let active_account_id = dashboard.selected_account_id.clone();
+    let forgotten_id = "viewer-456";
+    dashboard
+        .twitch_accounts
+        .push(twitch_streak_saver::model::TwitchAccount {
+            id: forgotten_id.to_owned(),
+            login: "viewer-b".to_owned(),
+        });
+    dashboard
+        .forgotten_twitch_account_ids
+        .insert(forgotten_id.to_owned());
+    dashboard
+        .twitch_accounts
+        .retain(|account| account.id != forgotten_id);
+    dashboard
+        .twitch_sender
+        .send(TwitchUpdate::AccountSaved {
+            generation: dashboard.connection_generation.wrapping_add(1),
+            login: "viewer-b".to_owned(),
+            user_id: forgotten_id.to_owned(),
+        })
+        .unwrap();
+
+    dashboard.poll_twitch_updates();
+
+    assert_eq!(dashboard.selected_account_id, active_account_id);
+    assert!(dashboard
+        .twitch_accounts
+        .iter()
+        .all(|account| account.id != forgotten_id));
+}
+
+#[test]
 fn account_switch_cleans_up_removed_followed_channel_state() {
     let mut dashboard = dashboard_with_pending_stream_switch(true);
     dashboard
@@ -1932,6 +2029,11 @@ fn account_switch_cleans_up_removed_followed_channel_state() {
         .find(|channel| channel.id == "new")
         .unwrap();
     assert!(previous_account_channel.selection.streak);
+    assert_eq!(dashboard.selected_account_id.as_deref(), Some("viewer-456"));
+    assert_eq!(dashboard.twitch_accounts.len(), 1);
+    assert_eq!(dashboard.twitch_accounts[0].login, "viewer-b");
+    let preferences = dashboard.preferences();
+    assert_eq!(preferences.active_account_id.as_deref(), Some("viewer-456"));
 }
 
 #[test]
