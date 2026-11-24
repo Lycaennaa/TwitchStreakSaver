@@ -70,4 +70,4 @@ jobs:
       - name: Package Windows with native MSVC and static CRT
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
-        run: py -3.14 scripts/package_windows.py
+        run: py -3 scripts/package_windows.py

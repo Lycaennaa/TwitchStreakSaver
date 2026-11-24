@@ -184,8 +184,11 @@ def main() -> None:
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as package:
             for relative in sorted(files):
                 package.write(staging / relative, arcname=relative.as_posix())
-            if package.testzip() is not None:
-                raise ValueError(f"{browser} extension archive failed its integrity check")
+            bad_entry = package.testzip()
+            if bad_entry is not None:
+                raise ValueError(
+                    f"{browser} extension archive failed its integrity check: {bad_entry}"
+                )
         print(f"Packaged {browser} extension: {archive}")
 
 
